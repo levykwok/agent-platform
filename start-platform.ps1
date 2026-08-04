@@ -1,3 +1,4 @@
+[CmdletBinding(PositionalBinding = $false)]
 param(
     [switch]$SkipInstall,
     [switch]$SkipFrontendInstall,
@@ -6,6 +7,7 @@ param(
     [switch]$NoStopExisting,
     [switch]$SkipDemoMcp,
     [switch]$ForceInstall,
+    [switch]$Stop,
     [switch]$SkipAgentScopeBootstrap,
     [string]$Workspace = "",
     [string]$AgentScopeArchive = "",
@@ -31,6 +33,9 @@ $FrontendDir = Join-Path $RepoRoot "frontend\live-console"
 $WorkspaceDir = Join-Path $RepoRoot "workspace"
 $DemoMcpScript = Join-Path $BackendDir "mcp-servers\platform-demo\server.mjs"
 $LogDir = Join-Path $RepoRoot "logs\platform"
+$RuntimeStateDir = Join-Path $RepoRoot ".run"
+$PidFile = Join-Path $RuntimeStateDir "platform-pids.json"
+$script:StartedProcesses = @()
 $env:NO_COLOR = "1"
 $env:FORCE_COLOR = "0"
 $env:NODE_DISABLE_COLORS = "1"
@@ -111,6 +116,50 @@ function Stop-PortListener {
     }
 }
 
+function Stop-ProcessTree {
+    param([int]$ProcessId)
+
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ProcessId" -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty ProcessId)
+    foreach ($childId in $children) {
+        Stop-ProcessTree -ProcessId ([int]$childId)
+    }
+
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($process -and $process.Id -ne $PID) {
+        Write-Host "[platform] Stop tracked process: PID $($process.Id) ($($process.ProcessName))"
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Stop-TrackedProcesses {
+    if (-not (Test-Path -LiteralPath $PidFile)) {
+        return
+    }
+
+    try {
+        $tracked = @(Get-Content -LiteralPath $PidFile -Raw | ConvertFrom-Json)
+        foreach ($entry in $tracked) {
+            if ($entry.pid) {
+                Stop-ProcessTree -ProcessId ([int]$entry.pid)
+            }
+        }
+    } catch {
+        Write-Warning "Unable to read tracked process state: $PidFile"
+    }
+
+    Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+}
+
+function Stop-PlatformServices {
+    Stop-TrackedProcesses
+    Stop-PortListener -Port $BackendPort -Label "backend"
+    Stop-PortListener -Port $FrontendPort -Label "frontend"
+    Stop-PortListener -Port $DemoMcpHttpPort -Label "demo MCP streamable-http"
+    Stop-PortListener -Port $DemoMcpSsePort -Label "demo MCP sse"
+    Write-Host "[platform] Stop command completed."
+}
+
 function Start-PlatformProcess {
     param(
         [string]$Title,
@@ -125,10 +174,12 @@ function Start-PlatformProcess {
 
     if ($VisibleWindows) {
         $visibleArgs = @($invocation.ArgumentList)
-        Start-Process `
+        $process = Start-Process `
             -FilePath $invocation.FilePath `
             -ArgumentList $visibleArgs `
-            -WorkingDirectory $WorkingDirectory
+            -WorkingDirectory $WorkingDirectory `
+            -PassThru
+        $script:StartedProcesses += [pscustomobject]@{ pid = $process.Id; title = $Title }
         return
     }
 
@@ -138,13 +189,15 @@ function Start-PlatformProcess {
     Write-Host "[platform]   err: $errorLogPath"
     $standardArgs = @($invocation.ArgumentList)
 
-    Start-Process `
+    $process = Start-Process `
         -FilePath $invocation.FilePath `
         -ArgumentList $standardArgs `
         -WorkingDirectory $WorkingDirectory `
         -RedirectStandardOutput $logPath `
         -RedirectStandardError $errorLogPath `
-        -WindowStyle Hidden
+        -WindowStyle Hidden `
+        -PassThru
+    $script:StartedProcesses += [pscustomobject]@{ pid = $process.Id; title = $Title }
 }
 
 function Test-MavenArtifact {
@@ -165,6 +218,11 @@ function Test-AgentScopeArtifactsInstalled {
         -and (Test-MavenArtifact -MavenRepository $MavenRepository -GroupPath "io\agentscope" -ArtifactId "agentscope-extensions-rag-simple" -Version $Revision)
 }
 
+if ($Stop) {
+    Stop-PlatformServices
+    exit 0
+}
+
 Require-Command "java"
 Require-Command "mvn"
 $WorkspaceDir = if ($Workspace -and $Workspace.Trim()) {
@@ -180,6 +238,7 @@ $MavenRepository = if ($MavenRepository -and $MavenRepository.Trim()) {
 }
 New-Item -ItemType Directory -Path $WorkspaceDir -Force | Out-Null
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+New-Item -ItemType Directory -Path $RuntimeStateDir -Force | Out-Null
 $env:AGENT_PLATFORM_WORKSPACE = $WorkspaceDir
 $env:AGENT_PLATFORM_PERSISTENCE_MODE = $PersistenceMode.ToLowerInvariant()
 if ($SqliteUrl -and $SqliteUrl.Trim()) {
@@ -334,6 +393,10 @@ if (-not $BackendOnly) {
         -CommandFilePath $npmPath `
         -CommandArgs $frontendCommandArgs `
         -LogName "frontend.log"
+}
+
+if ($script:StartedProcesses.Count -gt 0) {
+    $script:StartedProcesses | ConvertTo-Json | Set-Content -LiteralPath $PidFile -Encoding UTF8
 }
 
 Write-Host ""

@@ -2,6 +2,10 @@ target/
 dist/
 dist-release/
 logs/
+.run/
+*.db
+*.db-shm
+*.db-wal
 workspace/*.db
 workspace/*.db-shm
 workspace/*.db-wal
