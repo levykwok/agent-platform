@@ -64,8 +64,8 @@ const runtimeMemoryEntries = computed(() => {
   let inManagedBlock = false
   return memoryMd.value.split(/\r?\n/).flatMap((line) => {
     const trimmed = line.trim()
-    if (trimmed === '<!-- company-platform-memory:start -->') { inManagedBlock = true; return [] }
-    if (trimmed === '<!-- company-platform-memory:end -->') { inManagedBlock = false; return [] }
+    if (trimmed === '<!-- agent-platform-memory:start -->') { inManagedBlock = true; return [] }
+    if (trimmed === '<!-- agent-platform-memory:end -->') { inManagedBlock = false; return [] }
     if (inManagedBlock || !trimmed.startsWith('- ')) return []
     const content = trimmed.slice(2).trim()
     return content ? [content] : []

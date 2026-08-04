@@ -1,7 +1,7 @@
 services:
   qdrant:
     image: qdrant/qdrant:v1.18.2
-    container_name: company-platform-qdrant
+    container_name: agent-platform-qdrant
     restart: unless-stopped
     ports:
       - "6333:6333"

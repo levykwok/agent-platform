@@ -24,7 +24,7 @@ if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
 }
 
 $repoPath = (Resolve-Path $RepoRoot).Path
-$outPath = Join-Path $OutRoot 'company-platform'
+$outPath = Join-Path $OutRoot 'agent-platform'
 
 if ($CleanBuild -and (Test-Path $outPath)) {
     Remove-Item -Path $outPath -Recurse -Force
@@ -32,29 +32,29 @@ if ($CleanBuild -and (Test-Path $outPath)) {
 New-Item -ItemType Directory -Path $outPath -Force | Out-Null
 
 if (-not $SkipBuild) {
-    Write-Host '[1/4] build company platform ...'
+    Write-Host '[1/4] build agent platform ...'
     & mvn -f (Join-Path $repoPath 'pom.xml') clean package -DskipTests
     if ($LASTEXITCODE -ne 0) {
         throw "mvn build failed: $LASTEXITCODE"
     }
 }
 
-$jarPath = Get-ChildItem -Path (Join-Path $repoPath 'target') -Filter 'company-platform-*.jar' -File |
+$jarPath = Get-ChildItem -Path (Join-Path $repoPath 'target') -Filter 'agent-platform-*.jar' -File |
     Where-Object { $_.Name -notlike '*-plain.jar' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 if (-not $jarPath) {
-    throw 'build output not found: target/company-platform-*.jar'
+    throw 'build output not found: target/agent-platform-*.jar'
 }
 
 Write-Host '[2/4] copy runtime files ...'
 Copy-Item -Path $jarPath.FullName -Destination (Join-Path $outPath 'app.jar') -Force
 Copy-WorkspaceTemplate -SourceDir (Join-Path $repoPath 'workspace') -TargetDir (Join-Path $outPath 'workspace')
-Copy-Item -Path (Join-Path $repoPath 'scripts\start-company-platform.template.ps1') -Destination (Join-Path $outPath 'start.ps1') -Force
+Copy-Item -Path (Join-Path $repoPath 'scripts\start-agent-platform.template.ps1') -Destination (Join-Path $outPath 'start.ps1') -Force
 Copy-Item -Path (Join-Path $repoPath 'scripts\start.template.bat') -Destination (Join-Path $outPath 'start.bat') -Force
 
 $runDoc = @"
-# 运行说明（Company Platform）
+# 运行说明（Agent Platform）
 
 powershell -File .\start.ps1
 start.bat
@@ -63,7 +63,7 @@ start.bat
 .\start.ps1 -Port 9090
 
 关键环境变量（可选）
-- COMPANY_PLATFORM_WORKSPACE：默认指向 ./workspace
+- AGENT_PLATFORM_WORKSPACE：默认指向 ./workspace
 "@
 Set-Content -Path (Join-Path $outPath 'README.md') -Value $runDoc -Encoding UTF8
 

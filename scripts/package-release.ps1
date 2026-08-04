@@ -18,7 +18,7 @@ function Copy-DirectoryContents {
 $repoPath = (Resolve-Path $RepoRoot).Path
 $outPath = [System.IO.Path]::GetFullPath($OutRoot)
 $platformVersion = ([xml](Get-Content -Raw -LiteralPath (Join-Path $repoPath "pom.xml"))).project.version
-$releaseName = "company-agent-platform-$platformVersion"
+$releaseName = "agent-platform-$platformVersion"
 $stage = Join-Path $outPath $releaseName
 $mavenStage = Join-Path $outPath "agentscope-maven-repo-$Revision"
 $runtimeStage = Join-Path $stage "runtime"
@@ -42,7 +42,7 @@ if (-not $SkipBuild) {
     Write-Host "[1/5] Skip platform build"
 }
 
-$jar = Get-ChildItem -LiteralPath (Join-Path $repoPath "target") -Filter "company-platform-*.jar" -File |
+$jar = Get-ChildItem -LiteralPath (Join-Path $repoPath "target") -Filter "agent-platform-*.jar" -File |
     Where-Object { $_.Name -notlike "*-plain.jar" } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
@@ -57,7 +57,7 @@ if ($LASTEXITCODE -ne 0 -or -not ($jarEntries | Select-String '^BOOT-INF/lib/'))
 Write-Host "[2/5] Stage platform runtime ..."
 New-Item -ItemType Directory -Path $runtimeStage -Force | Out-Null
 Copy-Item -LiteralPath $jar.FullName -Destination (Join-Path $runtimeStage "app.jar") -Force
-Copy-Item -LiteralPath (Join-Path $repoPath "scripts\start-company-platform.template.ps1") -Destination (Join-Path $runtimeStage "start.ps1") -Force
+Copy-Item -LiteralPath (Join-Path $repoPath "scripts\start-agent-platform.template.ps1") -Destination (Join-Path $runtimeStage "start.ps1") -Force
 Copy-Item -LiteralPath (Join-Path $repoPath "scripts\start.template.bat") -Destination (Join-Path $runtimeStage "start.bat") -Force
 if (Test-Path -LiteralPath (Join-Path $repoPath "workspace\skills")) {
     Copy-DirectoryContents -Source (Join-Path $repoPath "workspace\skills") -Destination (Join-Path $runtimeStage "workspace\skills")
@@ -67,7 +67,7 @@ if (Test-Path -LiteralPath (Join-Path $repoPath "workspace\tools")) {
 }
 
 $runtimeReadme = @"
-# Company Agent Platform runtime
+# Agent Platform runtime
 
 powershell -File .\start.ps1
 start.bat
@@ -106,13 +106,13 @@ Set-Content -LiteralPath (Join-Path $mavenStage "AGENTSCOPE-NOTICE.txt") -Value 
 AgentScope Java
 Source: https://github.com/agentscope-ai/agentscope-java
 License: Apache License 2.0
-This archive contains AgentScope Maven artifacts used by Company Agent Platform.
+This archive contains AgentScope Maven artifacts used by Agent Platform.
 "@ -Encoding UTF8
 Copy-Item -LiteralPath $licenseFile -Destination (Join-Path $runtimeStage "AGENTSCOPE-LICENSE-APACHE-2.0.txt") -Force
 Copy-Item -LiteralPath (Join-Path $mavenStage "AGENTSCOPE-NOTICE.txt") -Destination (Join-Path $runtimeStage "AGENTSCOPE-NOTICE.txt") -Force
 
 $releaseReadme = @"
-# Company Agent Platform release
+# Agent Platform release
 
 ## Runtime
 

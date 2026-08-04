@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { currentDomain, currentOrgId, makeHeaders, readJson, type JsonMap } from '../lib/platformApi'
 import { notifyError, notifySuccess } from '../stores/notify'
@@ -923,7 +923,7 @@ onMounted(() => {
       <div class="skill-dialog">
         <div class="skill-dialog-head"><div class="skill-dialog-title">{{ editingSkillId ? '编辑 Skill' : '创建 Skill' }}</div><button class="btn btn-ghost btn-sm" @click="skillEditorOpen = false">关闭</button></div>
         <div class="skill-dialog-body">
-          <div class="field"><label>Skill ID</label><input v-model="skillForm.skill_id" :disabled="Boolean(editingSkillId)" placeholder="company-doc-skill" /></div>
+          <div class="field"><label>Skill ID</label><input v-model="skillForm.skill_id" :disabled="Boolean(editingSkillId)" placeholder="agent-doc-skill" /></div>
           <div class="field"><label>名称</label><input v-model="skillForm.name" placeholder="默认同 Skill ID 或 SKILL.md name" /></div>
           <div class="field"><label>业务域</label><select v-model="skillForm.source"><option v-for="d in domainOptions" :key="String(d.domain)" :value="d.domain">{{ d.display_name || d.domain }}</option></select></div>
           <div class="field"><label>描述</label><textarea v-model="skillForm.description" rows="3" placeholder="手写创建时必填；上传包时不填则使用 SKILL.md description" /></div>

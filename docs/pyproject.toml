@@ -1,5 +1,5 @@
 [project]
-name = "company-agent-platform-docs"
+name = "agent-platform-docs"
 version = "0.1.0"
 description = "AI Agent Platform user documentation"
 readme = "README.md"

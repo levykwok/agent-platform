@@ -5,7 +5,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 
 const PROTOCOL_VERSION = '2025-11-25';
-const SERVER_INFO = { name: 'company-platform-demo-mcp', version: '0.3.0' };
+const SERVER_INFO = { name: 'agent-platform-demo-mcp', version: '0.3.0' };
 
 const TOOLSETS = {
   stdio: [
@@ -260,7 +260,7 @@ async function handleJsonRpc(request) {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
-        instructions: 'Demo MCP server for the company AgentScope platform.'
+        instructions: 'Demo MCP server for the agent platform.'
       });
     }
     if (method === 'tools/list') {
