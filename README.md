@@ -54,6 +54,14 @@ mvn clean package -DskipTests
 .\start-platform.ps1
 ```
 
+停止后端、前端和 Demo MCP 服务：
+
+```powershell
+.\start-platform.ps1 -Stop
+# 或
+.\stop-platform.ps1
+```
+
 平台业务代码建议放到：
 - `io.agent.platform.agent`：Agent 组装与编排
 - `io.agent.platform.web`：HTTP/API 控制层
