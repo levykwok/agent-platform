@@ -1,18 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Copyright 2026 by the company contributors.
+  Copyright 2026 by the Agent Platform contributors.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.company.platform</groupId>
-    <artifactId>company-platform</artifactId>
+    <groupId>io.agent.platform</groupId>
+    <artifactId>agent-platform</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <name>Company Platform - AgentScope Service</name>
+    <name>Agent Platform - AgentScope Service</name>
 
     <properties>
         <spring.boot.version>4.0.4</spring.boot.version>
@@ -111,7 +111,7 @@
                     </execution>
                 </executions>
                 <configuration>
-                    <mainClass>com.company.platform.PlatformApplication</mainClass>
+                    <mainClass>io.agent.platform.PlatformApplication</mainClass>
                 </configuration>
             </plugin>
         </plugins>

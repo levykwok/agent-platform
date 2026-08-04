@@ -19,7 +19,7 @@ if (-not [string]::IsNullOrWhiteSpace($ArchivePath) -and -not [string]::IsNullOr
 $MavenRepository = [System.IO.Path]::GetFullPath($MavenRepository)
 New-Item -ItemType Directory -Path $MavenRepository -Force | Out-Null
 
-$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("company-platform-agentscope-" + [guid]::NewGuid().ToString("N"))
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("agent-platform-agentscope-" + [guid]::NewGuid().ToString("N"))
 $archive = $ArchivePath
 try {
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null

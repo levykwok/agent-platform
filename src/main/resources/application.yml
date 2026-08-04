@@ -1,10 +1,10 @@
 spring:
   application:
-    name: company-platform
+    name: agent-platform
   codec:
     # Image uploads are sent as base64 in the agent-run and model-test JSON body.
     # DashScope accepts base64 images below 7 MB; 12 MB covers their encoded form.
-    max-in-memory-size: ${COMPANY_PLATFORM_MAX_REQUEST_SIZE:12MB}
+    max-in-memory-size: ${AGENT_PLATFORM_MAX_REQUEST_SIZE:12MB}
 
 server:
   port: 8080
@@ -17,53 +17,53 @@ logging:
     io.agentscope.harness.agent.tools.McpServerRegistrar: WARN
     io.agentscope.core.skill.repository.FileSystemSkillRepository: WARN
 
-company:
+agent:
   platform:
     api:
       external:
         # External invocation is opt-in. Configure a comma-separated API key list.
-        enabled: ${COMPANY_PLATFORM_EXTERNAL_API_ENABLED:false}
-        api-keys: ${COMPANY_PLATFORM_EXTERNAL_API_KEYS:}
-    workspace: ${COMPANY_PLATFORM_WORKSPACE:${user.dir}/workspace}
+        enabled: ${AGENT_PLATFORM_EXTERNAL_API_ENABLED:false}
+        api-keys: ${AGENT_PLATFORM_EXTERNAL_API_KEYS:}
+    workspace: ${AGENT_PLATFORM_WORKSPACE:${user.dir}/workspace}
     persistence:
-      mode: ${COMPANY_PLATFORM_PERSISTENCE_MODE:sqlite}
+      mode: ${AGENT_PLATFORM_PERSISTENCE_MODE:sqlite}
       sqlite:
-        url: ${COMPANY_PLATFORM_SQLITE_URL:jdbc:sqlite:${company.platform.workspace}/platform-platform.db}
-        config-table: ${COMPANY_PLATFORM_SQLITE_CONFIG_TABLE:platform_config}
-        session-table-prefix: ${COMPANY_PLATFORM_SQLITE_SESSION_TABLE_PREFIX:platform_}
+        url: ${AGENT_PLATFORM_SQLITE_URL:jdbc:sqlite:${agent.platform.workspace}/platform-platform.db}
+        config-table: ${AGENT_PLATFORM_SQLITE_CONFIG_TABLE:platform_config}
+        session-table-prefix: ${AGENT_PLATFORM_SQLITE_SESSION_TABLE_PREFIX:platform_}
     sandbox:
       # Enable only on hosts where Docker is running. When enabled, Harness runs Skill scripts
       # in an isolated container and automatically exposes its `execute` tool to the Agent.
-      enabled: ${COMPANY_PLATFORM_SANDBOX_ENABLED:false}
-      image: ${COMPANY_PLATFORM_SANDBOX_IMAGE:python:3.12-slim}
-      memory-size-bytes: ${COMPANY_PLATFORM_SANDBOX_MEMORY_SIZE_BYTES:536870912}
-      cpu-count: ${COMPANY_PLATFORM_SANDBOX_CPU_COUNT:1}
+      enabled: ${AGENT_PLATFORM_SANDBOX_ENABLED:false}
+      image: ${AGENT_PLATFORM_SANDBOX_IMAGE:python:3.12-slim}
+      memory-size-bytes: ${AGENT_PLATFORM_SANDBOX_MEMORY_SIZE_BYTES:536870912}
+      cpu-count: ${AGENT_PLATFORM_SANDBOX_CPU_COUNT:1}
     mcp:
       discovery:
-        enabled: ${COMPANY_PLATFORM_MCP_DISCOVERY_ENABLED:true}
-        interval-ms: ${COMPANY_PLATFORM_MCP_DISCOVERY_INTERVAL_MS:120000}
-        initial-delay-ms: ${COMPANY_PLATFORM_MCP_DISCOVERY_INITIAL_DELAY_MS:5000}
-        cache-file: ${COMPANY_PLATFORM_MCP_DISCOVERY_CACHE:${company.platform.workspace}/cache/mcp-discovery.json}
+        enabled: ${AGENT_PLATFORM_MCP_DISCOVERY_ENABLED:true}
+        interval-ms: ${AGENT_PLATFORM_MCP_DISCOVERY_INTERVAL_MS:120000}
+        initial-delay-ms: ${AGENT_PLATFORM_MCP_DISCOVERY_INITIAL_DELAY_MS:5000}
+        cache-file: ${AGENT_PLATFORM_MCP_DISCOVERY_CACHE:${agent.platform.workspace}/cache/mcp-discovery.json}
     models:
-      config: ${COMPANY_PLATFORM_MODELS_CONFIG:file:${company.platform.workspace}/models.yml}
+      config: ${AGENT_PLATFORM_MODELS_CONFIG:file:${agent.platform.workspace}/models.yml}
     providers:
-      config: ${COMPANY_PLATFORM_PROVIDERS_CONFIG:file:${company.platform.workspace}/providers.yml}
+      config: ${AGENT_PLATFORM_PROVIDERS_CONFIG:file:${agent.platform.workspace}/providers.yml}
     agents:
-      config: ${COMPANY_PLATFORM_AGENTS_CONFIG:file:${company.platform.workspace}/agents.yml}
+      config: ${AGENT_PLATFORM_AGENTS_CONFIG:file:${agent.platform.workspace}/agents.yml}
     tools:
-      config: ${COMPANY_PLATFORM_TOOLS_CONFIG:file:${company.platform.workspace}/tools.yml}
+      config: ${AGENT_PLATFORM_TOOLS_CONFIG:file:${agent.platform.workspace}/tools.yml}
     mcps:
-      config: ${COMPANY_PLATFORM_MCPS_CONFIG:file:${company.platform.workspace}/mcps.yml}
+      config: ${AGENT_PLATFORM_MCPS_CONFIG:file:${agent.platform.workspace}/mcps.yml}
     skills:
-      config: ${COMPANY_PLATFORM_SKILLS_CONFIG:file:${company.platform.workspace}/skills.yml}
+      config: ${AGENT_PLATFORM_SKILLS_CONFIG:file:${agent.platform.workspace}/skills.yml}
     rag:
       # Qdrant is optional at runtime: when it is unavailable the platform keeps the
       # deterministic lexical retrieval path so document upload and chat stay usable.
-      embedding-model: ${COMPANY_PLATFORM_RAG_EMBEDDING_MODEL:bge-m3}
+      embedding-model: ${AGENT_PLATFORM_RAG_EMBEDDING_MODEL:bge-m3}
       retrieve:
-        score-threshold: ${COMPANY_PLATFORM_RAG_SCORE_THRESHOLD:0.25}
+        score-threshold: ${AGENT_PLATFORM_RAG_SCORE_THRESHOLD:0.25}
       qdrant:
-        enabled: ${COMPANY_PLATFORM_QDRANT_ENABLED:true}
-        endpoint: ${COMPANY_PLATFORM_QDRANT_ENDPOINT:http://localhost:6333}
-        collection: ${COMPANY_PLATFORM_QDRANT_COLLECTION:platform_knowledge_chunks}
-        dimensions: ${COMPANY_PLATFORM_QDRANT_DIMENSIONS:1024}
+        enabled: ${AGENT_PLATFORM_QDRANT_ENABLED:true}
+        endpoint: ${AGENT_PLATFORM_QDRANT_ENDPOINT:http://localhost:6333}
+        collection: ${AGENT_PLATFORM_QDRANT_COLLECTION:platform_knowledge_chunks}
+        dimensions: ${AGENT_PLATFORM_QDRANT_DIMENSIONS:1024}

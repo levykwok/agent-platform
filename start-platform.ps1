@@ -180,10 +180,10 @@ $MavenRepository = if ($MavenRepository -and $MavenRepository.Trim()) {
 }
 New-Item -ItemType Directory -Path $WorkspaceDir -Force | Out-Null
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-$env:COMPANY_PLATFORM_WORKSPACE = $WorkspaceDir
-$env:COMPANY_PLATFORM_PERSISTENCE_MODE = $PersistenceMode.ToLowerInvariant()
+$env:AGENT_PLATFORM_WORKSPACE = $WorkspaceDir
+$env:AGENT_PLATFORM_PERSISTENCE_MODE = $PersistenceMode.ToLowerInvariant()
 if ($SqliteUrl -and $SqliteUrl.Trim()) {
-    $env:COMPANY_PLATFORM_SQLITE_URL = $SqliteUrl.Trim()
+    $env:AGENT_PLATFORM_SQLITE_URL = $SqliteUrl.Trim()
 }
 
 if (-not $BackendOnly) {
@@ -294,23 +294,23 @@ if (-not $FrontendOnly) {
     $backendCommandArgs = @(
         "-Dmaven.repo.local=$MavenRepository",
         "-DskipTests",
-        "-DCOMPANY_PLATFORM_PERSISTENCE_MODE=$($env:COMPANY_PLATFORM_PERSISTENCE_MODE)",
+        "-DAGENT_PLATFORM_PERSISTENCE_MODE=$($env:AGENT_PLATFORM_PERSISTENCE_MODE)",
         "-Dspring-boot.run.arguments=--server.port=$BackendPort",
         "org.springframework.boot:spring-boot-maven-plugin:4.0.4:run"
     )
-    if ($env:COMPANY_PLATFORM_PERSISTENCE_MODE -eq "sqlite" -and $env:COMPANY_PLATFORM_SQLITE_URL) {
+    if ($env:AGENT_PLATFORM_PERSISTENCE_MODE -eq "sqlite" -and $env:AGENT_PLATFORM_SQLITE_URL) {
         $backendCommandArgs =
             @(
                 "-Dmaven.repo.local=$MavenRepository",
                 "-DskipTests",
-                "-DCOMPANY_PLATFORM_PERSISTENCE_MODE=$($env:COMPANY_PLATFORM_PERSISTENCE_MODE)",
-                "-DCOMPANY_PLATFORM_SQLITE_URL=$($env:COMPANY_PLATFORM_SQLITE_URL)",
+                "-DAGENT_PLATFORM_PERSISTENCE_MODE=$($env:AGENT_PLATFORM_PERSISTENCE_MODE)",
+                "-DAGENT_PLATFORM_SQLITE_URL=$($env:AGENT_PLATFORM_SQLITE_URL)",
                 "-Dspring-boot.run.arguments=--server.port=$BackendPort",
                 "org.springframework.boot:spring-boot-maven-plugin:4.0.4:run"
             )
     }
     Start-PlatformProcess `
-        -Title "Company Platform Backend :$BackendPort" `
+        -Title "Agent Platform Backend :$BackendPort" `
         -WorkingDirectory $BackendDir `
         -CommandFilePath $backendMvnPath `
         -CommandArgs $backendCommandArgs `
@@ -329,7 +329,7 @@ if (-not $BackendOnly) {
         "$FrontendPort"
     )
     Start-PlatformProcess `
-        -Title "Company Platform Frontend :$FrontendPort" `
+        -Title "Agent Platform Frontend :$FrontendPort" `
         -WorkingDirectory $FrontendDir `
         -CommandFilePath $npmPath `
         -CommandArgs $frontendCommandArgs `
@@ -339,9 +339,9 @@ if (-not $BackendOnly) {
 Write-Host ""
 Write-Host "[platform] Startup commands dispatched."
 Write-Host "[platform] Workspace: $WorkspaceDir"
-Write-Host "[platform] PersistenceMode: $env:COMPANY_PLATFORM_PERSISTENCE_MODE"
-if ($env:COMPANY_PLATFORM_PERSISTENCE_MODE -eq "sqlite" -and $env:COMPANY_PLATFORM_SQLITE_URL) {
-    Write-Host "[platform] SQLite URL: $env:COMPANY_PLATFORM_SQLITE_URL"
+Write-Host "[platform] PersistenceMode: $env:AGENT_PLATFORM_PERSISTENCE_MODE"
+if ($env:AGENT_PLATFORM_PERSISTENCE_MODE -eq "sqlite" -and $env:AGENT_PLATFORM_SQLITE_URL) {
+    Write-Host "[platform] SQLite URL: $env:AGENT_PLATFORM_SQLITE_URL"
 }
 Write-Host "[platform] Logs:     $LogDir"
 if (-not $FrontendOnly) {

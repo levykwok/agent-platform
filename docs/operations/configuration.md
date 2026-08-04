@@ -9,7 +9,7 @@ workspace
 ```
 
 Spring Boot 单独启动时，`application.yml` 的默认回退值是当前进程目录下的
-`workspace`。推荐显式设置 `COMPANY_PLATFORM_WORKSPACE`，避免从不同目录启动时读到
+`workspace`。推荐显式设置 `AGENT_PLATFORM_WORKSPACE`，避免从不同目录启动时读到
 不同数据。
 
 主要配置文件：
@@ -30,15 +30,15 @@ Spring Boot 单独启动时，`application.yml` 的默认回退值是当前进�
 
 | 变量 | 用途 |
 |---|---|
-| `COMPANY_PLATFORM_WORKSPACE` | 平台工作区 |
-| `COMPANY_PLATFORM_PERSISTENCE_MODE` | `sqlite` 或 `file` |
-| `COMPANY_PLATFORM_SQLITE_URL` | 自定义 SQLite JDBC URL |
-| `COMPANY_PLATFORM_MODELS_CONFIG` | 模型配置位置 |
-| `COMPANY_PLATFORM_PROVIDERS_CONFIG` | 供应商配置位置 |
-| `COMPANY_PLATFORM_AGENTS_CONFIG` | Agent 配置位置 |
-| `COMPANY_PLATFORM_TOOLS_CONFIG` | Tools 配置位置 |
-| `COMPANY_PLATFORM_MCPS_CONFIG` | MCP 配置位置 |
-| `COMPANY_PLATFORM_SKILLS_CONFIG` | Skills 配置位置 |
+| `AGENT_PLATFORM_WORKSPACE` | 平台工作区 |
+| `AGENT_PLATFORM_PERSISTENCE_MODE` | `sqlite` 或 `file` |
+| `AGENT_PLATFORM_SQLITE_URL` | 自定义 SQLite JDBC URL |
+| `AGENT_PLATFORM_MODELS_CONFIG` | 模型配置位置 |
+| `AGENT_PLATFORM_PROVIDERS_CONFIG` | 供应商配置位置 |
+| `AGENT_PLATFORM_AGENTS_CONFIG` | Agent 配置位置 |
+| `AGENT_PLATFORM_TOOLS_CONFIG` | Tools 配置位置 |
+| `AGENT_PLATFORM_MCPS_CONFIG` | MCP 配置位置 |
+| `AGENT_PLATFORM_SKILLS_CONFIG` | Skills 配置位置 |
 
 ## 备份建议
 

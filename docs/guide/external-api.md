@@ -19,8 +19,8 @@
 外部 API 默认关闭。服务启动时配置环境变量：
 
 ```powershell
-$env:COMPANY_PLATFORM_EXTERNAL_API_ENABLED = "true"
-$env:COMPANY_PLATFORM_EXTERNAL_API_KEYS = "demo-key-change-me"
+$env:AGENT_PLATFORM_EXTERNAL_API_ENABLED = "true"
+$env:AGENT_PLATFORM_EXTERNAL_API_KEYS = "demo-key-change-me"
 ```
 
 多个 Key 使用英文逗号分隔。调用方可以使用以下任一种请求头：

@@ -30,11 +30,11 @@
 ## Skill 脚本沙箱
 
 平台可使用 AgentScope 的 Docker 沙箱运行 Skill 包中的脚本。开启
-`COMPANY_PLATFORM_SANDBOX_ENABLED=true` 后，每个会话在独立的 Docker 容器中执行，
+`AGENT_PLATFORM_SANDBOX_ENABLED=true` 后，每个会话在独立的 Docker 容器中执行，
 默认镜像为 `python:3.12-slim`，网络关闭、内存限制为 512 MB、CPU 限制为 1 核，且不暴露
 宿主机端口。Harness 会自动投影 Skill 文件并向 Agent 提供 `execute` 工具；未开启时，平台
 不会降级为宿主机 shell 执行。
 
-启动前需确认 `docker info` 成功；可通过 `COMPANY_PLATFORM_SANDBOX_IMAGE`、
-`COMPANY_PLATFORM_SANDBOX_MEMORY_SIZE_BYTES` 和 `COMPANY_PLATFORM_SANDBOX_CPU_COUNT`
+启动前需确认 `docker info` 成功；可通过 `AGENT_PLATFORM_SANDBOX_IMAGE`、
+`AGENT_PLATFORM_SANDBOX_MEMORY_SIZE_BYTES` 和 `AGENT_PLATFORM_SANDBOX_CPU_COUNT`
 调整镜像与资源限制。

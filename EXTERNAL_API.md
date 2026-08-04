@@ -8,8 +8,8 @@ platform frontend compatibility endpoints.
 Enable it with environment variables:
 
 ```powershell
-$env:COMPANY_PLATFORM_EXTERNAL_API_ENABLED = "true"
-$env:COMPANY_PLATFORM_EXTERNAL_API_KEYS = "demo-key-change-me"
+$env:AGENT_PLATFORM_EXTERNAL_API_ENABLED = "true"
+$env:AGENT_PLATFORM_EXTERNAL_API_KEYS = "demo-key-change-me"
 ```
 
 Multiple keys may be separated by commas. Callers send either
