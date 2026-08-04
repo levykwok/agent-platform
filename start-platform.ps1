@@ -6,7 +6,11 @@ param(
     [switch]$NoStopExisting,
     [switch]$SkipDemoMcp,
     [switch]$ForceInstall,
+    [switch]$SkipAgentScopeBootstrap,
     [string]$Workspace = "",
+    [string]$AgentScopeArchive = "",
+    [string]$AgentScopeArchiveUrl = "",
+    [string]$MavenRepository = "",
     [switch]$VisibleWindows,
     [int]$BackendPort = 8080,
     [int]$FrontendPort = 5173,
@@ -145,18 +149,20 @@ function Start-PlatformProcess {
 
 function Test-MavenArtifact {
     param(
+        [string]$MavenRepository,
         [string]$GroupPath,
         [string]$ArtifactId,
         [string]$Version
     )
 
-    $artifactPath = Join-Path $env:USERPROFILE ".m2\repository\$GroupPath\$ArtifactId\$Version\$ArtifactId-$Version.jar"
+    $artifactPath = Join-Path $MavenRepository "$GroupPath\$ArtifactId\$Version\$ArtifactId-$Version.jar"
     return Test-Path $artifactPath
 }
 
 function Test-AgentScopeArtifactsInstalled {
-    return (Test-MavenArtifact -GroupPath "io\agentscope" -ArtifactId "agentscope-harness" -Version $Revision) `
-        -and (Test-MavenArtifact -GroupPath "io\agentscope" -ArtifactId "agentscope-extensions-rag-simple" -Version $Revision)
+    param([string]$MavenRepository)
+    return (Test-MavenArtifact -MavenRepository $MavenRepository -GroupPath "io\agentscope" -ArtifactId "agentscope-harness" -Version $Revision) `
+        -and (Test-MavenArtifact -MavenRepository $MavenRepository -GroupPath "io\agentscope" -ArtifactId "agentscope-extensions-rag-simple" -Version $Revision)
 }
 
 Require-Command "java"
@@ -167,6 +173,11 @@ $WorkspaceDir = if ($Workspace -and $Workspace.Trim()) {
     $WorkspaceDir
 }
 $WorkspaceDir = [System.IO.Path]::GetFullPath($WorkspaceDir)
+$MavenRepository = if ($MavenRepository -and $MavenRepository.Trim()) {
+    [System.IO.Path]::GetFullPath($MavenRepository)
+} else {
+    Join-Path $env:USERPROFILE ".m2\repository"
+}
 New-Item -ItemType Directory -Path $WorkspaceDir -Force | Out-Null
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $env:COMPANY_PLATFORM_WORKSPACE = $WorkspaceDir
@@ -204,19 +215,47 @@ if (-not $NoStopExisting) {
 }
 
 if (-not $FrontendOnly) {
-    $BackendClassesDir = Join-Path $RepoRoot "target\classes"
-    if (Test-Path $BackendClassesDir) {
-        Write-Host "[platform] Cleaning backend compiled classes..."
-        Remove-Item -LiteralPath $BackendClassesDir -Recurse -Force
-    }
     if (-not $SkipInstall) {
-        if (-not (Test-AgentScopeArtifactsInstalled)) {
-            throw "AgentScope Maven artifacts are missing. Install agentscope-harness and agentscope-extensions-rag-simple first, or run with -SkipInstall after configuring a released version."
-        } else {
+        if (-not (Test-AgentScopeArtifactsInstalled -MavenRepository $MavenRepository)) {
+            if ($SkipAgentScopeBootstrap) {
+                throw "AgentScope Maven artifacts are missing in $MavenRepository and bootstrap was disabled."
+            }
+            if ([string]::IsNullOrWhiteSpace($AgentScopeArchive) -and [string]::IsNullOrWhiteSpace($AgentScopeArchiveUrl)) {
+                throw "AgentScope Maven artifacts are missing in $MavenRepository. Provide -AgentScopeArchive or -AgentScopeArchiveUrl, or install the artifacts first."
+            }
+            $bootstrap = Join-Path $RepoRoot "scripts\bootstrap-agentscope.ps1"
+            if (-not (Test-Path -LiteralPath $bootstrap)) {
+                throw "AgentScope bootstrap script not found: $bootstrap"
+            }
+            $bootstrapArgs = @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $bootstrap,
+                "-Revision",
+                $Revision,
+                "-MavenRepository",
+                $MavenRepository
+            )
+            if (-not [string]::IsNullOrWhiteSpace($AgentScopeArchive)) {
+                $bootstrapArgs += @("-ArchivePath", $AgentScopeArchive)
+            } else {
+                $bootstrapArgs += @("-ArchiveUrl", $AgentScopeArchiveUrl)
+            }
+            Write-Host "[platform] Bootstrapping AgentScope Maven artifacts..."
+            & powershell.exe @bootstrapArgs
+            if ($LASTEXITCODE -ne 0) {
+                throw "AgentScope dependency bootstrap failed: $LASTEXITCODE"
+            }
+        }
+        if (Test-AgentScopeArtifactsInstalled -MavenRepository $MavenRepository) {
             Write-Host "[platform] AgentScope artifacts already installed; skipping reactor install."
             if ($ForceInstall) {
                 Write-Host "[platform] -ForceInstall is ignored in the standalone repository; install AgentScope artifacts from the AgentScope source repository."
             }
+        } else {
+            throw "AgentScope Maven artifacts are still missing in $MavenRepository after bootstrap."
         }
     }
 }
@@ -253,6 +292,7 @@ if (-not $FrontendOnly) {
 
     $backendMvnPath = (Get-Command "mvn").Source
     $backendCommandArgs = @(
+        "-Dmaven.repo.local=$MavenRepository",
         "-DskipTests",
         "-DCOMPANY_PLATFORM_PERSISTENCE_MODE=$($env:COMPANY_PLATFORM_PERSISTENCE_MODE)",
         "-Dspring-boot.run.arguments=--server.port=$BackendPort",
@@ -261,6 +301,7 @@ if (-not $FrontendOnly) {
     if ($env:COMPANY_PLATFORM_PERSISTENCE_MODE -eq "sqlite" -and $env:COMPANY_PLATFORM_SQLITE_URL) {
         $backendCommandArgs =
             @(
+                "-Dmaven.repo.local=$MavenRepository",
                 "-DskipTests",
                 "-DCOMPANY_PLATFORM_PERSISTENCE_MODE=$($env:COMPANY_PLATFORM_PERSISTENCE_MODE)",
                 "-DCOMPANY_PLATFORM_SQLITE_URL=$($env:COMPANY_PLATFORM_SQLITE_URL)",
