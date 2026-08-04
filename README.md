@@ -1,6 +1,6 @@
 # Company Agent Platform
 
-这是公司智能体平台独立仓库。它使用已发布/已安装的 AgentScope Maven 包，不包含 AgentScope 框架源码：
+这是公司智能体平台独立仓库。它使用外部 AgentScope Maven 包，不包含 AgentScope 框架源码：
 
 - `src/main/java/com/company/platform`：平台后端
 - `frontend/live-console`：Vue 管理控制台
@@ -26,7 +26,27 @@ java -jar target/company-platform-*.jar
 mvn -pl agentscope-harness,agentscope-extensions/agentscope-extensions-rag/agentscope-extensions-rag-simple -am -DskipTests install
 ```
 
-也可以直接使用已经发布的 AgentScope 版本，修改 `pom.xml` 中的 `agentscope.version`。
+生产/演示环境不需要 AgentScope 源码。可以从平台项目的 Release 下载 Maven 依赖归档：
+
+```powershell
+$url = "https://github.com/levykwok/company-agent-platform/releases/latest/download/agentscope-maven-repo-2.0.0-SNAPSHOT.zip"
+.\scripts\bootstrap-agentscope.ps1 -ArchiveUrl $url
+mvn clean package -DskipTests
+```
+
+也可以让启动脚本在依赖缺失时自动下载并安装：
+
+```powershell
+.\start-platform.ps1 -AgentScopeArchiveUrl $url
+```
+
+维护者可用下面的命令生成 Release 附件。执行前需要先把对应版本的 AgentScope 包安装到本机 Maven 仓库：
+
+```powershell
+.\scripts\package-release.ps1 -Revision 2.0.0-SNAPSHOT -Clean
+```
+
+输出包括平台运行包和 `agentscope-maven-repo-2.0.0-SNAPSHOT.zip`。后者上传到项目 Release 即可，不依赖相邻的 AgentScope 源码目录。
 
 启动完整开发环境：
 

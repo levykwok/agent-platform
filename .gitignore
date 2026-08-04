@@ -1,5 +1,6 @@
 target/
 dist/
+dist-release/
 logs/
 workspace/*.db
 workspace/*.db-shm
