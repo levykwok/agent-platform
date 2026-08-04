@@ -1,0 +1,9 @@
+id: release-brief
+version: v1
+kind: business-workflow
+inputs: [review_report]
+outputs: [release_brief]
+requires: [docx_optional]
+smoke_test:
+  command: python3 {skill_root}/scripts/validate_release_brief.py --example
+  timeout_seconds: 30

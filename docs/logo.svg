@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AI Agent Platform">
+  <defs>
+    <linearGradient id="g" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#315efb"/>
+      <stop offset="1" stop-color="#7b43ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="16" fill="url(#g)"/>
+  <path d="M18 44 28.5 19h7L46 44h-7l-2-5H27l-2 5h-7Zm11-11h6l-3-8-3 8Z" fill="#fff"/>
+</svg>

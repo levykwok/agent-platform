@@ -1,0 +1,6 @@
+id: document-summary
+version: v1
+kind: document-analysis
+inputs: [document_context, user_question]
+outputs: [document_summary]
+requires: []

@@ -1,0 +1,9 @@
+id: product-review
+version: v1
+kind: business-workflow
+inputs: [requirement, visual_context]
+outputs: [review_report]
+requires: [vision_optional]
+smoke_test:
+  command: python3 {skill_root}/scripts/validate_brief.py --example
+  timeout_seconds: 30

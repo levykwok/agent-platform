@@ -1,0 +1,1369 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>AgentScope 平台配置台</title>
+        <style>
+            :root {
+                --bg1: #090d18;
+                --bg2: #0f172a;
+                --panel: rgba(15, 23, 42, 0.9);
+                --line: rgba(148, 163, 184, 0.28);
+                --text: #e2e8f0;
+                --muted: #94a3b8;
+                --ok: #22c55e;
+                --warn: #fbbf24;
+                --brand: #38bdf8;
+                --brand2: #60a5fa;
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                min-height: 100vh;
+                color: var(--text);
+                font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+                background: radial-gradient(circle at 8% 12%, #1e3a8a 0%, transparent 40%),
+                    radial-gradient(circle at 92% 20%, #0369a1 0%, transparent 36%),
+                    linear-gradient(140deg, var(--bg1), var(--bg2));
+                padding: 20px;
+            }
+            .app-shell {
+                max-width: 1280px;
+                margin: 0 auto;
+                display: grid;
+                grid-template-columns: 240px minmax(0, 1fr);
+                gap: 14px;
+                align-items: start;
+            }
+            .sidebar {
+                background: linear-gradient(170deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.92));
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 14px;
+            }
+            .sidebar .brand {
+                font-weight: 700;
+                margin-bottom: 12px;
+                letter-spacing: 0.2px;
+            }
+            .sidebar .menu {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            .sidebar .menu button {
+                width: 100%;
+                text-align: left;
+                justify-content: flex-start;
+                border-color: #1d4ed8;
+                background: rgba(15, 23, 42, 0.6);
+            }
+            .sidebar .menu button.active {
+                background: linear-gradient(135deg, var(--brand), var(--brand2));
+            }
+            .content-wrap {
+                min-width: 0;
+            }
+            .topbar {
+                background: rgba(15, 23, 42, 0.88);
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 10px 14px;
+                margin-bottom: 14px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                flex-wrap: wrap;
+            }
+            .breadcrumb {
+                font-size: 12px;
+                color: var(--muted);
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }
+            .breadcrumb .sep {
+                color: #64748b;
+            }
+            .page-header {
+                margin-bottom: 10px;
+            }
+            .page-title {
+                margin: 0 0 6px;
+                font-size: 22px;
+            }
+            .page-desc {
+                margin: 0;
+                font-size: 12px;
+                color: var(--muted);
+                line-height: 1.5;
+            }
+            .panel {
+                background: linear-gradient(170deg, var(--panel), rgba(2, 6, 23, 0.9));
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 14px;
+                margin-bottom: 14px;
+            }
+            h1,
+            h2,
+            h3 {
+                margin: 0 0 12px;
+            }
+            .row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+                align-items: center;
+                margin-bottom: 10px;
+            }
+            .chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 6px 12px;
+                border-radius: 999px;
+                border: 1px solid var(--line);
+                font-size: 12px;
+                color: #cbd5e1;
+                background: rgba(15, 23, 42, 0.62);
+            }
+            .tabs,
+            .sections {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-bottom: 12px;
+            }
+            button,
+            .tabs button,
+            .sections button,
+            .action button {
+                border: 1px solid #1d4ed8;
+                background: linear-gradient(135deg, var(--brand), var(--brand2));
+                color: white;
+                border-radius: 10px;
+                padding: 8px 12px;
+                cursor: pointer;
+                font-weight: 600;
+            }
+            button.ghost {
+                background: rgba(241, 245, 249, 0.06);
+                border-color: var(--line);
+                color: #e2e8f0;
+            }
+            button.danger {
+                background: linear-gradient(135deg, #ef4444, #f97316);
+                border-color: #f43f5e;
+            }
+            button.active {
+                box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.4);
+            }
+            .workspace {
+                display: grid;
+                gap: 12px;
+                grid-template-columns: 1.1fr 1fr;
+            }
+            .list {
+                display: grid;
+                gap: 10px;
+                max-height: 520px;
+                overflow: auto;
+                padding-right: 4px;
+            }
+            .item {
+                border: 1px solid var(--line);
+                border-radius: 10px;
+                background: rgba(2, 6, 23, 0.45);
+                padding: 10px;
+            }
+            .item .title {
+                font-weight: 700;
+                margin-bottom: 6px;
+            }
+            .meta {
+                font-size: 12px;
+                color: var(--muted);
+                line-height: 1.4;
+            }
+            .status {
+                font-size: 12px;
+                color: var(--warn);
+                min-height: 18px;
+            }
+            .status.ok {
+                color: var(--ok);
+            }
+            .status.err {
+                color: #fca5a5;
+            }
+            .form-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 10px;
+            }
+            .full {
+                grid-column: 1 / -1;
+            }
+            label {
+                display: block;
+                font-size: 12px;
+                margin-bottom: 6px;
+                color: #cbd5e1;
+            }
+            input,
+            textarea,
+            select {
+                width: 100%;
+                border: 1px solid var(--line);
+                background: rgba(2, 6, 23, 0.65);
+                color: #e2e8f0;
+                border-radius: 9px;
+                padding: 8px 10px;
+            }
+            textarea {
+                min-height: 90px;
+                resize: vertical;
+                font-family: ui-monospace, Consolas, monospace;
+            }
+            .hint {
+                font-size: 12px;
+                color: var(--muted);
+                margin-top: 4px;
+            }
+            .toolbar {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+            .hidden {
+                display: none;
+            }
+            .page {
+                display: block;
+            }
+            .page.hidden {
+                display: none;
+            }
+            pre.json {
+                white-space: pre-wrap;
+                margin: 0;
+                background: rgba(2, 6, 23, 0.85);
+                border: 1px solid var(--line);
+                padding: 10px;
+                border-radius: 8px;
+                max-height: 240px;
+                overflow: auto;
+            }
+            .toggle {
+                display: inline-flex;
+                gap: 6px;
+                align-items: center;
+                color: #cbd5e1;
+                font-size: 12px;
+                cursor: pointer;
+            }
+            .modal-mask {
+                position: fixed;
+                inset: 0;
+                background: rgba(2, 6, 23, 0.82);
+                backdrop-filter: blur(3px);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 14px;
+                z-index: 60;
+            }
+            .modal-mask.hidden {
+                display: none;
+            }
+            .config-modal {
+                width: min(1080px, 95vw);
+                max-height: 92vh;
+                overflow: auto;
+                background: linear-gradient(170deg, var(--panel), rgba(2, 6, 23, 0.95));
+                border: 1px solid var(--line);
+                border-radius: 14px;
+                padding: 14px;
+            }
+            .modal-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 10px;
+            }
+            .modal-header .close {
+                border-color: var(--line);
+                color: #cbd5e1;
+            }
+            .modal-footer {
+                margin-top: 12px;
+                display: flex;
+                justify-content: flex-end;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+            @media (max-width: 980px) {
+                body {
+                    padding: 12px;
+                }
+                .app-shell {
+                    grid-template-columns: 1fr;
+                }
+                .sidebar {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 12px;
+                }
+                .sidebar .menu {
+                    display: grid;
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                }
+                .sidebar .menu button {
+                    width: auto;
+                }
+                .workspace {
+                    grid-template-columns: 1fr;
+                }
+                .form-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="app-shell">
+            <aside class="sidebar">
+                <div class="brand">AgentScope 管理端</div>
+                <div class="menu">
+                    <button data-page="models" class="active">模型</button>
+                    <button data-page="tools">Tool</button>
+                    <button data-page="mcps">MCP</button>
+                    <button data-page="skills">Skill</button>
+                    <button data-page="debug">Agent 调试</button>
+                    <button data-page="status">运行状态</button>
+                </div>
+            </aside>
+
+            <div class="content-wrap">
+                <div class="topbar">
+                    <div class="breadcrumb" id="breadcrumb">
+                        <span>AgentScope 管理端</span>
+                        <span class="sep">/</span>
+                        <span id="breadcrumb-current">模型</span>
+                    </div>
+                    <span class="chip">后端：http://localhost:8080</span>
+                </div>
+
+                <div class="page" data-page="models">
+                    <div class="page-header">
+                        <h1 class="page-title">模型</h1>
+                        <p class="page-desc">模型页面：管理 Provider/自定义模型接入配置。</p>
+                    </div>
+                    <div class="panel">
+                        <div class="row">
+                            <span class="chip">模型接入示例和配置文件统一在此页管理</span>
+                            <span class="chip">新增/编辑后会回写到本地配置源</span>
+                        </div>
+                        <div data-role="status" class="status">初始化...</div>
+                    </div>
+                    <div class="workspace">
+                        <div class="panel">
+                            <h2 data-role="list-title">模型列表</h2>
+                            <div class="toolbar" style="margin-bottom:8px">
+                                <button id="new-btn" type="button" data-action="open-new-config">新增</button>
+                                <button id="refresh-btn" type="button" data-action="refresh-list">刷新列表</button>
+                            </div>
+                            <div data-role="list" class="list"></div>
+                        </div>
+                        <div class="panel">
+                            <h2>当前编辑 JSON</h2>
+                            <pre data-role="current-json" class="json"></pre>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="page hidden" data-page="tools">
+                    <div class="page-header">
+                        <h1 class="page-title">Tool</h1>
+                        <p class="page-desc">Tool 页面：配置工具元信息与能力绑定。</p>
+                    </div>
+                    <div class="panel">
+                        <div class="row">
+                            <span class="chip">工具资源池管理</span>
+                            <span class="chip">支持 className 与启停配置</span>
+                        </div>
+                        <div data-role="status" class="status">初始化...</div>
+                    </div>
+                    <div class="workspace">
+                        <div class="panel">
+                            <h2 data-role="list-title">Tool 列表</h2>
+                            <div class="toolbar" style="margin-bottom:8px">
+                                <button type="button" data-action="open-new-config">新增</button>
+                                <button type="button" data-action="refresh-list">刷新列表</button>
+                            </div>
+                            <div data-role="list" class="list"></div>
+                        </div>
+                        <div class="panel">
+                            <h2>当前编辑 JSON</h2>
+                            <pre data-role="current-json" class="json"></pre>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="page hidden" data-page="mcps">
+                    <div class="page-header">
+                        <h1 class="page-title">MCP</h1>
+                        <p class="page-desc">MCP 页面：管理 MCP 服务与连接参数。</p>
+                    </div>
+                    <div class="panel">
+                        <div class="row">
+                            <span class="chip">MCP Server 注册管理</span>
+                            <span class="chip">支持 stdio/http/sse 传输</span>
+                        </div>
+                        <div data-role="status" class="status">初始化...</div>
+                    </div>
+                    <div class="workspace">
+                        <div class="panel">
+                            <h2 data-role="list-title">MCP 列表</h2>
+                            <div class="toolbar" style="margin-bottom:8px">
+                                <button type="button" data-action="open-new-config">新增</button>
+                                <button type="button" data-action="refresh-list">刷新列表</button>
+                            </div>
+                            <div data-role="list" class="list"></div>
+                        </div>
+                        <div class="panel">
+                            <h2>当前编辑 JSON</h2>
+                            <pre data-role="current-json" class="json"></pre>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="page hidden" data-page="skills">
+                    <div class="page-header">
+                        <h1 class="page-title">Skill</h1>
+                        <p class="page-desc">Skill 页面：管理能力与来源。</p>
+                    </div>
+                    <div class="panel">
+                        <div class="row">
+                            <span class="chip">Skill 能力挂载入口</span>
+                            <span class="chip">可按类型和来源做来源隔离</span>
+                        </div>
+                        <div data-role="status" class="status">初始化...</div>
+                    </div>
+                    <div class="workspace">
+                        <div class="panel">
+                            <h2 data-role="list-title">Skill 列表</h2>
+                            <div class="toolbar" style="margin-bottom:8px">
+                                <button type="button" data-action="open-new-config">新增</button>
+                                <button type="button" data-action="refresh-list">刷新列表</button>
+                            </div>
+                            <div data-role="list" class="list"></div>
+                        </div>
+                        <div class="panel">
+                            <h2>当前编辑 JSON</h2>
+                            <pre data-role="current-json" class="json"></pre>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="config-modal" class="modal-mask hidden">
+                    <div class="config-modal">
+                        <div class="modal-header">
+                            <h3 id="modal-title">配置编辑</h3>
+                            <button id="config-modal-close" type="button" class="close ghost" data-action="close-config">关闭</button>
+                        </div>
+                        <div class="row" style="justify-content: space-between; align-items: baseline">
+                            <h2 id="form-title">模型配置</h2>
+                            <div class="toolbar">
+                                <button id="toggle-advanced" type="button" class="ghost" data-action="toggle-advanced">显示高级JSON</button>
+                                <button id="load-template" type="button" class="ghost" data-action="load-template">载入模板</button>
+                                <button id="copy-json" type="button" class="ghost" data-action="copy-json">复制 JSON</button>
+                                <button id="paste-json" type="button" class="ghost" data-action="paste-json">粘贴 JSON</button>
+                            </div>
+                        </div>
+                        <form id="config-form" autocomplete="off">
+                            <div class="form-grid" id="form-grid"></div>
+                            <div id="json-wrap" class="hidden">
+                                <label>高级 JSON（可直接编辑）</label>
+                                <textarea id="json-editor"></textarea>
+                                <div class="hint">高级模式适合一次性粘贴复杂参数（additional*）</div>
+                            </div>
+                        </form>
+                        <div class="modal-footer">
+                                <button id="modal-cancel" type="button" class="ghost" data-action="close-config">取消</button>
+                                <button id="modal-save" type="button" data-action="save-config">保存</button>
+                            </div>
+                        </div>
+                </div>
+
+                <div class="page hidden" data-page="debug">
+                    <div class="page-header">
+                        <h1 class="page-title">Agent 调试</h1>
+                        <p class="page-desc">
+                            在这里快速向指定 Agent 发起一次性会话消息，验证编排、工具与提示词是否联通。
+                        </p>
+                    </div>
+                    <div class="panel">
+                        <div class="row">
+                            <select id="chat-agent" class="small"></select>
+                            <input id="chat-session" placeholder="sessionId" />
+                            <button id="refresh-agents" class="ghost" data-action="refresh-agents">刷新 Agent</button>
+                        </div>
+                        <div class="row">
+                            <input id="chat-message" class="full" placeholder="发送一句话测试" />
+                            <button id="chat-send" class="ghost" data-action="send-chat">发送</button>
+                        </div>
+                        <pre id="chat-output" class="json"></pre>
+                    </div>
+                </div>
+
+                <div class="page hidden" data-page="status">
+                    <div class="page-header">
+                        <h1 class="page-title">运行状态</h1>
+                        <p class="page-desc">
+                            运行状态页，后续可接入健康检查、调用耗时、任务日志与审计链路。
+                        </p>
+                    </div>
+                    <div class="panel">
+                        <div class="row">
+                            <button id="refresh-status" class="ghost" data-action="refresh-status">刷新状态</button>
+                        </div>
+                        <pre id="status-preview" class="json"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script>
+            const API_PREFIX = '/api/agents';
+            const state = {
+                kind: 'models',
+                current: null,
+                loaded: { models: [], tools: [], mcps: [], skills: [] },
+                advanced: false,
+                page: 'models',
+            };
+
+            const kinds = {
+                models: {
+                    key: 'models',
+                    listPath: '/models',
+                    title: '模型列表',
+                    formTitle: '模型配置',
+                    template: {
+                        modelId: 'openai:v4-flash',
+                        type: 'provider',
+                        provider: 'openai-compatible',
+                        model: 'deepseek-v4-flash',
+                        apiKeyEnv: 'DEEPSEEK_API_KEY',
+                        baseUrl: 'https://api.deepseek.com',
+                        endpointPath: '/chat/completions',
+                        formatterClass: 'io.agentscope.core.formatter.openai.OpenAIChatFormatter',
+                        stream: false,
+                        enabled: true,
+                        temperature: 0.7,
+                        topP: 0.8,
+                        maxTokens: 2000,
+                        additionalBodyParams: { thinking: { type: 'disabled' } },
+                        description: 'OpenAI 兼容模型示例',
+                    },
+                    fields: [
+                        { name: 'modelId', label: '模型ID', type: 'text', required: true },
+                        { name: 'type', label: '类型', type: 'select', required: true, options: ['provider', 'local'] },
+                        { name: 'provider', label: 'provider', type: 'text', required: true, onlyForKind: ['provider'], placeholder: '例如 openai-compatible' },
+                        { name: 'model', label: '模型名', type: 'text', onlyForKind: ['provider'] },
+                        { name: 'baseUrl', label: 'baseUrl', type: 'text', full: true, onlyForKind: ['provider'] },
+                        { name: 'endpointPath', label: 'endpointPath', type: 'text', full: true, onlyForKind: ['provider'] },
+                        {
+                            name: 'formatterClass',
+                            label: 'formatterClass',
+                            type: 'text',
+                            full: true,
+                            onlyForKind: ['provider'],
+                            advanced: true,
+                            hint: '高级设置，通常不需要手填；provider 接入默认会自动匹配常见格式化器',
+                        },
+                        {
+                            name: 'className',
+                            label: '本地类名',
+                            type: 'text',
+                            onlyForKind: ['local'],
+                            advanced: true,
+                            hint: '仅 type=local 时使用，需实现 io.agentscope.core.model.Model',
+                        },
+                        {
+                            name: 'modelFactoryClass',
+                            label: 'Factory 类名',
+                            type: 'text',
+                            onlyForKind: ['local'],
+                            advanced: true,
+                            hint: '仅 type=local 时使用，用于自定义 modelFactory 创建逻辑',
+                        },
+                        {
+                            name: 'apiKey',
+                            label: 'apiKey',
+                            type: 'password',
+                            full: true,
+                            onlyForKind: ['provider'],
+                            requiredWhen: (payload) => {
+                                const providerType = String(payload.type || 'provider').toLowerCase();
+                                const hasEnv = String((payload.apiKeyEnv || '').trim()) !== '';
+                                return providerType === 'provider' && !hasEnv;
+                            },
+                            hint: 'Provider 模式下必须提供 apiKey 或 API_KEY 环境变量二选一',
+                        },
+                        { name: 'apiKeyEnv', label: 'API_KEY 环境变量', type: 'text', full: true, onlyForKind: ['provider'] },
+                        { name: 'description', label: 'description', type: 'textarea', full: true },
+                        { name: 'enabled', label: '启用', type: 'checkbox', required: true },
+                        { name: 'stream', label: 'stream', type: 'checkbox', advanced: true },
+                        { name: 'temperature', label: 'temperature', type: 'number', advanced: true },
+                        { name: 'topP', label: 'topP', type: 'number', advanced: true },
+                        { name: 'maxTokens', label: 'maxTokens', type: 'number', advanced: true },
+                        { name: 'maxCompletionTokens', label: 'maxCompletionTokens', type: 'number', advanced: true },
+                        { name: 'frequencyPenalty', label: 'frequencyPenalty', type: 'number', advanced: true },
+                        { name: 'presencePenalty', label: 'presencePenalty', type: 'number', advanced: true },
+                        { name: 'thinkingBudget', label: 'thinkingBudget', type: 'number', advanced: true },
+                        { name: 'reasoningEffort', label: 'reasoningEffort', type: 'text', advanced: true },
+                        { name: 'topK', label: 'topK', type: 'number', advanced: true },
+                        { name: 'seed', label: 'seed', type: 'number', advanced: true },
+                        { name: 'cacheControl', label: 'cacheControl', type: 'checkbox', advanced: true },
+                        { name: 'parallelToolCalls', label: 'parallelToolCalls', type: 'checkbox', advanced: true },
+                        { name: 'additionalHeaders', label: 'additionalHeaders', type: 'json', full: true, advanced: true },
+                        { name: 'additionalBodyParams', label: 'additionalBodyParams', type: 'json', full: true, advanced: true },
+                        { name: 'additionalQueryParams', label: 'additionalQueryParams', type: 'json', full: true, advanced: true },
+                        { name: 'executionTimeoutMs', label: 'executionTimeoutMs', type: 'number', advanced: true },
+                        { name: 'executionMaxAttempts', label: 'executionMaxAttempts', type: 'number', advanced: true },
+                        { name: 'executionInitialBackoffMs', label: 'executionInitialBackoffMs', type: 'number', advanced: true },
+                        { name: 'executionMaxBackoffMs', label: 'executionMaxBackoffMs', type: 'number', advanced: true },
+                        { name: 'executionBackoffMultiplier', label: 'executionBackoffMultiplier', type: 'number', advanced: true },
+                        { name: 'proxyType', label: 'proxyType', type: 'text', advanced: true },
+                        { name: 'proxyHost', label: 'proxyHost', type: 'text', advanced: true },
+                        { name: 'proxyPort', label: 'proxyPort', type: 'number', advanced: true },
+                        { name: 'proxyUsername', label: 'proxyUsername', type: 'text', advanced: true },
+                        { name: 'proxyPassword', label: 'proxyPassword', type: 'text', advanced: true },
+                    ],
+                },
+                tools: {
+                    key: 'tools',
+                    listPath: '/tools',
+                    title: 'Tool 列表',
+                    formTitle: 'Tool 配置',
+                    template: {
+                        toolId: 'my-tool',
+                        type: 'java',
+                        className: 'com.company.platform.tool.SampleTool',
+                        description: '示例工具',
+                        enabled: true,
+                    },
+                    fields: [
+                        { name: 'toolId', label: 'toolId', type: 'text', required: true },
+                        { name: 'type', label: 'type', type: 'text', required: true },
+                        { name: 'className', label: 'className', type: 'text', full: true },
+                        { name: 'description', label: '描述', type: 'textarea', full: true },
+                        { name: 'enabled', label: '启用', type: 'checkbox', required: true },
+                    ],
+                },
+                mcps: {
+                    key: 'mcps',
+                    listPath: '/mcps',
+                    title: 'MCP 列表',
+                    formTitle: 'MCP 配置',
+                    template: {
+                        mcpId: 'sample-mcp',
+                        transport: 'stdio',
+                        command: 'python',
+                        args: ['-m', 'mcp.server'],
+                        env: {},
+                        url: '',
+                        headers: {},
+                        queryParams: {},
+                        enableTools: [],
+                        timeout: 'PT30S',
+                        initializationTimeout: 'PT30S',
+                        enabled: true,
+                    },
+                    fields: [
+                        { name: 'mcpId', label: 'mcpId', type: 'text', required: true },
+                        { name: 'transport', label: 'transport', type: 'select', required: true, options: ['stdio', 'http', 'sse'] },
+                        { name: 'command', label: 'command', type: 'text', full: true },
+                        { name: 'args', label: 'args（JSON 数组）', type: 'json', full: true },
+                        { name: 'env', label: 'env（JSON）', type: 'json', full: true },
+                        { name: 'url', label: 'url（HTTP/SSE 时）', type: 'text', advanced: true, full: true },
+                        { name: 'headers', label: 'headers（JSON）', type: 'json', full: true, advanced: true },
+                        { name: 'queryParams', label: 'queryParams（JSON）', type: 'json', full: true, advanced: true },
+                        { name: 'enableTools', label: 'enableTools（JSON 数组）', type: 'json', full: true, advanced: true },
+                        { name: 'timeout', label: 'timeout', type: 'text', advanced: true },
+                        { name: 'initializationTimeout', label: 'initializationTimeout', type: 'text', advanced: true },
+                        { name: 'enabled', label: '启用', type: 'checkbox', required: true },
+                    ],
+                },
+                skills: {
+                    key: 'skills',
+                    listPath: '/skills',
+                    title: 'Skill 列表',
+                    formTitle: 'Skill 配置',
+                    template: {
+                        skillId: 'my-skill',
+                        type: 'filesystem',
+                        location: 'skills/demo.yaml',
+                        source: 'platform',
+                        scope: 'agent',
+                        writable: false,
+                        description: '示例skill',
+                        enabled: true,
+                    },
+                    fields: [
+                        { name: 'skillId', label: 'skillId', type: 'text', required: true },
+                        { name: 'type', label: 'type', type: 'select', required: true, options: ['filesystem', 'classpath', 'java'] },
+                        { name: 'location', label: 'location', type: 'text', full: true },
+                        { name: 'source', label: 'source', type: 'text' },
+                        { name: 'scope', label: 'scope', type: 'select', options: ['agent', 'runtime'] },
+                        { name: 'writable', label: 'writable', type: 'checkbox' },
+                        { name: 'description', label: '描述', type: 'textarea', full: true },
+                        { name: 'enabled', label: '启用', type: 'checkbox', required: true },
+                    ],
+                },
+            };
+
+            const configPages = ['models', 'tools', 'mcps', 'skills'];
+            const formGrid = document.getElementById('form-grid');
+            const jsonWrap = document.getElementById('json-wrap');
+            const jsonEditor = document.getElementById('json-editor');
+            const statusPreview = document.getElementById('status-preview');
+            const configModal = document.getElementById('config-modal');
+            const modalTitle = document.getElementById('modal-title');
+            const breadcrumbCurrent = document.getElementById('breadcrumb-current');
+            const pageMeta = {
+                models: '模型',
+                tools: 'Tool',
+                mcps: 'MCP',
+                skills: 'Skill',
+                debug: 'Agent 调试',
+                status: '运行状态',
+            };
+            const getConfigPageNodes = (page = state.page) => {
+                const pageEl = document.querySelector(`.page[data-page="${page}"]`);
+                if (!pageEl) {
+                    return null;
+                }
+                return {
+                    statusEl: pageEl.querySelector('[data-role="status"]'),
+                    listEl: pageEl.querySelector('[data-role="list"]'),
+                    currentJsonEl: pageEl.querySelector('[data-role="current-json"]'),
+                };
+            };
+
+            const setStatus = (msg, kind = 'ok', targetPage = state.page) => {
+                const nodes = getConfigPageNodes(targetPage);
+                const statusEl = nodes?.statusEl;
+                if (!statusEl) {
+                    return;
+                }
+                statusEl.textContent = msg;
+                statusEl.className = `status ${kind}`;
+            };
+
+            const showConfigModal = () => {
+                configModal.classList.remove('hidden');
+            };
+
+            const hideConfigModal = () => {
+                configModal.classList.add('hidden');
+            };
+
+            const openConfigEditor = (payload, mode = '编辑') => {
+                const raw = payload || {};
+                const kindCfg = kinds[state.kind];
+                state.current = JSON.parse(JSON.stringify(raw));
+                maybeApplyDefaultFormatter();
+                if (state.advanced) {
+                    state.advanced = false;
+                    document.getElementById('toggle-advanced').textContent = '显示高级JSON';
+                    jsonWrap.classList.add('hidden');
+                }
+                renderForm();
+                modalTitle.textContent = `${mode} - ${kindCfg.title.replace('列表', '')}`;
+                showConfigModal();
+            };
+
+            const maybeApplyDefaultFormatter = () => {
+                if (state.kind !== 'models') {
+                    return;
+                }
+                const provider = String(state.current?.provider || '').toLowerCase();
+                const formatterByProvider = {
+                    openai: 'io.agentscope.core.formatter.openai.OpenAIChatFormatter',
+                    'openai-compatible': 'io.agentscope.core.formatter.openai.OpenAIChatFormatter',
+                    openai_compatible: 'io.agentscope.core.formatter.openai.OpenAIChatFormatter',
+                    dashscope: 'io.agentscope.core.formatter.openai.OpenAIChatFormatter',
+                    qwen: 'io.agentscope.core.formatter.openai.OpenAIChatFormatter',
+                    anthropic: 'io.agentscope.core.formatter.openai.OpenAIChatFormatter',
+                };
+                if (!provider) {
+                    return;
+                }
+                if (formatterByProvider[provider] && !state.current.formatterClass) {
+                    state.current.formatterClass = formatterByProvider[provider];
+                }
+            };
+
+            const setBreadcrumb = (page) => {
+                if (!breadcrumbCurrent) {
+                    return;
+                }
+                if (configPages.includes(page)) {
+                    breadcrumbCurrent.textContent = pageMeta[page] || page;
+                    return;
+                }
+                breadcrumbCurrent.textContent = pageMeta[page] || page;
+            };
+
+            const setPage = (page) => {
+                state.page = page;
+                for (const section of document.querySelectorAll('.page[data-page]')) {
+                    section.classList.toggle('hidden', section.dataset.page !== page);
+                }
+                for (const btn of document.querySelectorAll('.menu button')) {
+                    btn.classList.toggle('active', btn.dataset.page === page);
+                }
+                const isConfigPage = configPages.includes(page);
+                if (isConfigPage) {
+                    state.kind = page;
+                }
+                setBreadcrumb(page);
+                if (isConfigPage) {
+                    loadList();
+                }
+                if (page === 'debug') {
+                    loadAgentsForChat();
+                }
+                if (page === 'status' && statusPreview) {
+                    statusPreview.textContent = JSON.stringify(
+                        {
+                            currentPage: 'status',
+                            loadedKinds: Object.fromEntries(
+                                Object.entries(state.loaded).map(([key, value]) => [key, Array.isArray(value) ? value.length : 0]),
+                            ),
+                            pageAt: new Date().toLocaleString('zh-CN'),
+                        },
+                        null,
+                        2,
+                    );
+                }
+            };
+
+            const api = async (path, init = {}) => {
+                const response = await fetch(`${API_PREFIX}${path}`, {
+                    headers: {
+                        ...(init.body ? { 'Content-Type': 'application/json' } : {}),
+                        ...(init.headers || {}),
+                    },
+                    ...init,
+                });
+                const text = await response.text();
+                const body = text ? JSON.parse(text) : {};
+                if (!response.ok) {
+                    throw new Error(body.message || `HTTP ${response.status}`);
+                }
+                return body;
+            };
+
+            const getRenderableFields = (cfg) => {
+                const current = state.current || cfg.template || {};
+                const modelType = state.kind === 'models' ? String(current.type || 'provider').toLowerCase() : '';
+                return cfg.fields.filter((field) => {
+                    if (!state.advanced && field.advanced) {
+                        return false;
+                    }
+                    if (!field.onlyForKind) {
+                        return true;
+                    }
+                    if (!Array.isArray(field.onlyForKind)) {
+                        return String(field.onlyForKind).toLowerCase() === modelType;
+                    }
+                    return field.onlyForKind.includes(modelType);
+                });
+            };
+
+            const isFieldRequired = (field, payload = {}) =>
+                field.required || (typeof field.requiredWhen === 'function' && field.requiredWhen(payload));
+
+            const getFieldHtml = (field, value = '', current = {}) => {
+                const mark = isFieldRequired(field, current) ? ' <span style="color:#fb923c">*</span>' : '';
+                const hint = field.hint ? `<div class="hint">${field.hint}</div>` : '';
+                const placeholder = field.placeholder ? ` placeholder="${field.placeholder}"` : '';
+                if (field.type === 'checkbox') {
+                    return `<label><input type="checkbox" name="${field.name}" ${value ? 'checked' : ''}> ${field.label}${mark}</label>`;
+                }
+                if (field.type === 'textarea') {
+                    return `<label>${field.label}${mark}</label><textarea name="${field.name}" spellcheck="false" class="${field.full ? 'full' : ''}">${value || ''}</textarea>${hint}`;
+                }
+                if (field.type === 'select') {
+                    const options = (field.options || [])
+                        .map((o) => `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`)
+                        .join('');
+                    return `<label>${field.label}${mark}</label><select name="${field.name}">${options}</select>${hint}`;
+                }
+                if (field.type === 'json') {
+                    const defaultValue =
+                        value && typeof value === 'object'
+                            ? JSON.stringify(value, null, 2)
+                            : (value === '' || value == null ? (['args', 'enableTools'].includes(field.name) ? '[]' : '{}') : String(value));
+                    return `<label>${field.label}${mark}</label><textarea name="${field.name}" spellcheck="false">${defaultValue}</textarea>${hint}`;
+                }
+                const attrs = [];
+                if (field.type === 'number') {
+                    attrs.push('step="any"');
+                    attrs.push('inputmode="decimal"');
+                }
+                if (field.type === 'password') {
+                    attrs.push('autocomplete="off"');
+                }
+                if (placeholder) {
+                    attrs.push(placeholder);
+                }
+                return `<label>${field.label}${mark}</label><input type="${field.type}" name="${field.name}" value="${value == null ? '' : String(value)}" ${attrs.join(' ')}>${hint}`;
+            };
+
+            const renderForm = () => {
+                const kindCfg = kinds[state.kind];
+                const fields = getRenderableFields(kindCfg);
+                const current = state.current || kindCfg.template;
+                formGrid.innerHTML = fields
+                    .map(
+                        (field) =>
+                            `<div class="${field.full ? 'full' : ''}" data-field="${field.name}">` +
+                            getFieldHtml(field, current[field.name], current) +
+                            '</div>',
+                    )
+                    .join('');
+                const pageNodes = getConfigPageNodes();
+                if (pageNodes?.currentJsonEl) {
+                    const text = JSON.stringify(current || {}, null, 2);
+                    pageNodes.currentJsonEl.textContent = text;
+                    if (state.advanced) {
+                        jsonEditor.value = text;
+                    }
+                }
+                document.getElementById('form-title').textContent = `${kindCfg.formTitle}（${state.current ? '编辑中' : '新增'}）`;
+            };
+
+            const renderList = () => {
+                const kindCfg = kinds[state.kind];
+                const items = state.loaded[kindCfg.key] || [];
+                const pageNodes = getConfigPageNodes();
+                if (!pageNodes) {
+                    return;
+                }
+                const listEl = pageNodes.listEl;
+                listEl.innerHTML = '';
+                if (items.length === 0) {
+                    listEl.innerHTML = '<div class="item">暂无数据</div>';
+                    return;
+                }
+                for (let index = 0; index < items.length; index++) {
+                    const item = items[index];
+                    const id = item[`${kindCfg.key.slice(0, -1)}Id`] || item.model || 'unknown';
+                    const enabled = item.enabled ? '✅ enabled' : '⛔ disabled';
+                    const node = document.createElement('div');
+                    node.className = 'item';
+                    const desc = item.description || item.systemPrompt || '';
+                    node.innerHTML = `
+                        <div class="title">${id}</div>
+                        <div class="meta">${enabled}</div>
+                        <div class="meta">${desc || '暂无说明'}</div>
+                        <div class="toolbar" style="margin-top:8px">
+                            <button class="ghost" data-action="edit-config" data-index="${index}">编辑</button>
+                            <button class="ghost" data-action="copy-config-json" data-index="${index}">复制JSON</button>
+                        </div>
+                    `;
+                    listEl.append(node);
+                }
+            };
+
+            const loadList = async () => {
+                const kindCfg = kinds[state.kind];
+                setStatus('加载中...', 'warn', state.kind);
+                try {
+                    const data = await api(kindCfg.listPath);
+                    state.loaded[kindCfg.key] = data[kindCfg.key] || [];
+                    state.current = state.loaded[kindCfg.key][0] || null;
+                    renderList();
+                    renderForm();
+                    setStatus(`已加载 ${kindCfg.title}`);
+                } catch (e) {
+                    setStatus(`加载失败: ${e.message}`, 'err');
+                }
+                await loadAgentsForChat();
+            };
+
+            const refreshStatus = () => {
+                if (!statusPreview) {
+                    return;
+                }
+                statusPreview.textContent = JSON.stringify(
+                    {
+                        currentPage: 'status',
+                        service: 'agentscope-java',
+                        now: new Date().toLocaleString('zh-CN'),
+                        note: '运行状态页预留：未来接 health / metrics / audit / logs',
+                    },
+                    null,
+                    2,
+                );
+            };
+
+            const toNumber = (value) => {
+                if (value == null) return null;
+                const text = String(value).trim();
+                if (text === '') return null;
+                const n = Number(text);
+                return Number.isFinite(n) ? n : null;
+            };
+
+            const parseJsonOrFallback = (name, isArray = false) => {
+                const el = document.querySelector(`[name="${name}"]`);
+                const raw = (el?.value || '').trim();
+                if (!raw) return isArray ? [] : {};
+                const parsed = JSON.parse(raw);
+                if (isArray) {
+                    return Array.isArray(parsed) ? parsed : [];
+                }
+                if (typeof parsed === 'object' && parsed !== null) return parsed;
+                return isArray ? [] : {};
+            };
+
+            const collectPayload = () => {
+                const kindCfg = kinds[state.kind];
+                const payload = {};
+                const fields = getRenderableFields(kindCfg);
+                for (const field of fields) {
+                    if (!state.advanced && field.advanced) continue;
+                    if (field.type === 'checkbox') {
+                        const el = document.querySelector(`[name="${field.name}"]`);
+                        payload[field.name] = el ? el.checked : false;
+                        continue;
+                    }
+                    if (field.type === 'json') {
+                        payload[field.name] = parseJsonOrFallback(field.name, field.name === 'args' || field.name === 'enableTools');
+                        continue;
+                    }
+                    const el = document.querySelector(`[name="${field.name}"]`);
+                    const raw = (el?.value || '').trim();
+                    if (field.type === 'number') {
+                        const n = toNumber(raw);
+                        if (n !== null) {
+                            payload[field.name] = n;
+                        }
+                        continue;
+                    }
+                    if (raw !== '') {
+                        payload[field.name] = raw;
+                    }
+                }
+                const required = fields.find((field) => {
+                    if (!isFieldRequired(field, { ...(state.current || {}), ...payload })) {
+                        return false;
+                    }
+                    return payload[field.name] == null || payload[field.name] === '';
+                });
+                if (required) {
+                    throw new Error(`字段 ${required.label} 为必填`);
+                }
+                return payload;
+            };
+
+            const save = async () => {
+                const kindCfg = kinds[state.kind];
+                if (state._isSaving) {
+                    return;
+                }
+                try {
+                    state._isSaving = true;
+                    setStatus('保存中...', 'warn');
+                    const payload = state.advanced ? JSON.parse(jsonEditor.value || '{}') : collectPayload();
+                    await api(kindCfg.listPath, {
+                        method: 'POST',
+                        body: JSON.stringify(payload),
+                    });
+                    setStatus('保存成功', 'ok');
+                    state.current = payload;
+                    await loadList();
+                    hideConfigModal();
+                } catch (e) {
+                    setStatus(`保存失败: ${e.message}`, 'err');
+                } finally {
+                    state._isSaving = false;
+                }
+            };
+
+            const loadTemplate = () => {
+                const kindCfg = kinds[state.kind];
+                const payload = Object.assign({}, kindCfg.template);
+                if (configModal.classList.contains('hidden')) {
+                    openConfigEditor(payload, '新增');
+                    return;
+                }
+                state.current = payload;
+                renderForm();
+                setStatus('模板已加载');
+            };
+
+            const toggleAdvanced = () => {
+                state.advanced = !state.advanced;
+                document.getElementById('toggle-advanced').textContent = state.advanced ? '关闭高级JSON' : '显示高级JSON';
+                jsonWrap.classList.toggle('hidden', !state.advanced);
+                renderForm();
+            };
+
+            const copyCurrent = async () => {
+                const pageNodes = getConfigPageNodes();
+                await navigator.clipboard.writeText(pageNodes?.currentJsonEl?.textContent || '');
+                setStatus('当前配置已复制');
+            };
+
+            const pasteCurrent = async () => {
+                try {
+                    const text = await navigator.clipboard.readText();
+                    const parsed = JSON.parse(text);
+                    openConfigEditor(parsed, '粘贴');
+                    jsonEditor.value = JSON.stringify(parsed, null, 2);
+                    setStatus('粘贴成功');
+                } catch {
+                    setStatus('粘贴内容不是合法 JSON', 'err');
+                }
+            };
+
+            const loadAgentsForChat = async () => {
+                const sel = document.getElementById('chat-agent');
+                const selected = sel.value;
+                try {
+                    const data = await api('');
+                    const agents = data.agents || [];
+                    sel.innerHTML = '';
+                    for (const a of agents) {
+                        const opt = document.createElement('option');
+                        opt.value = a.agentId;
+                        opt.textContent = `${a.agentId} ${a.name || ''}`.trim();
+                        sel.append(opt);
+                    }
+                    if (selected && [...sel.options].some((o) => o.value === selected)) {
+                        sel.value = selected;
+                    } else if (agents[0]) {
+                        sel.value = agents[0].agentId;
+                    }
+                } catch (e) {
+                    setStatus(`agent 列表加载失败: ${e.message}`, 'err');
+                }
+            };
+
+            const sendChat = async () => {
+                const agentId = document.getElementById('chat-agent').value;
+                const sessionId = document.getElementById('chat-session').value || 'default';
+                const message = document.getElementById('chat-message').value;
+                const out = document.getElementById('chat-output');
+                if (!agentId || !message) {
+                    setStatus('请先选 agent 并输入消息', 'err');
+                    return;
+                }
+                out.textContent = '请求中...';
+                try {
+                    const data = await api(`/${encodeURIComponent(agentId)}/chat`, {
+                        method: 'POST',
+                        body: JSON.stringify({ tenantId: 'console', userId: 'admin', sessionId, message }),
+                    });
+                    out.textContent = JSON.stringify(data, null, 2);
+                } catch (e) {
+                    out.textContent = String(e.message || e);
+                }
+            };
+
+            document.addEventListener('change', (e) => {
+                if (!e.target.matches('input[name],textarea[name],select[name]')) {
+                    return;
+                }
+                const name = e.target.name;
+                if (!state.current) return;
+                if (state.kind === 'models' && name === 'type') {
+                    state.current.type = e.target.value;
+                    if (String(e.target.value).toLowerCase() === 'local') {
+                        state.current.formatterClass = '';
+                        state.current.apiKey = '';
+                        state.current.apiKeyEnv = '';
+                    } else {
+                        state.current.className = '';
+                        state.current.modelFactoryClass = '';
+                        maybeApplyDefaultFormatter();
+                    }
+                    renderForm();
+                    return;
+                }
+                if (state.kind === 'models' && name === 'provider') {
+                    state.current.provider = e.target.value;
+                    maybeApplyDefaultFormatter();
+                    const pageNodes = getConfigPageNodes();
+                    if (pageNodes?.currentJsonEl) {
+                        const text = JSON.stringify(state.current || {}, null, 2);
+                        pageNodes.currentJsonEl.textContent = text;
+                        if (state.advanced) {
+                            jsonEditor.value = text;
+                        }
+                    }
+                    return;
+                }
+                if (e.target.type === 'checkbox') {
+                    state.current[name] = e.target.checked;
+                } else if (e.target.type === 'number') {
+                    const n = toNumber(e.target.value);
+                    if (n !== null) {
+                        state.current[name] = n;
+                    }
+                } else {
+                    state.current[name] = e.target.value;
+                }
+                const pageNodes = getConfigPageNodes();
+                if (pageNodes?.currentJsonEl) {
+                    const text = JSON.stringify(state.current || {}, null, 2);
+                    pageNodes.currentJsonEl.textContent = text;
+                    if (state.advanced) {
+                        jsonEditor.value = text;
+                    }
+                }
+            });
+
+            const handleConfigAction = (e, target) => {
+                const action = target?.dataset?.action;
+                if (!action) {
+                    return;
+                }
+
+                const kindCfg = kinds[state.kind];
+                if (!kindCfg) {
+                    setStatus(`未知配置类型: ${state.kind}`, 'err');
+                    return;
+                }
+                const items = state.loaded[kindCfg.key] || [];
+                switch (action) {
+                    case 'open-new-config':
+                        e.preventDefault();
+                        openConfigEditor(kindCfg.template, '新增');
+                        return;
+                    case 'refresh-list':
+                        e.preventDefault();
+                        loadList();
+                        return;
+                    case 'toggle-advanced':
+                        e.preventDefault();
+                        toggleAdvanced();
+                        return;
+                    case 'load-template':
+                        e.preventDefault();
+                        loadTemplate();
+                        return;
+                    case 'copy-json':
+                        e.preventDefault();
+                        copyCurrent();
+                        return;
+                    case 'paste-json':
+                        e.preventDefault();
+                        pasteCurrent();
+                        return;
+                    case 'close-config':
+                    case 'cancel-config':
+                        e.preventDefault();
+                        hideConfigModal();
+                        return;
+                    case 'save-config':
+                        e.preventDefault();
+                        save();
+                        return;
+                    case 'edit-config': {
+                        e.preventDefault();
+                        const index = Number(target.dataset.index);
+                        const item = items[index] || null;
+                        if (!item) {
+                            setStatus('未找到要编辑的配置项', 'err');
+                            return;
+                        }
+                        const itemId =
+                            item[`${kindCfg.key.slice(0, -1)}Id`] || item.modelId || item.model || `#${index + 1}`;
+                        openConfigEditor(item, '编辑');
+                        setStatus(`已加载 ${kindCfg.formTitle}: ${itemId}`);
+                        return;
+                    }
+                    case 'copy-config-json': {
+                        e.preventDefault();
+                        const index = Number(target.dataset.index);
+                        const item = items[index] || null;
+                        if (!item) {
+                            setStatus('未找到要复制的配置项', 'err');
+                            return;
+                        }
+                        const itemId =
+                            item[`${kindCfg.key.slice(0, -1)}Id`] || item.modelId || item.model || `#${index + 1}`;
+                        navigator.clipboard
+                            .writeText(JSON.stringify(item, null, 2))
+                            .then(() => setStatus(`已复制 ${kindCfg.formTitle}: ${itemId}`))
+                            .catch(() => setStatus('复制失败，请手动复制', 'err'));
+                        return;
+                    }
+                    case 'refresh-agents':
+                        e.preventDefault();
+                        loadAgentsForChat();
+                        return;
+                    case 'send-chat':
+                        e.preventDefault();
+                        sendChat();
+                        return;
+                    case 'refresh-status':
+                        e.preventDefault();
+                        refreshStatus();
+                        return;
+                    default:
+                        return;
+                }
+            };
+            const dispatchConfigActions = (e) => {
+                const actionBtn = e.target.closest('[data-action]');
+                if (!actionBtn) {
+                    return;
+                }
+                handleConfigAction(e, actionBtn);
+            };
+            document.addEventListener('click', dispatchConfigActions);
+            configModal.addEventListener('click', (e) => {
+                if (e.target === configModal) {
+                    hideConfigModal();
+                }
+            });
+            document.getElementById('chat-message').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && e.ctrlKey) {
+                    sendChat();
+                }
+            });
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && !configModal.classList.contains('hidden')) {
+                    hideConfigModal();
+                }
+            });
+
+            document.querySelectorAll('.menu button').forEach((btn) =>
+                btn.addEventListener('click', () => setPage(btn.dataset.page)),
+            );
+            const refreshStatusBtn = document.getElementById('refresh-status');
+            if (refreshStatusBtn) {
+                refreshStatusBtn.addEventListener('click', refreshStatus);
+            }
+
+            setPage('models');
+        </script>
+    </body>
+</html>
+
+

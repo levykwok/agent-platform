@@ -1,0 +1,35 @@
+project: "AI Agent Platform"
+title: "AI Agent Platform"
+author: "平台研发团队"
+logo: logo.svg
+copyright: "2026"
+only_build_toc_files: true
+
+execute:
+  execute_notebooks: off
+
+parse:
+  myst_enable_extensions:
+    - colon_fence
+
+sphinx:
+  config:
+    html_theme: furo
+    html_title: "AI Agent Platform 文档"
+    html_favicon: logo.svg
+    html_show_sphinx: false
+    html_copy_source: false
+    html_show_sourcelink: false
+    html_static_path:
+      - "_static"
+    html_css_files:
+      - custom.css
+    html_theme_options:
+      sidebar_hide_name: false
+      top_of_page_buttons: []
+      light_css_variables:
+        color-brand-primary: "#315efb"
+        color-brand-content: "#315efb"
+      dark_css_variables:
+        color-brand-primary: "#8aa4ff"
+        color-brand-content: "#8aa4ff"

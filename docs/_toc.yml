@@ -1,0 +1,20 @@
+format: jb-book
+root: index
+parts:
+  - caption: 开始使用
+    chapters:
+      - file: getting-started
+      - file: concepts
+  - caption: 界面与功能
+    chapters:
+      - file: guide/platform-overview
+      - file: guide/model-access
+      - file: guide/tools-mcp-skills
+      - file: guide/agent-management
+      - file: guide/conversation
+      - file: guide/memory
+      - file: guide/pending-features
+  - caption: 运行维护
+    chapters:
+      - file: operations/configuration
+      - file: operations/troubleshooting

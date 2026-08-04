@@ -1,0 +1,10 @@
+{
+  "library": "g6",
+  "sample": 30,
+  "concurrency": 5,
+  "optimizeModel": "claude-sonnet-4-6",
+  "pipeline": {
+    "steps": ["collect", "rank", "summarize"],
+    "retry": true
+  }
+}
