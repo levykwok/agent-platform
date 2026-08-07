@@ -57,6 +57,7 @@ Plan Mode
 - [运维智能体](./15-ops-agent.md)
 - [监盘智能体](./16-monitoring-agent.md)
 - [RAG 知识检索](./17-rag.md)
+- [强编排与对话式业务流程](./18-strong-orchestration.md)
 
 ## 分层原则
 

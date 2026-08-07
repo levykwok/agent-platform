@@ -11,6 +11,7 @@ const navItems = [
   { key: 'mcp', href: '/platform/live/mcp', icon: 'mcp', label: 'MCP 服务器', desc: '注册、测试、绑定 MCP server 和工具集。', native: true },
   { key: 'skills', href: '/platform/live/skills', icon: 'skills', label: 'Skills 中心', desc: '管理技能包启停、版本和在线测试。', native: true },
   { key: 'agents', href: '/platform/live/agents', icon: 'agents', label: 'Agent 管理', desc: '配置 Agent、Flow、工具、模型策略和测试调用。', native: true },
+  { key: 'orchestration', href: '/platform/live/orchestration', icon: 'qa', label: '编排中心', desc: '用业务节点、Agent 节点和模型节点搭建可运行流程。', native: true },
   { key: 'qa', href: '/platform/live/qa', icon: 'qa', label: '交互问答', desc: '通用对话入口，承载 session、历史、附件和上下文面板。', native: true },
   { key: 'workbench', href: '/platform/live/workbench', icon: 'qa', label: 'Agent 工作台', desc: '展示 Agent 运行过程、步骤事件、等待输入和执行资源。', native: true },
 ]

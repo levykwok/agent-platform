@@ -20,6 +20,11 @@ import io.agent.platform.control.SkillSpec;
 import io.agent.platform.control.SubagentBinding;
 import io.agent.platform.control.ToolRegistry;
 import io.agent.platform.control.ToolSpec;
+import io.agent.platform.control.WorkflowNode;
+import io.agent.platform.control.WorkflowNodeType;
+import io.agent.platform.control.WorkflowEdge;
+import io.agent.platform.control.WorkflowEndpoint;
+import io.agent.platform.control.WorkflowPort;
 import io.agent.platform.control.WorkflowStep;
 import io.agent.platform.control.WorkflowTransition;
 import io.agent.platform.control.YamlAgentDefinitionRegistry;
@@ -72,6 +77,10 @@ public class PlatformCompatibilityState {
     private static final String SQLITE_PROBE_RUNS_TABLE = "platform_probe_runs";
     private static final String SQLITE_MIGRATION_HISTORY_TABLE = "platform_migration_history";
     private static final String SQLITE_MEMORY_TABLE = "platform_memories";
+    private static final String SQLITE_RUNS_TABLE = "platform_agent_runs";
+    private static final String SQLITE_RUN_STEPS_TABLE = "platform_agent_run_steps";
+    private static final String SQLITE_RUN_EVENTS_TABLE = "platform_agent_run_events";
+    private static final String SQLITE_WAITINGS_TABLE = "platform_agent_waitings";
     private static final String MEMORY_BLOCK_START = "<!-- agent-platform-memory:start -->";
     private static final String MEMORY_BLOCK_END = "<!-- agent-platform-memory:end -->";
 
@@ -150,6 +159,7 @@ public class PlatformCompatibilityState {
         loadModelSlots();
         loadMemories();
         loadAudit();
+        loadRunState();
         seedPlatformDomain();
     }
 
@@ -428,7 +438,9 @@ public class PlatformCompatibilityState {
                 mode(string(map, "mode", fallback.mode().name())),
                 subagents(map.get("subagents")),
                 routes(map.get("routes")),
-                workflowSteps(map.get("workflow")));
+                workflowSteps(map.get("workflow")),
+                workflowNodes(map.get("nodes")),
+                workflowEdges(map.get("edges")));
     }
 
     private OrchestrationMode mode(String value) {
@@ -508,6 +520,81 @@ public class PlatformCompatibilityState {
                 workflowTransitions(map.get("transitions")));
     }
 
+    private List<WorkflowNode> workflowNodes(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+        return list.stream()
+                .filter(Map.class::isInstance)
+                .map(Map.class::cast)
+                .map(this::workflowNode)
+                .toList();
+    }
+
+    private WorkflowNode workflowNode(Map<?, ?> raw) {
+        Map<String, Object> map = normalize(raw);
+        return new WorkflowNode(
+                stringAny(map, "nodeId", "node_id", "stepId", "step_id", "id"),
+                WorkflowNodeType.fromValue(stringAny(map, "type", "nodeType", "node_type")),
+                stringAny(map, "refId", "ref_id", "agentId", "agent_id", "targetAgentId"),
+                string(map, "instruction", ""),
+                objectMap(map.get("config")),
+                objectMap(
+                        map.get("inputMapping") == null
+                                ? map.get("input_mapping")
+                                : map.get("inputMapping")),
+                objectMap(
+                        map.get("outputSchema") == null
+                                ? map.get("output_schema")
+                                : map.get("outputSchema")),
+                numberLong(map.get("timeoutMs"), map.get("timeout_ms")),
+                numberInt(map.get("maxRetries"), map.get("max_retries")),
+                workflowFailurePolicy(map),
+                workflowTransitions(map.get("transitions")),
+                workflowPorts(map.get("inputPorts") == null ? map.get("input_ports") : map.get("inputPorts")),
+                workflowPorts(map.get("outputPorts") == null ? map.get("output_ports") : map.get("outputPorts")));
+    }
+
+    private List<WorkflowPort> workflowPorts(Object value) {
+        if (!(value instanceof List<?> list)) return List.of();
+        return list.stream().filter(Map.class::isInstance).map(Map.class::cast).map(this::workflowPort).toList();
+    }
+
+    private WorkflowPort workflowPort(Map<?, ?> raw) {
+        Map<String, Object> map = normalize(raw);
+        return new WorkflowPort(
+                stringAny(map, "portId", "port_id", "id"),
+                string(map, "direction", "input"),
+                stringAny(map, "contractRef", "contract_ref"),
+                objectMap(map.get("schema")),
+                Boolean.TRUE.equals(map.get("required")),
+                string(map, "cardinality", "one"),
+                string(map, "description", ""));
+    }
+
+    private List<WorkflowEdge> workflowEdges(Object value) {
+        if (!(value instanceof List<?> list)) return List.of();
+        return list.stream().filter(Map.class::isInstance).map(Map.class::cast).map(this::workflowEdge).toList();
+    }
+
+    private WorkflowEdge workflowEdge(Map<?, ?> raw) {
+        Map<String, Object> map = normalize(raw);
+        return new WorkflowEdge(
+                stringAny(map, "edgeId", "edge_id", "id"),
+                workflowEndpoint(map.get("from")),
+                workflowEndpoint(map.get("to")),
+                string(map, "kind", "data"),
+                objectMap(map.get("binding")),
+                objectMap(map.get("condition")),
+                Boolean.TRUE.equals(map.get("defaultEdge")) || Boolean.TRUE.equals(map.get("default_edge")));
+    }
+
+    private WorkflowEndpoint workflowEndpoint(Object value) {
+        if (!(value instanceof Map<?, ?> raw)) return null;
+        Map<String, Object> map = normalize(raw);
+        return new WorkflowEndpoint(stringAny(map, "nodeId", "node_id"), stringAny(map, "portId", "port_id"));
+    }
+
     private List<WorkflowTransition> workflowTransitions(Object value) {
         if (!(value instanceof List<?> list)) {
             return List.of();
@@ -544,6 +631,10 @@ public class PlatformCompatibilityState {
         Map<String, Object> map = new LinkedHashMap<>();
         raw.forEach((k, v) -> map.put(String.valueOf(k), v));
         return map;
+    }
+
+    private Map<String, Object> objectMap(Object value) {
+        return value instanceof Map<?, ?> map ? normalize(map) : Map.of();
     }
 
     private String stringAny(Map<String, Object> map, String... keys) {
@@ -1934,7 +2025,26 @@ public class PlatformCompatibilityState {
                     "CREATE TABLE IF NOT EXISTS "
                             + SQLITE_MEMORY_TABLE
                             + " (memory_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT"
-                            + " NOT NULL)");
+                            + " NOT NULL)",
+                    "CREATE TABLE IF NOT EXISTS "
+                            + SQLITE_RUNS_TABLE
+                            + " (run_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT"
+                            + " NOT NULL)",
+                    "CREATE TABLE IF NOT EXISTS "
+                            + SQLITE_RUN_STEPS_TABLE
+                            + " (run_id TEXT NOT NULL, step_id TEXT NOT NULL, payload TEXT NOT NULL,"
+                            + " updated_at TEXT NOT NULL, PRIMARY KEY (run_id, step_id))",
+                    "CREATE TABLE IF NOT EXISTS "
+                            + SQLITE_RUN_EVENTS_TABLE
+                            + " (event_id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, event_type"
+                            + " TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL)",
+                    "CREATE INDEX IF NOT EXISTS idx_platform_agent_run_events_run_id ON "
+                            + SQLITE_RUN_EVENTS_TABLE
+                            + " (run_id, event_id)",
+                    "CREATE TABLE IF NOT EXISTS "
+                            + SQLITE_WAITINGS_TABLE
+                            + " (waiting_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, payload TEXT"
+                            + " NOT NULL, updated_at TEXT NOT NULL)");
         } catch (IllegalStateException e) {
             throw new IllegalStateException("Failed to init sqlite compatibility schema", e);
         }
@@ -2166,6 +2276,8 @@ public class PlatformCompatibilityState {
                         runId,
                         "agent_id",
                         agentId,
+                        "query",
+                        query,
                         "status",
                         "running",
                         "user_id",
@@ -2205,6 +2317,9 @@ public class PlatformCompatibilityState {
         runs.put(runId, run);
         runSteps.put(runId, new ArrayList<>(steps));
         runEvents.put(runId, new ArrayList<>(events));
+        persistRun(run);
+        steps.forEach(step -> persistRunStep(runId, step));
+        events.forEach(this::persistRunEvent);
         return run;
     }
 
@@ -2227,10 +2342,9 @@ public class PlatformCompatibilityState {
         run.put("finished_at", Instant.now().toString());
         run.put("output_ref", output);
         runs.put(runId, run);
+        persistRun(run);
         markStep(runId, "respond", "succeeded", null);
-        runEvents
-                .computeIfAbsent(runId, ignored -> new ArrayList<>())
-                .add(event(runId, "run.succeeded", output));
+        appendRunEvent(runId, "run.succeeded", output);
         return run;
     }
 
@@ -2242,10 +2356,9 @@ public class PlatformCompatibilityState {
         run.put("finished_at", Instant.now().toString());
         run.put("error", row("message", message == null || message.isBlank() ? "执行失败" : message));
         runs.put(runId, run);
+        persistRun(run);
         markStep(runId, "respond", "failed", message);
-        runEvents
-                .computeIfAbsent(runId, ignored -> new ArrayList<>())
-                .add(event(runId, "run.failed", row("error", message)));
+        appendRunEvent(runId, "run.failed", row("error", message));
         return run;
     }
 
@@ -2261,6 +2374,7 @@ public class PlatformCompatibilityState {
                 if (summary != null && !summary.isBlank()) {
                     row.put("summary", summary);
                 }
+                persistRunStep(runId, row);
             }
         }
     }
@@ -2486,12 +2600,36 @@ public class PlatformCompatibilityState {
         payload.putIfAbsent("agent_id", event.source());
         payload.putIfAbsent("source", event.source());
         normalizeToolSkillPayload(payload);
+        if (isWaitingEvent(event.type(), payload)) {
+            String waitingId =
+                    string(
+                            payload,
+                            "waiting_id",
+                            "wait_" + UUID.randomUUID().toString().replace("-", ""));
+            payload.put("waiting_id", waitingId);
+            payload.put("run_id", runId);
+            payload.putIfAbsent("status", "waiting");
+            payload.putIfAbsent("created_at", Instant.now().toString());
+            payload.put("updated_at", Instant.now().toString());
+            waitings.put(runId, payload);
+            updateRunStatus(runId, "waiting");
+            persistWaiting(payload);
+        }
         appendRunEvent(
                 runId,
                 event.type() == null || event.type().isBlank()
                         ? "agent_event"
                         : event.type().toLowerCase(),
                 payload);
+    }
+
+    private static boolean isWaitingEvent(String eventType, Map<String, Object> payload) {
+        String type = eventType == null ? "" : eventType.toLowerCase();
+        String status = string(payload, "status", "").toLowerCase();
+        return type.contains("waiting")
+                || type.contains("wait_user")
+                || "waiting".equals(status)
+                || "wait_user_input".equals(status);
     }
 
     public void appendRunEvent(String runId, String eventType, Map<String, Object> payload) {
@@ -2501,13 +2639,78 @@ public class PlatformCompatibilityState {
         Map<String, Object> normalized =
                 payload == null ? new LinkedHashMap<>() : new LinkedHashMap<>(payload);
         normalized.putIfAbsent("runtime", true);
-        runEvents
-                .computeIfAbsent(runId, ignored -> new ArrayList<>())
-                .add(event(runId, eventType, normalized));
+        Map<String, Object> item = event(runId, eventType, normalized);
+        runEvents.computeIfAbsent(runId, ignored -> new ArrayList<>()).add(item);
+        persistRunEvent(item);
     }
 
     public Map<String, Object> waiting(String runId) {
         return waitings.get(runId);
+    }
+
+    public Map<String, Object> createWaiting(String runId, Map<String, Object> payload) {
+        Map<String, Object> input = payload == null ? Map.of() : payload;
+        String waitingId =
+                string(input, "waiting_id", "wait_" + UUID.randomUUID().toString().replace("-", ""));
+        Map<String, Object> item = new LinkedHashMap<>(input);
+        item.put("waiting_id", waitingId);
+        item.put("run_id", runId);
+        item.putIfAbsent("status", "waiting");
+        item.putIfAbsent("created_at", Instant.now().toString());
+        item.put("updated_at", Instant.now().toString());
+        waitings.put(runId, item);
+        updateRunStatus(runId, "waiting");
+        persistWaiting(item);
+        appendRunEvent(runId, "run.waiting", item);
+        return item;
+    }
+
+    public Map<String, Object> resumeWaiting(
+            String runId, String waitingId, Map<String, Object> payload) {
+        return updateWaiting(runId, waitingId, "resumed", payload);
+    }
+
+    public Map<String, Object> rejectWaiting(
+            String runId, String waitingId, Map<String, Object> payload) {
+        return updateWaiting(runId, waitingId, "rejected", payload);
+    }
+
+    private Map<String, Object> updateWaiting(
+            String runId, String waitingId, String status, Map<String, Object> payload) {
+        Map<String, Object> existing = waitings.get(runId);
+        if (existing == null
+                || !waitingId.equals(String.valueOf(existing.getOrDefault("waiting_id", "")))) {
+            return row("run_id", runId, "waiting_id", waitingId, "status", "not_found");
+        }
+        Map<String, Object> item = new LinkedHashMap<>(existing);
+        if (payload != null) {
+            item.putAll(payload);
+        }
+        item.put("run_id", runId);
+        item.put("waiting_id", waitingId);
+        item.put("status", status);
+        item.put("updated_at", Instant.now().toString());
+        waitings.put(runId, item);
+        updateRunStatus(runId, "resumed".equals(status) ? "running" : "rejected");
+        persistWaiting(item);
+        appendRunEvent(runId, "run.waiting." + status, item);
+        return item;
+    }
+
+    private void updateRunStatus(String runId, String status) {
+        Map<String, Object> existing = runs.get(runId);
+        if (existing == null) {
+            return;
+        }
+        Map<String, Object> updated = new LinkedHashMap<>(existing);
+        updated.put("status", status);
+        if ("rejected".equals(status)) {
+            updated.put("finished_at", Instant.now().toString());
+        } else if ("running".equals(status)) {
+            updated.put("finished_at", "");
+        }
+        runs.put(runId, updated);
+        persistRun(updated);
     }
 
     public List<Map<String, Object>> providers() {
@@ -4014,6 +4217,218 @@ public class PlatformCompatibilityState {
             statement.executeUpdate();
         } catch (Exception e) {
             log.warn("Insert audit event failed: {}", e.getMessage());
+        }
+    }
+
+    private void loadRunState() {
+        if (!isSqliteEnabled()) {
+            return;
+        }
+        loadRuns();
+        loadRunSteps();
+        loadRunEvents();
+        loadWaitings();
+    }
+
+    private void loadRuns() {
+        String sql = "SELECT run_id, payload FROM " + SQLITE_RUNS_TABLE + " ORDER BY updated_at";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet resultSet = statement.executeQuery()) {
+            runs.clear();
+            while (resultSet.next()) {
+                Map<String, Object> payload = mapFromJson(resultSet.getString("payload"));
+                if (payload.isEmpty()) {
+                    continue;
+                }
+                payload.putIfAbsent("run_id", resultSet.getString("run_id"));
+                runs.put(resultSet.getString("run_id"), payload);
+            }
+        } catch (Exception e) {
+            log.warn("Load agent runs from sqlite failed: {}", e.getMessage());
+        }
+    }
+
+    private void loadRunSteps() {
+        String sql =
+                "SELECT run_id, step_id, payload FROM "
+                        + SQLITE_RUN_STEPS_TABLE
+                        + " ORDER BY run_id, step_id";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet resultSet = statement.executeQuery()) {
+            runSteps.clear();
+            while (resultSet.next()) {
+                Map<String, Object> payload = mapFromJson(resultSet.getString("payload"));
+                if (payload.isEmpty()) {
+                    continue;
+                }
+                payload.putIfAbsent("step_id", resultSet.getString("step_id"));
+                runSteps
+                        .computeIfAbsent(resultSet.getString("run_id"), ignored -> new ArrayList<>())
+                        .add(payload);
+            }
+        } catch (Exception e) {
+            log.warn("Load agent run steps from sqlite failed: {}", e.getMessage());
+        }
+    }
+
+    private void loadRunEvents() {
+        String sql =
+                "SELECT event_id, run_id, event_type, payload, created_at FROM "
+                        + SQLITE_RUN_EVENTS_TABLE
+                        + " ORDER BY event_id";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet resultSet = statement.executeQuery()) {
+            runEvents.clear();
+            while (resultSet.next()) {
+                Map<String, Object> payload = mapFromJson(resultSet.getString("payload"));
+                if (payload.isEmpty()) {
+                    payload = new LinkedHashMap<>();
+                }
+                payload.putIfAbsent("event_id", resultSet.getLong("event_id"));
+                payload.putIfAbsent("run_id", resultSet.getString("run_id"));
+                payload.putIfAbsent("event_type", resultSet.getString("event_type"));
+                payload.putIfAbsent("type", resultSet.getString("event_type"));
+                payload.putIfAbsent("created_at", resultSet.getString("created_at"));
+                runEvents
+                        .computeIfAbsent(resultSet.getString("run_id"), ignored -> new ArrayList<>())
+                        .add(payload);
+                long eventId = resultSet.getLong("event_id");
+                sequence.updateAndGet(current -> Math.max(current, eventId + 1));
+            }
+        } catch (Exception e) {
+            log.warn("Load agent run events from sqlite failed: {}", e.getMessage());
+        }
+    }
+
+    private void loadWaitings() {
+        String sql =
+                "SELECT waiting_id, run_id, payload FROM "
+                        + SQLITE_WAITINGS_TABLE
+                        + " ORDER BY updated_at";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet resultSet = statement.executeQuery()) {
+            waitings.clear();
+            while (resultSet.next()) {
+                Map<String, Object> payload = mapFromJson(resultSet.getString("payload"));
+                if (payload.isEmpty()) {
+                    payload = new LinkedHashMap<>();
+                }
+                payload.putIfAbsent("waiting_id", resultSet.getString("waiting_id"));
+                payload.putIfAbsent("run_id", resultSet.getString("run_id"));
+                waitings.put(resultSet.getString("run_id"), payload);
+            }
+        } catch (Exception e) {
+            log.warn("Load agent waitings from sqlite failed: {}", e.getMessage());
+        }
+    }
+
+    private void persistRun(Map<String, Object> run) {
+        if (!isSqliteEnabled()) {
+            return;
+        }
+        String runId = string(run, "run_id", "");
+        if (runId.isBlank()) {
+            return;
+        }
+        String sql =
+                "INSERT INTO "
+                        + SQLITE_RUNS_TABLE
+                        + " (run_id, payload, updated_at) VALUES (?, ?, ?) ON CONFLICT(run_id)"
+                        + " DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, runId);
+            statement.setString(2, objectMapper.writeValueAsString(run));
+            statement.setString(3, string(run, "finished_at", string(run, "started_at", Instant.now().toString())));
+            statement.executeUpdate();
+        } catch (Exception e) {
+            log.warn("Persist agent run {} failed: {}", runId, e.getMessage());
+        }
+    }
+
+    private void persistRunStep(String runId, Map<String, Object> step) {
+        if (!isSqliteEnabled()) {
+            return;
+        }
+        String stepId = string(step, "step_id", "");
+        if (runId == null || runId.isBlank() || stepId.isBlank()) {
+            return;
+        }
+        String sql =
+                "INSERT INTO "
+                        + SQLITE_RUN_STEPS_TABLE
+                        + " (run_id, step_id, payload, updated_at) VALUES (?, ?, ?, ?) ON"
+                        + " CONFLICT(run_id, step_id) DO UPDATE SET payload = excluded.payload,"
+                        + " updated_at = excluded.updated_at";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, runId);
+            statement.setString(2, stepId);
+            statement.setString(3, objectMapper.writeValueAsString(step));
+            statement.setString(4, Instant.now().toString());
+            statement.executeUpdate();
+        } catch (Exception e) {
+            log.warn("Persist agent run step {}/{} failed: {}", runId, stepId, e.getMessage());
+        }
+    }
+
+    private void persistRunEvent(Map<String, Object> event) {
+        if (!isSqliteEnabled()) {
+            return;
+        }
+        long eventId = number(event.get("event_id"), -1);
+        String runId = string(event, "run_id", "");
+        if (eventId < 0 || runId.isBlank()) {
+            return;
+        }
+        String sql =
+                "INSERT INTO "
+                        + SQLITE_RUN_EVENTS_TABLE
+                        + " (event_id, run_id, event_type, payload, created_at) VALUES (?, ?, ?, ?, ?)"
+                        + " ON CONFLICT(event_id) DO UPDATE SET run_id = excluded.run_id,"
+                        + " event_type = excluded.event_type, payload = excluded.payload,"
+                        + " created_at = excluded.created_at";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setLong(1, eventId);
+            statement.setString(2, runId);
+            statement.setString(3, string(event, "event_type", string(event, "type", "agent_event")));
+            statement.setString(4, objectMapper.writeValueAsString(event));
+            statement.setString(5, string(event, "created_at", Instant.now().toString()));
+            statement.executeUpdate();
+        } catch (Exception e) {
+            log.warn("Persist agent run event {} failed: {}", eventId, e.getMessage());
+        }
+    }
+
+    private void persistWaiting(Map<String, Object> waiting) {
+        if (!isSqliteEnabled()) {
+            return;
+        }
+        String waitingId = string(waiting, "waiting_id", "");
+        String runId = string(waiting, "run_id", "");
+        if (waitingId.isBlank() || runId.isBlank()) {
+            return;
+        }
+        String sql =
+                "INSERT INTO "
+                        + SQLITE_WAITINGS_TABLE
+                        + " (waiting_id, run_id, payload, updated_at) VALUES (?, ?, ?, ?) ON"
+                        + " CONFLICT(waiting_id) DO UPDATE SET run_id = excluded.run_id,"
+                        + " payload = excluded.payload, updated_at = excluded.updated_at";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, waitingId);
+            statement.setString(2, runId);
+            statement.setString(3, objectMapper.writeValueAsString(waiting));
+            statement.setString(4, string(waiting, "updated_at", Instant.now().toString()));
+            statement.executeUpdate();
+        } catch (Exception e) {
+            log.warn("Persist waiting {} failed: {}", waitingId, e.getMessage());
         }
     }
 

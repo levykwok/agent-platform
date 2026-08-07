@@ -11,6 +11,9 @@ import io.agent.platform.control.SkillRegistry;
 import io.agent.platform.control.SkillSpec;
 import io.agent.platform.control.ToolRegistry;
 import io.agent.platform.control.ToolSpec;
+import io.agent.platform.runtime.AgentRuntime;
+import io.agent.platform.tool.WorkflowTool;
+import io.agent.platform.web.WorkflowAssetService;
 import io.agent.platform.tool.PythonScriptTool;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.ClasspathSkillRepository;
@@ -30,6 +33,7 @@ import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
@@ -43,24 +47,47 @@ public class AgentCapabilityAssembler {
     private final SkillRegistry skillRegistry;
     private final Environment environment;
     private final PlatformStorageLayer storage;
+    private final WorkflowAssetService workflowAssetService;
+    private final ObjectProvider<AgentRuntime> runtimeProvider;
 
     public AgentCapabilityAssembler(
             ToolRegistry toolRegistry,
             McpRegistry mcpRegistry,
             SkillRegistry skillRegistry,
             Environment environment,
-            PlatformStorageLayer storage) {
+            PlatformStorageLayer storage,
+            WorkflowAssetService workflowAssetService,
+            ObjectProvider<AgentRuntime> runtimeProvider) {
         this.toolRegistry = toolRegistry;
         this.mcpRegistry = mcpRegistry;
         this.skillRegistry = skillRegistry;
         this.environment = environment;
         this.storage = storage;
+        this.workflowAssetService = workflowAssetService;
+        this.runtimeProvider = runtimeProvider;
     }
 
     public void applyToolsAndMcps(Toolkit toolkit, AgentDefinition definition) {
         List<String> toolRefs = safeRefs(definition.toolRefs());
+        applyWorkflowTools(toolkit, workflowToolRefs(toolRefs));
         applyTools(toolkit, javaToolRefs(toolRefs));
         applyMcps(toolkit, definition.mcpRefs(), toolRefs);
+    }
+
+    private void applyWorkflowTools(Toolkit toolkit, List<String> workflowRefs) {
+        if (workflowRefs.isEmpty()) {
+            return;
+        }
+        AgentRuntime runtime = runtimeProvider.getObject();
+        for (String ref : workflowRefs) {
+            String workflowId = ref.substring("workflow:".length()).trim();
+            if (workflowId.isBlank()) {
+                throw new IllegalStateException("Invalid workflow tool ref: " + ref);
+            }
+            toolkit.registration()
+                    .agentTool(new WorkflowTool(workflowAssetService.requirePublished(workflowId), runtime))
+                    .apply();
+        }
     }
 
     public List<AgentSkillRepository> buildSkillRepositories(AgentDefinition definition) {
@@ -187,7 +214,14 @@ public class AgentCapabilityAssembler {
     }
 
     private List<String> javaToolRefs(List<String> toolRefs) {
-        return safeRefs(toolRefs).stream().filter(ref -> !ref.startsWith("mcp:")).toList();
+        return safeRefs(toolRefs)
+                .stream()
+                .filter(ref -> !ref.startsWith("mcp:") && !ref.startsWith("workflow:"))
+                .toList();
+    }
+
+    private List<String> workflowToolRefs(List<String> toolRefs) {
+        return safeRefs(toolRefs).stream().filter(ref -> ref.startsWith("workflow:")).toList();
     }
 
     private Map<String, List<String>> mcpToolRefs(List<String> toolRefs) {

@@ -227,7 +227,7 @@ EmbeddingModel
 ```yaml
 knowledgeId: platform-policy
 type: simple
-displayName: 公司制度知识库
+displayName: 制度知识库
 embeddingModel: openai:text-embedding-3-small
 vectorStore:
   type: in-memory
@@ -291,7 +291,7 @@ Content-Type: application/json
 {
   "knowledge_id": "platform-policy",
   "type": "simple",
-  "display_name": "公司制度知识库",
+  "display_name": "制度知识库",
   "embedding_model": "openai:text-embedding-3-small",
   "vector_store": {
     "type": "in-memory",

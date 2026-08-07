@@ -21,6 +21,7 @@ import io.agent.platform.web.PlatformCompatibilityState;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
+import io.agentscope.core.message.UserMessage;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -117,7 +118,7 @@ class NestedOrchestrationTest {
         HarnessAgent agent = mock(HarnessAgent.class);
         doReturn(MonoFactory.message(output))
                 .when(agent)
-                .call(anyString(), any(RuntimeContext.class));
+                .call(any(UserMessage.class), any(RuntimeContext.class));
         agents.put(id, agent);
     }
 

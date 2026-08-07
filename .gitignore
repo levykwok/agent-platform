@@ -18,9 +18,11 @@ workspace/tool-test-cases/
 frontend/live-console/node_modules/
 frontend/live-console/*.log
 frontend/live-console/dist/
+frontend/live-console/dist-check*/
 docs/_build/
 docs/_static/
 docs/*.egg-info/
 .flattened-pom.xml
 .env
 .env.local
+.vscode/

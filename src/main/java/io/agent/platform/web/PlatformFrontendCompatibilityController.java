@@ -63,6 +63,7 @@ public class PlatformFrontendCompatibilityController {
     private final PlatformStorageLayer storage;
     private final DocumentKnowledgeService documentKnowledgeService;
     private final KnowledgeCollectionService knowledgeCollectionService;
+    private final WorkflowAssetService workflowAssetService;
     private final WebClient webClient = WebClient.builder().build();
 
     public PlatformFrontendCompatibilityController(
@@ -73,7 +74,8 @@ public class PlatformFrontendCompatibilityController {
             ToolRegistry toolRegistry,
             PlatformStorageLayer storage,
             DocumentKnowledgeService documentKnowledgeService,
-            KnowledgeCollectionService knowledgeCollectionService) {
+            KnowledgeCollectionService knowledgeCollectionService,
+            WorkflowAssetService workflowAssetService) {
         this.state = state;
         this.runtime = runtime;
         this.embeddingModelRegistry = embeddingModelRegistry;
@@ -82,6 +84,7 @@ public class PlatformFrontendCompatibilityController {
         this.storage = storage;
         this.documentKnowledgeService = documentKnowledgeService;
         this.knowledgeCollectionService = knowledgeCollectionService;
+        this.workflowAssetService = workflowAssetService;
     }
 
     @GetMapping("/infra/health")
@@ -275,7 +278,19 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable String runId,
             @PathVariable String waitingId,
             @RequestBody(required = false) Map<String, Object> payload) {
-        return map("ok", true, "run_id", runId, "waiting_id", waitingId, "status", "resumed");
+        Map<String, Object> item =
+                state.resumeWaiting(runId, waitingId, payload == null ? Map.of() : payload);
+        return map(
+                "ok",
+                !"not_found".equals(item.get("status")),
+                "run_id",
+                runId,
+                "waiting_id",
+                waitingId,
+                "status",
+                item.get("status"),
+                "item",
+                item);
     }
 
     @PostMapping("/agents/runs/{runId}/waiting/{waitingId}/reject")
@@ -283,36 +298,294 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable String runId,
             @PathVariable String waitingId,
             @RequestBody(required = false) Map<String, Object> payload) {
-        return map("ok", true, "run_id", runId, "waiting_id", waitingId, "status", "rejected");
+        Map<String, Object> item =
+                state.rejectWaiting(runId, waitingId, payload == null ? Map.of() : payload);
+        return map(
+                "ok",
+                !"not_found".equals(item.get("status")),
+                "run_id",
+                runId,
+                "waiting_id",
+                waitingId,
+                "status",
+                item.get("status"),
+                "item",
+                item);
+    }
+
+    @GetMapping("/workflows")
+    public Map<String, Object> workflows(
+            @RequestParam(required = false) String domain,
+            @RequestParam(required = false) String status) {
+        List<Map<String, Object>> rows = workflowAssetService.list(domain, status);
+        return map("items", rows, "workflows", rows);
+    }
+
+    @GetMapping("/workflows/{workflowId}")
+    public Map<String, Object> workflow(@PathVariable String workflowId) {
+        Map<String, Object> item = workflowAssetService.get(workflowId);
+        return map("item", item, "workflow", item);
+    }
+
+    @PostMapping("/workflows/{workflowId}/validate")
+    public Map<String, Object> validateWorkflow(
+            @PathVariable String workflowId,
+            @RequestBody(required = false) Map<String, Object> payload) {
+        var result =
+                payload == null || payload.isEmpty()
+                        ? workflowAssetService.validateContracts(workflowId)
+                        : workflowAssetService.validateContracts(workflowId, payload);
+        List<Map<String, Object>> diagnostics =
+                result.diagnostics().stream()
+                        .map(
+                                diagnostic ->
+                                        map(
+                                                "severity",
+                                                diagnostic.severity().name().toLowerCase(),
+                                                "code",
+                                                diagnostic.code(),
+                                                "node_id",
+                                                diagnostic.nodeId(),
+                                                "port_id",
+                                                diagnostic.portId(),
+                                                "edge_id",
+                                                diagnostic.edgeId(),
+                                                "message",
+                                                diagnostic.message(),
+                                                "suggestions",
+                                                diagnostic.suggestions()))
+                        .toList();
+        return map("ok", result.valid(), "valid", result.valid(), "diagnostics", diagnostics);
+    }
+
+    @PostMapping("/workflows")
+    public Map<String, Object> createWorkflow(@RequestBody Map<String, Object> payload) {
+        Map<String, Object> item = workflowAssetService.create(payload);
+        return map("ok", true, "item", item, "workflow", item);
+    }
+
+    @PutMapping("/workflows/{workflowId}")
+    public Map<String, Object> saveWorkflow(
+            @PathVariable String workflowId, @RequestBody Map<String, Object> payload) {
+        Map<String, Object> item = workflowAssetService.save(workflowId, payload);
+        return map("ok", true, "item", item, "workflow", item);
+    }
+
+    @DeleteMapping("/workflows/{workflowId}")
+    public Map<String, Object> deleteWorkflow(@PathVariable String workflowId) {
+        workflowAssetService.delete(workflowId);
+        return map("ok", true, "workflow_id", workflowId);
+    }
+
+    @PostMapping("/workflows/{workflowId}/publish")
+    public Map<String, Object> publishWorkflow(@PathVariable String workflowId) {
+        Map<String, Object> item = workflowAssetService.publish(workflowId);
+        return map("ok", true, "item", item, "workflow", item);
+    }
+
+    @PostMapping("/workflows/{workflowId}/unpublish")
+    public Map<String, Object> unpublishWorkflow(@PathVariable String workflowId) {
+        Map<String, Object> item = workflowAssetService.unpublish(workflowId);
+        return map("ok", true, "item", item, "workflow", item);
+    }
+
+    @PostMapping("/workflows/{workflowId}/run")
+    public Mono<Map<String, Object>> runWorkflow(
+            @PathVariable String workflowId,
+            @RequestBody(required = false) Map<String, Object> payload,
+            @RequestHeader(value = "x-user-id", defaultValue = "platform_admin") String userId,
+            @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
+        var workflow = workflowAssetService.requirePublished(workflowId);
+        Map<String, Object> body = payload == null ? Map.of() : payload;
+        String query = string(body.get("query"), string(body.get("message"), ""));
+        String sessionId = string(body.get("session_id"), "workflow_" + workflowId);
+        String runtimeId = "workflow:" + workflowId;
+        Map<String, Object> run = state.createRun(runtimeId, query, userId);
+        String runId = string(run.get("run_id"), "");
+        state.appendSessionMessage(runtimeId, sessionId, userId, "user", query);
+        return runtime.workflow(workflow, new ChatRequest(orgId, userId, sessionId, query))
+                .subscribeOn(Schedulers.boundedElastic())
+                .map(
+                        response -> {
+                            String answer = string(response.text(), "");
+                            Map<String, Object> finished = state.finishRun(runId, answer);
+                            state.appendSessionMessage(
+                                    runtimeId, sessionId, userId, "assistant", answer);
+                            return map(
+                                    "ok",
+                                    true,
+                                    "run",
+                                    finished,
+                                    "run_id",
+                                    runId,
+                                    "status",
+                                    finished.get("status"),
+                                    "answer",
+                                    answer,
+                                    "result",
+                                    map("answer", answer, "text", answer));
+                        })
+                .onErrorResume(
+                        error -> {
+                            Map<String, Object> failed = state.failRun(runId, error);
+                            String message = string(error.getMessage(), "执行失败");
+                            return Mono.just(
+                                    map(
+                                            "ok",
+                                            false,
+                                            "run",
+                                            failed,
+                                            "run_id",
+                                            runId,
+                                            "status",
+                                            "failed",
+                                            "error",
+                                            message));
+                        });
+    }
+
+    @PostMapping(
+            value = "/workflows/{workflowId}/run/stream",
+            produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<Map<String, Object>>> streamWorkflow(
+            @PathVariable String workflowId,
+            @RequestBody(required = false) Map<String, Object> payload,
+            @RequestHeader(value = "x-user-id", defaultValue = "platform_admin") String userId,
+            @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
+        var workflow = workflowAssetService.requirePublished(workflowId);
+        Map<String, Object> body = payload == null ? Map.of() : payload;
+        String query = string(body.get("query"), string(body.get("message"), ""));
+        String sessionId = string(body.get("session_id"), "workflow_" + workflowId);
+        String runtimeId = "workflow:" + workflowId;
+        Map<String, Object> run = state.createRun(runtimeId, query, userId);
+        String runId = string(run.get("run_id"), "");
+        state.appendSessionMessage(runtimeId, sessionId, userId, "user", query);
+        AtomicReference<StringBuilder> answer = new AtomicReference<>(new StringBuilder());
+        return Flux.concat(
+                        Flux.just(
+                                sse(
+                                        "activity",
+                                        map(
+                                                "type",
+                                                "activity",
+                                                "step",
+                                                "receive",
+                                                "title",
+                                                "接收 Workflow 请求",
+                                                "status",
+                                                "success",
+                                                "summary",
+                                                workflow.name(),
+                                                "run_id",
+                                                runId))),
+                        runtime.workflowStream(
+                                        workflow,
+                                        new ChatRequest(orgId, userId, sessionId, query))
+                                .map(
+                                        event -> {
+                                            state.appendRunEventFromEnvelope(runId, event);
+                                            return frontendStreamEvent(
+                                                    event, answer.get(), runId);
+                                        }),
+                        Mono.fromSupplier(
+                                () -> {
+                                    String text = answer.get().toString();
+                                    Map<String, Object> finished = state.finishRun(runId, text);
+                                    state.appendSessionMessage(
+                                            runtimeId, sessionId, userId, "assistant", text);
+                                    return sse(
+                                            "done",
+                                            map(
+                                                    "type",
+                                                    "done",
+                                                    "run_id",
+                                                    runId,
+                                                    "status",
+                                                    "succeeded",
+                                                    "result",
+                                                    map("answer", text, "text", text),
+                                                    "run",
+                                                    finished));
+                                }))
+                .onErrorResume(
+                        error -> {
+                            Map<String, Object> failed = state.failRun(runId, error);
+                            String message = string(error.getMessage(), "执行失败");
+                            return Flux.just(
+                                    sse(
+                                            "error",
+                                            map(
+                                                    "type",
+                                                    "error",
+                                                    "run_id",
+                                                    runId,
+                                                    "status",
+                                                    "failed",
+                                                    "message",
+                                                    message,
+                                                    "run",
+                                                    failed)));
+                        });
     }
 
     @GetMapping("/flows")
     public Map<String, Object> flows() {
-        List<Map<String, Object>> rows =
-                List.of(
+        List<Map<String, Object>> rows = new ArrayList<>();
+        rows.add(
+                map(
+                        "flow_id",
+                        "agentscope_runtime",
+                        "id",
+                        "agentscope_runtime",
+                        "display_name",
+                        "AgentScope Runtime",
+                        "capabilities",
                         map(
-                                "flow_id",
-                                "agentscope_runtime",
-                                "id",
-                                "agentscope_runtime",
-                                "display_name",
-                                "AgentScope Runtime",
-                                "capabilities",
-                                map(
-                                        "supports_tool_calling",
-                                        true,
-                                        "supports_skill_tools",
-                                        true,
-                                        "supports_memory",
-                                        false),
-                                "nodes",
-                                List.of()));
+                                "supports_tool_calling",
+                                true,
+                                "supports_skill_tools",
+                                true,
+                                "supports_memory",
+                                false),
+                        "nodes",
+                        List.of()));
+        workflowAssetService.list(null, "PUBLISHED").forEach(row -> {
+            Map<String, Object> flow = new LinkedHashMap<>(row);
+            flow.put("flow_id", row.get("workflow_id"));
+            flow.put("id", row.get("workflow_id"));
+            flow.put("display_name", row.get("name"));
+            rows.add(flow);
+        });
         return map("items", rows, "flows", rows);
     }
 
     @GetMapping("/tools")
     public Map<String, Object> tools(@RequestParam(required = false) String domain) {
-        return map("items", state.tools(), "tools", state.tools());
+        List<Map<String, Object>> rows = new ArrayList<>(state.tools());
+        workflowAssetService.list(domain, "PUBLISHED")
+                .forEach(
+                        workflow ->
+                                rows.add(
+                                        map(
+                                                "tool_id",
+                                                "workflow:" + workflow.get("workflow_id"),
+                                                "type",
+                                                "workflow",
+                                                "name",
+                                                workflow.get("name"),
+                                                "description",
+                                                workflow.get("description"),
+                                                "enabled",
+                                                true,
+                                                "parameter_schema",
+                                                workflow.getOrDefault(
+                                                        "input_schema",
+                                                        Map.of("type", "object", "properties", Map.of())),
+                                                "workflow_id",
+                                                workflow.get("workflow_id"),
+                                                "version",
+                                                workflow.get("version"))));
+        return map("items", rows, "tools", rows);
     }
 
     @PutMapping("/tools/bindings/{toolId}")
