@@ -13,6 +13,12 @@ jupyter-book build .
 
 构建结果位于 `docs/_build/html/index.html`。
 
+## 运维文档
+
+- [Linux / macOS 开发环境运行](operations/linux-dev.md)
+- [配置与数据](operations/configuration.md)
+- [故障排查](operations/troubleshooting.md)
+
 ## 维护约定
 
 - 界面入口、按钮或流程发生变化时，同步更新 `guide/`。

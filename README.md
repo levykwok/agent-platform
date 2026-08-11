@@ -15,6 +15,30 @@
 - 可覆盖运行目录环境变量：`AGENT_PLATFORM_WORKSPACE`
 
 ## 运行方式
+
+### Windows 开发环境
+```powershell
+.\start-platform.ps1
+```
+
+### Linux / macOS 开发环境
+```bash
+chmod +x start.sh stop.sh
+./start.sh
+# 停止：./stop.sh
+```
+
+说明见 [`docs/operations/linux-dev.md`](docs/operations/linux-dev.md)。
+
+### Docker（旧系统 / glibc 过旧推荐）
+```bash
+# 先准备好 target/agent-platform-0.1.0-SNAPSHOT.jar
+docker compose up -d --build
+```
+
+说明见 [`docs/operations/linux-dev.md`](docs/operations/linux-dev.md#docker旧-glibc-机器推荐)。
+
+### 仅后端 JAR
 ```bash
 mvn clean package -DskipTests
 java -jar target/agent-platform-*.jar
@@ -29,7 +53,7 @@ mvn -pl agentscope-harness,agentscope-extensions/agentscope-extensions-rag/agent
 生产/演示环境不需要 AgentScope 源码。可以从平台项目的 Release 下载 Maven 依赖归档：
 
 ```powershell
-$url = "https://github.com/levykwok/agent-platform/releases/latest/download/agentscope-maven-repo-2.0.0-SNAPSHOT.zip"
+$url = "https://github.com/levykwok/agent-platform/releases/download/v0.1.0-SNAPSHOT/agentscope-maven-repo-2.0.0-SNAPSHOT.zip"
 .\scripts\bootstrap-agentscope.ps1 -ArchiveUrl $url
 mvn clean package -DskipTests
 ```
