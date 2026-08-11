@@ -2,6 +2,8 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'node:path'
 
+const apiProxy = process.env.VITE_API_PROXY || 'http://127.0.0.1:8080'
+
 export default defineConfig({
   base: process.env.NODE_ENV === 'production' ? '/platform/live/console/' : '/',
   plugins: [
@@ -49,14 +51,15 @@ export default defineConfig({
     sourcemap: false,
   },
   server: {
+    host: true,
     proxy: {
-      '/platform/frontend': 'http://127.0.0.1:8080',
-      '/platform/session': 'http://127.0.0.1:8080',
-      '/platform/media': 'http://127.0.0.1:8080',
-      '/platform/chat': 'http://127.0.0.1:8080',
-      '/platform/memory': 'http://127.0.0.1:8080',
-      '/platform/live': 'http://127.0.0.1:8080',
-      '/agent-runs': 'http://127.0.0.1:8080',
+      '/platform/frontend': apiProxy,
+      '/platform/session': apiProxy,
+      '/platform/media': apiProxy,
+      '/platform/chat': apiProxy,
+      '/platform/memory': apiProxy,
+      '/platform/live': apiProxy,
+      '/agent-runs': apiProxy,
     },
   },
 })
