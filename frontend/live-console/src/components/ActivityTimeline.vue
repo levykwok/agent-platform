@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ActivityItem } from '../types'
+import { formatInterimText } from '../lib/streamText'
 
 defineProps<{
   items: ActivityItem[]
@@ -123,6 +124,9 @@ function sourceLabel(item: ActivityItem) {
   const mode = detailValue(item, 'mode')
   return mode ? `${agent} / ${mode}` : agent
 }
+function displaySummary(value: unknown) {
+  return formatInterimText(value)
+}
 </script>
 
 <template>
@@ -139,7 +143,7 @@ function sourceLabel(item: ActivityItem) {
             <strong>{{ title(item) }}</strong>
             <em>{{ statusLabel(item.status) }}</em>
           </div>
-          <p v-if="item.summary">{{ item.summary }}</p>
+          <p v-if="item.summary">{{ displaySummary(item.summary) }}</p>
           <div class="timeline-meta">
             <span v-if="sourceLabel(item)" class="agent-chip">{{ sourceLabel(item) }}</span>
             <span>{{ item.type }}</span>

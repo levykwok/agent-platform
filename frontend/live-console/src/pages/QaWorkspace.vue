@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import ActivityTimeline from '../components/ActivityTimeline.vue'
+import ReasoningSummary from '../components/ReasoningSummary.vue'
 import MemoryPanel from '../components/MemoryPanel.vue'
 import ResourcePanel from '../components/ResourcePanel.vue'
 import { fetchTurnContext, platformHeaders, sendMemoryFeedback } from '../api/liveContext'
@@ -8,6 +9,7 @@ import { consoleState, resetTurn, upsertActivity } from '../stores/consoleState'
 import { currentDomain, fmtDate, localValue, makeHeaders, readJson, type JsonMap } from '../lib/platformApi'
 import { confirmDialog } from '../stores/dialog'
 import { notifyError, notifySuccess } from '../stores/notify'
+import { formatInterimText } from '../lib/streamText'
 import type { ActivityItem, TurnContext } from '../types'
 
 const domainOptions = ref<JsonMap[]>([{ domain: 'platform', label: '平台', org_id: 'platform' }])
@@ -31,6 +33,7 @@ const speakingMessageIndex = ref<number | null>(null)
 const suggestions = ['总结这份文档的关键结论', '列出和问题相关的证据来源', '把答案整理成可执行步骤']
 let mediaRecorder: MediaRecorder | null = null
 let recordingStream: MediaStream | null = null
+let browserRecognition: any = null
 let audioContext: AudioContext | null = null
 let nextAudioStart = 0
 let ttsAbortController: AbortController | null = null
@@ -288,9 +291,66 @@ function stopRecordingTracks() {
   recordingStream = null
 }
 
+function startBrowserSpeechRecognition(RecognitionCtor: any) {
+  try {
+    const recognition = new RecognitionCtor()
+    browserRecognition = recognition
+    const baseText = query.value.trim()
+    let finalText = ''
+    let interimText = ''
+    recognition.lang = 'zh-CN'
+    recognition.continuous = false
+    recognition.interimResults = true
+    recognition.onstart = () => {
+      recording.value = true
+      speechHint.value = '正在识别语音，再点一次麦克风结束。'
+    }
+    recognition.onresult = (event: any) => {
+      interimText = ''
+      for (let index = event.resultIndex || 0; index < event.results.length; index += 1) {
+        const transcript = String(event.results[index]?.[0]?.transcript || '')
+        if (event.results[index]?.isFinal) finalText += transcript
+        else interimText += transcript
+      }
+      const recognized = `${finalText}${interimText}`.trim()
+      query.value = [baseText, recognized].filter(Boolean).join(baseText && recognized ? '\n' : '')
+    }
+    recognition.onerror = (event: any) => {
+      if (browserRecognition !== recognition) return
+      browserRecognition = null
+      recording.value = false
+      const code = String(event?.error || '')
+      speechHint.value = code === 'not-allowed' ? '麦克风权限被拒绝。' : '语音识别失败。'
+      if (code === 'not-allowed') notifyError('请允许浏览器使用麦克风后重试')
+    }
+    recognition.onend = () => {
+      if (browserRecognition !== recognition) return
+      browserRecognition = null
+      recording.value = false
+      const recognized = finalText.trim()
+      query.value = [baseText, recognized].filter(Boolean).join(baseText && recognized ? '\n' : '')
+      speechHint.value = recognized ? '语音已识别，可继续编辑或发送。' : '没有识别到语音内容。'
+    }
+    recognition.start()
+  } catch (err) {
+    browserRecognition = null
+    recording.value = false
+    notifyError(err)
+  }
+}
+
 async function toggleVoiceInput() {
+  if (browserRecognition) {
+    browserRecognition.stop?.()
+    return
+  }
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop()
+    return
+  }
+  const browserSpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+  if (browserSpeechRecognition) {
+    startBrowserSpeechRecognition(browserSpeechRecognition)
     return
   }
   if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
@@ -426,10 +486,10 @@ function finishSpeechControls(index: number) {
   }, 1600)
 }
 
-function fallbackBrowserSpeech(text: string, index: number, err: unknown) {
+function speakBrowserSpeech(text: string, index: number, err?: unknown) {
   if (!('speechSynthesis' in window)) {
     speechHint.value = '朗读失败。'
-    notifyError(err)
+    if (err) notifyError(err)
     speakingMessageIndex.value = null
     return
   }
@@ -454,6 +514,10 @@ async function speakMessage(index: number, text: string) {
   speakingMessageIndex.value = index
   currentTtsSessionId = `tts-${Date.now()}-${Math.random().toString(16).slice(2)}`
   speechHint.value = '正在朗读...'
+  if ('speechSynthesis' in window) {
+    speakBrowserSpeech(text, index)
+    return
+  }
   try {
     let chunkCount = 0
     for (const segment of splitTtsSegments(text)) {
@@ -495,7 +559,7 @@ async function speakMessage(index: number, text: string) {
   } catch (err) {
     ttsAbortController = null
     if ((err as any)?.name === 'AbortError') return
-    fallbackBrowserSpeech(text, index, err)
+    speakBrowserSpeech(text, index, err)
   }
 }
 
@@ -626,6 +690,10 @@ function isUsefulActivity(raw: ActivityItem | JsonMap) {
   if (item.summary && item.summary !== String(detail.agent_id || '')) return true
   const keys = Object.keys(detail).filter((key) => !['agent_id', 'reply_id', 'runtime'].includes(key))
   return keys.length > 0
+}
+
+function displayMessageContent(value: unknown) {
+  return formatInterimText(value)
 }
 
 function cleanActivityList(items: (ActivityItem | JsonMap)[]) {
@@ -811,6 +879,13 @@ onMounted(async () => {
   await loadDomains()
   await loadForDomain()
 })
+
+onUnmounted(() => {
+  browserRecognition?.stop?.()
+  browserRecognition = null
+  stopRecordingTracks()
+  stopSpeechPlayback()
+})
 </script>
 
 <template>
@@ -829,7 +904,7 @@ onMounted(async () => {
     <section class="chat-area">
       <div class="chat-settings"><label>业务域</label><select v-model="selectedDomain" @change="changeDomain"><option v-for="d in domainOptions" :key="d.domain" :value="d.domain">{{ d.label || d.domain }}</option></select><label>Agent</label><select v-model="selectedAgentId" @change="changeAgent"><option v-for="a in agents" :key="String(a.agent_id)" :value="String(a.agent_id)">{{ a.display_name || a.name || a.agent_id }}</option></select><label>知识库范围</label><select v-model="selectedDoc"><option value="">全部文档</option><option v-for="doc in docs" :key="doc.id || doc.doc_id" :value="String(doc.id || doc.doc_id)">{{ doc.filename || doc.title || doc.name }}</option></select><button class="btn btn-ghost btn-sm" @click="showContext = !showContext">{{ showContext ? '隐藏上下文' : '显示上下文' }}</button></div>
       <div class="qa-body" :class="{withContext: showContext}">
-        <div class="chat-msgs"><div v-if="!messages.length" class="empty-state"><div class="empty-icon">💬</div><h3>开始一个问题</h3><p>选择 Agent 后直接对话；也可以限定知识库范围或上传附件，让 Agent 在当前会话中使用这些上下文。</p></div><div v-for="(m, idx) in messages" :key="idx" class="msg-row" :class="m.role"><div class="msg-avatar" :class="m.role === 'user' ? 'user' : 'ai'">{{ m.role === 'user' ? '你' : 'AI' }}</div><div class="bubble-wrap"><div class="bubble" :class="[m.role === 'user' ? 'user' : 'ai', streaming && idx === messages.length - 1 ? 'streaming' : '']">{{ m.content }}</div><div v-if="m.sources && m.sources.length" class="sources"><span v-for="(s, sIdx) in m.sources.slice(0, 4)" :key="sIdx" class="source-chip">📄 {{ s.filename || s.doc_id || '文档' }}</span></div><div v-if="m.role !== 'user' && m.content" class="speech-actions"><button class="speak-btn" :class="{active: speakingMessageIndex === idx}" type="button" @click="speakMessage(idx, String(m.content || ''))">{{ speakingMessageIndex === idx ? '停止朗读' : '朗读' }}</button><span v-if="speakingMessageIndex === idx" class="speech-status">正在朗读</span></div></div></div></div>
+      <div class="chat-msgs"><div v-if="!messages.length" class="empty-state"><div class="empty-icon">💬</div><h3>开始一个问题</h3><p>选择 Agent 后直接对话；也可以限定知识库范围或上传附件，让 Agent 在当前会话中使用这些上下文。</p></div><div v-for="(m, idx) in messages" :key="idx" class="msg-row" :class="m.role"><div class="msg-avatar" :class="m.role === 'user' ? 'user' : 'ai'">{{ m.role === 'user' ? '你' : 'AI' }}</div><div class="bubble-wrap"><ReasoningSummary v-if="m.role !== 'user' && m.trace_id === consoleState.activeTraceId && turnActivity.length" :items="turnActivity" :running="streaming && idx === messages.length - 1" /><div class="bubble" :class="[m.role === 'user' ? 'user' : 'ai', streaming && idx === messages.length - 1 ? 'streaming' : '']">{{ displayMessageContent(m.content) }}</div><div v-if="m.sources && m.sources.length" class="sources"><span v-for="(s, sIdx) in m.sources.slice(0, 4)" :key="sIdx" class="source-chip">📄 {{ s.filename || s.doc_id || '文档' }}</span></div><div v-if="m.role !== 'user' && m.content" class="speech-actions"><button class="speak-btn" :class="{active: speakingMessageIndex === idx}" type="button" @click="speakMessage(idx, String(m.content || ''))">{{ speakingMessageIndex === idx ? '停止朗读' : '朗读' }}</button><span v-if="speakingMessageIndex === idx" class="speech-status">正在朗读</span></div></div></div></div>
         <aside v-if="showContext" class="turn-context-panel"><nav class="tabs"><button v-for="tab in ['activity','resources','memory','evidence']" :key="tab" :class="{active: consoleState.activeTab === tab}" @click="consoleState.activeTab = tab">{{ ({ activity: '活动', resources: '资源', memory: '记忆', evidence: '证据' } as Record<string, string>)[tab] || tab }}</button></nav><p v-if="consoleState.error" class="error-line">{{ consoleState.error }}</p><ActivityTimeline v-if="consoleState.activeTab === 'activity'" :items="turnActivity" /><ResourcePanel v-else-if="consoleState.activeTab === 'resources'" :resources="turnResources" /><MemoryPanel v-else-if="consoleState.activeTab === 'memory'" :long-term="longTermUsed" :episodic="episodicUsed" @feedback="handleMemoryFeedback" /><ResourcePanel v-else :resources="{ citations: turnResources.citations, kg_hits: turnResources.kg_hits, tool_calls: turnResources.tool_calls, attachments: [], documents: [], artifacts: [] }" /></aside>
       </div>
       <div class="composer"><div v-if="!messages.length" class="suggestion-row"><button v-for="s in suggestions" :key="s" class="btn btn-ghost btn-sm" @click="applySuggestion(s)">{{ s }}</button></div><div class="attachment-tray"><span v-for="a in attachments" :key="a.id || a.attachment_id" class="attachment-chip" :class="attachmentStatusClass(a)"><span class="name">{{ a.filename || a.file_name || a.name }}</span><span class="state">{{ attachmentStatusLabel(a) }}</span><button class="chip-close" @click="removeAttachment(a)">×</button></span><span v-if="attachmentStatus" class="muted-small">{{ attachmentStatus }}</span></div><div class="composer-wrap"><input id="fileInput" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.md,.markdown,.txt,.csv" class="hidden" @change="uploadAttachment" /><button class="btn btn-ghost" @click="triggerAttachmentInput">上传文档</button><button class="voice-btn" :class="{active: recording}" type="button" :title="recording ? '停止录音' : '语音输入'" @click="toggleVoiceInput">🎙</button><textarea v-model="query" class="composer-input" rows="1" placeholder="输入问题，按 Enter 发送，Shift+Enter 换行..." @input="autoResize" @keydown="handleComposerKeydown" /><button class="btn btn-primary" :disabled="streaming || !query.trim()" @click="sendQuery">{{ streaming ? '发送中' : '发送' }}</button></div><div class="speech-hint">{{ speechHint }}</div></div>

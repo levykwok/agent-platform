@@ -4,6 +4,7 @@
 package io.agent.platform.web;
 
 import io.agent.platform.control.PlatformStorageLayer;
+import io.agent.platform.control.PlatformArtifactStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -23,11 +24,14 @@ import org.springframework.stereotype.Component;
 public class KnowledgeCollectionService {
 
     private final PlatformStorageLayer storage;
+    private final PlatformArtifactStore artifactStore;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, Map<String, Object>> collections = new LinkedHashMap<>();
 
-    public KnowledgeCollectionService(PlatformStorageLayer storage) {
+    public KnowledgeCollectionService(
+            PlatformStorageLayer storage, PlatformArtifactStore artifactStore) {
         this.storage = storage;
+        this.artifactStore = artifactStore;
         load();
     }
 
@@ -107,6 +111,56 @@ public class KnowledgeCollectionService {
         return copyWithCount(collection);
     }
 
+    /** Move a document out of every folder in the current organization and into one target folder. */
+    public synchronized Map<String, Object> moveDocument(
+            String documentId, String versionId, String targetCollectionId, String orgId) {
+        String docId = string(documentId);
+        if (docId.isBlank()) {
+            throw new IllegalArgumentException("文档标识不能为空。");
+        }
+        String version = nonBlank(versionId, "v1");
+        String normalizedOrg = nonBlank(orgId, "platform");
+        String targetId = string(targetCollectionId);
+        Map<String, Object> target = targetId.isBlank() ? null : required(targetId, normalizedOrg);
+
+        boolean changed = false;
+        for (Map<String, Object> collection : collections.values()) {
+            if (!normalizedOrg.equals(String.valueOf(collection.get("org_id")))) {
+                continue;
+            }
+            List<Map<String, Object>> items = mutableItems(collection);
+            boolean removed = items.removeIf(item -> docId.equals(item.get("item_id")));
+            if (removed) {
+                collection.put("items", items);
+                collection.put("updated_at", Instant.now().toString());
+                changed = true;
+            }
+        }
+
+        if (target != null) {
+            List<Map<String, Object>> items = mutableItems(target);
+            items.add(
+                    map(
+                            "item_type",
+                            "document",
+                            "item_id",
+                            docId,
+                            "resource_id",
+                            docId,
+                            "item_version_id",
+                            version,
+                            "added_at",
+                            Instant.now().toString()));
+            target.put("items", items);
+            target.put("updated_at", Instant.now().toString());
+            changed = true;
+        }
+        if (changed) {
+            persist();
+        }
+        return map("ok", true, "collection_id", targetId, "document_id", docId, "version_id", version);
+    }
+
     public synchronized Map<String, Object> removeDocument(
             String collectionId, String documentId, String versionId, String orgId) {
         Map<String, Object> collection = required(collectionId, orgId);
@@ -125,6 +179,7 @@ public class KnowledgeCollectionService {
     public synchronized void delete(String collectionId, String orgId) {
         required(collectionId, orgId);
         collections.remove(collectionId);
+        artifactStore.deleteCollection(collectionId);
         persist();
     }
 
@@ -171,6 +226,24 @@ public class KnowledgeCollectionService {
     }
 
     private void load() {
+        if (storage.isSqliteEnabled()) {
+            List<PlatformArtifactStore.StoredJson> rows = artifactStore.loadCollections();
+            for (PlatformArtifactStore.StoredJson row : rows) {
+                try {
+                    Map<String, Object> collection =
+                            objectMapper.readValue(row.payload(), new TypeReference<>() {});
+                    if (!collection.isEmpty()) {
+                        collections.put(row.id(), new LinkedHashMap<>(collection));
+                    }
+                } catch (IOException e) {
+                    throw new IllegalStateException(
+                            "Failed to restore knowledge collection: " + row.id(), e);
+                }
+            }
+            if (!collections.isEmpty()) {
+                return;
+            }
+        }
         if (!Files.isRegularFile(file())) {
             return;
         }
@@ -183,6 +256,9 @@ public class KnowledgeCollectionService {
                     collections.put(id, new LinkedHashMap<>(row));
                 }
             }
+            if (storage.isSqliteEnabled()) {
+                persist();
+            }
         } catch (IOException ignored) {
             // Keep the platform available if a manually edited cache is malformed.
         }
@@ -194,6 +270,14 @@ public class KnowledgeCollectionService {
             objectMapper
                     .writerWithDefaultPrettyPrinter()
                     .writeValue(file().toFile(), new ArrayList<>(collections.values()));
+            if (storage.isSqliteEnabled()) {
+                for (Map<String, Object> collection : collections.values()) {
+                    String id = string(collection.get("collection_id"));
+                    if (!id.isBlank()) {
+                        artifactStore.saveCollection(id, objectMapper.writeValueAsString(collection));
+                    }
+                }
+            }
         } catch (IOException e) {
             throw new IllegalStateException("保存知识库分组失败。", e);
         }

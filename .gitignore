@@ -19,6 +19,7 @@ frontend/live-console/node_modules/
 frontend/live-console/*.log
 frontend/live-console/dist/
 frontend/live-console/dist-check*/
+.playwright-cli/
 docs/_build/
 docs/_static/
 docs/*.egg-info/

@@ -15,6 +15,7 @@ const newFolderTitle = ref('')
 const uploadTarget = ref('all')
 const uploading = ref('')
 const uploadColor = ref('')
+const moveStatus = ref('')
 const error = ref('')
 const replaceStatus = ref('')
 const previewStatus = ref('')
@@ -48,6 +49,7 @@ const folders = computed(() => [
   ...specialFolders.value,
   ...collections.value.map((c) => ({ key: collectionKey(c), title: `${orgLabel(c.org_id)} / ${c.title || c.collection_id}`, count: Number(c.item_count ?? c.resource_count ?? (c.items || []).length), icon: '▸' })),
 ])
+function folderTitle(key: string) { return folders.value.find((folder) => folder.key === key)?.title || '全部文档' }
 const collapsedOrgs = ref<Set<string>>(new Set())
 function toggleOrg(org: string) { const s = new Set(collapsedOrgs.value); s.has(org) ? s.delete(org) : s.add(org); collapsedOrgs.value = s }
 function orgExpanded(org: string) { return !collapsedOrgs.value.has(org) }
@@ -155,7 +157,13 @@ async function createFolder() {
   newFolderTitle.value = ''
   await loadDocs()
   const id = data.item?.collection_id || data.collection_id
-  if (id) selectedFolder.value = `${currentOrg.value}::${id}`
+  if (id) {
+    const key = `${currentOrg.value}::${id}`
+    selectedFolder.value = key
+    uploadTarget.value = key
+    selectedDocKey.value = ''
+    resetPreview()
+  }
 }
 async function pollParseStatus(docId: unknown, versionId: unknown, filename: string) {
   const maxAttempts = 40
@@ -216,12 +224,26 @@ async function moveDoc(doc: JsonMap, folderKey: string) {
   const target = parseCollectionKey(folderKey)
   const id = doc.doc_id || doc.id
   const version = doc.version_id || ''
-  for (const c of collections.value) {
-    if (!Array.isArray(c.items) || !c.items.some((item: JsonMap) => itemKey(item) === `${id}::${version}`)) continue
-    await fetch(`/platform/frontend/knowledge/collections/${encodeURIComponent(String(c.collection_id))}/items/document/${encodeURIComponent(String(id))}?item_version_id=${encodeURIComponent(String(version))}`, { method: 'DELETE', headers: makeHeaders(false, String(c.org_id || currentOrg.value)) })
+  const targetCollectionId = ['all', 'unfiled'].includes(target.collection_id) ? '' : target.collection_id
+  moveStatus.value = `正在移动到${targetCollectionId ? folderTitle(folderKey) : '未分组'}...`
+  try {
+    await readJson<JsonMap>(await fetch(`/platform/frontend/knowledge/docs/${encodeURIComponent(String(id))}/${encodeURIComponent(String(version || 'v1'))}/move`, {
+      method: 'POST',
+      headers: makeHeaders(true, String(doc.org_id || currentOrg.value)),
+      body: JSON.stringify({ collection_id: targetCollectionId }),
+    }))
+    const nextFolder = targetCollectionId ? folderKey : 'unfiled'
+    selectedFolder.value = nextFolder
+    uploadTarget.value = nextFolder
+    await loadDocs()
+    const moved = docs.value.find((item) => docKey(item) === docKey(doc))
+    if (moved) await selectDoc(moved)
+    moveStatus.value = `已移动到${targetCollectionId ? folderTitle(folderKey) : '未分组'}`
+    notifySuccess(moveStatus.value)
+  } catch (err) {
+    moveStatus.value = `移动失败：${err instanceof Error ? err.message : String(err)}`
+    notifyError(err)
   }
-  if (target.collection_id && !['all', 'unfiled'].includes(target.collection_id)) await readJson(await fetch(`/platform/frontend/knowledge/collections/${encodeURIComponent(target.collection_id)}/items`, { method: 'POST', headers: makeHeaders(true, target.org_id || currentOrg.value), body: JSON.stringify({ item_type: 'document', item_id: id, item_version_id: version }) }))
-  await loadDocs()
 }
 async function reindexDoc(doc: JsonMap) {
   try {
@@ -323,10 +345,10 @@ onBeforeUnmount(revokePreviewUrl)
           </div>
         </div>
       </div></aside>
-    <aside class="left-pane"><div class="pane-head"><h2>知识文档 <span class="badge">Beta</span></h2><span class="pane-count">{{ visibleDocs.length }} / {{ docs.length }} 篇</span></div><div class="search-wrap"><input v-model="search" placeholder="搜索文档..." /></div><div class="doc-list"><div v-if="!visibleDocs.length" class="empty">当前分组暂无文档</div><div v-for="doc in visibleDocs" :key="docKey(doc)" class="doc-item" :class="{selected: selectedDocKey === docKey(doc)}" @click="selectDoc(doc)"><div class="doc-name"><span :class="['doc-status', parseStatus(doc).includes('fail') ? 'status-fail' : parseStatus(doc).includes('parsed') || parseStatus(doc).includes('succeeded') ? 'status-ok' : 'status-pending']">●</span>{{ doc.filename || doc.doc_id }}</div><div class="doc-meta">{{ orgLabel(doc.org_id) }} / {{ collectionForDoc(doc)?.title || '未分组' }} · {{ blockCount(doc) }} 块 · {{ doc.doc_type || 'unknown' }}</div></div></div><div class="upload-area"><label class="drop-zone"><input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.md,.markdown,.txt,.csv" multiple @change="uploadFiles" /><div>📎 点击选择文档</div><div class="muted-small">支持 PDF、Office、Markdown、TXT、CSV；扫描件 OCR 敬请期待</div></label><div class="upload-target"><label>上传到:</label><select v-model="uploadTarget"><option v-for="f in folders" :key="f.key" :value="f.key">{{ f.title }}</option></select></div><div v-if="uploading" class="muted-small" :class="{ 'error-line': uploadColor === 'error', 'ok-line': uploadColor === 'ok', 'warn-line': uploadColor === 'warn' }">{{ uploading }}</div></div></aside>
+    <aside class="left-pane"><div class="pane-head"><h2>知识文档 <span class="badge">Beta</span></h2><span class="pane-count">{{ visibleDocs.length }} / {{ docs.length }} 篇</span></div><div class="search-wrap"><input v-model="search" placeholder="搜索文档..." /></div><div class="doc-list"><div v-if="!visibleDocs.length" class="empty">当前分组暂无文档</div><div v-for="doc in visibleDocs" :key="docKey(doc)" class="doc-item" :class="{selected: selectedDocKey === docKey(doc)}" @click="selectDoc(doc)"><div class="doc-name"><span :class="['doc-status', parseStatus(doc).includes('fail') ? 'status-fail' : parseStatus(doc).includes('parsed') || parseStatus(doc).includes('succeeded') ? 'status-ok' : 'status-pending']">●</span>{{ doc.filename || doc.doc_id }}</div><div class="doc-meta">{{ orgLabel(doc.org_id) }} / {{ collectionForDoc(doc)?.title || '未分组' }} · {{ blockCount(doc) }} 块 · {{ doc.doc_type || 'unknown' }}</div></div></div><div class="upload-area"><div class="upload-target"><label>先选择上传文件夹:</label><select v-model="uploadTarget"><option v-for="f in folders" :key="f.key" :value="f.key">{{ f.title }}</option></select><div class="muted-small">当前目标：{{ folderTitle(uploadTarget) }}；选中文件夹后再选择文件。</div></div><label class="drop-zone"><input type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.md,.markdown,.txt,.csv" multiple @change="uploadFiles" /><div>📎 选择文件并上传</div><div class="muted-small">支持 PDF、Office、Markdown、TXT、CSV；扫描件 OCR 敬请期待</div></label><div v-if="uploading" class="muted-small" :class="{ 'error-line': uploadColor === 'error', 'ok-line': uploadColor === 'ok', 'warn-line': uploadColor === 'warn' }">{{ uploading }}</div></div></aside>
     <main class="content"><p v-if="error" class="error-line">{{ error }}</p>
       <section class="panel"><div class="panel-head"><h3>文档详情</h3><div class="actions" v-if="selectedDoc"><button class="btn btn-ghost btn-sm" @click="ensureDocumentPreview(selectedDoc)">预览文件</button><a class="btn btn-primary btn-sm" :href="contextHref('/platform/live/qa', selectedDomain, selectedDoc.org_id || currentOrg) + '&doc_id=' + encodeURIComponent(selectedDoc.doc_id || selectedDoc.id) + '&version_id=' + encodeURIComponent(selectedDoc.version_id || '') + (selectedDoc.org_id ? '&doc_org_id=' + encodeURIComponent(selectedDoc.org_id) : '')">限定此文档问答</a><button class="btn btn-ghost btn-sm" @click="reindexDoc(selectedDoc)">重新解析并建索引</button><button class="btn btn-ghost btn-sm" @click="deleteDoc(selectedDoc)">删除</button></div></div>
-        <div class="panel-body" v-if="selectedDoc"><div class="detail-grid"><div class="detail-key">文件名</div><div class="detail-val">{{ selectedDoc.filename || selectedDoc.doc_id }}</div><div class="detail-key">组织</div><div class="detail-val">{{ orgLabel(selectedDoc.org_id) }}</div><div class="detail-key">解析状态</div><div class="detail-val">{{ parseStatus(selectedDoc) }} · {{ blockCount(selectedDoc) }} 块</div><div class="detail-key">向量索引</div><div class="detail-val"><span class="badge">{{ selectedDoc.vector_index_status || '待建立' }}</span><span v-if="selectedDoc.vector_indexed_chunks" class="muted-small"> · {{ selectedDoc.vector_indexed_chunks }} 块</span><div v-if="selectedDoc.vector_index_message" class="muted-small">{{ selectedDoc.vector_index_message }}</div></div><div class="detail-key">Doc ID</div><div class="detail-val mono">{{ selectedDoc.doc_id || selectedDoc.id }} · {{ selectedDoc.version_id || 'v1' }}</div><div class="detail-key">类型</div><div class="detail-val"><span class="badge">{{ selectedDoc.doc_type || 'unknown' }}</span></div><div class="detail-key">分组</div><div class="detail-val"><select :value="collectionForDoc(selectedDoc) ? collectionKey(collectionForDoc(selectedDoc)!) : ''" @change="moveDoc(selectedDoc, ($event.target as HTMLSelectElement).value)"><option value="">未分组</option><option v-for="c in collections.filter(c => String(c.org_id || '') === String(selectedDoc?.org_id || ''))" :key="collectionKey(c)" :value="collectionKey(c)">{{ c.title }}</option></select></div></div><div v-if="selectedDoc.parse_message" class="muted-small">{{ selectedDoc.parse_message }}</div><div class="preview-wrap"><div class="preview-toolbar"><div><div class="preview-title">文件预览</div><div class="preview-hint">{{ previewStatus || '点击“预览文件”生成或打开预览。' }}</div></div><button v-if="selectedPreview" class="btn btn-ghost btn-sm" @click="loadDocumentPreview(selectedDoc, selectedPreview)">重新加载</button></div><pre v-if="previewMode === 'text'" class="preview-text">{{ previewText }}</pre><img v-else-if="previewMode === 'image'" class="preview-image" :src="previewUrl" alt="文档预览" /><iframe v-else-if="previewMode === 'frame'" class="preview-frame" :src="previewUrl" title="文档预览"></iframe><div v-else class="preview-empty">{{ previewStatus || 'PDF 可直接预览；Office 文件会转换为 PDF 后预览。扫描件 OCR 敬请期待。' }}</div></div></div>
+        <div class="panel-body" v-if="selectedDoc"><div class="detail-grid"><div class="detail-key">文件名</div><div class="detail-val">{{ selectedDoc.filename || selectedDoc.doc_id }}</div><div class="detail-key">组织</div><div class="detail-val">{{ orgLabel(selectedDoc.org_id) }}</div><div class="detail-key">解析状态</div><div class="detail-val">{{ parseStatus(selectedDoc) }} · {{ blockCount(selectedDoc) }} 块</div><div class="detail-key">向量索引</div><div class="detail-val"><span class="badge">{{ selectedDoc.vector_index_status || '待建立' }}</span><span v-if="selectedDoc.vector_indexed_chunks" class="muted-small"> · {{ selectedDoc.vector_indexed_chunks }} 块</span><div v-if="selectedDoc.vector_index_message" class="muted-small">{{ selectedDoc.vector_index_message }}</div></div><div class="detail-key">Doc ID</div><div class="detail-val mono">{{ selectedDoc.doc_id || selectedDoc.id }} · {{ selectedDoc.version_id || 'v1' }}</div><div class="detail-key">类型</div><div class="detail-val"><span class="badge">{{ selectedDoc.doc_type || 'unknown' }}</span></div><div class="detail-key">移动到</div><div class="detail-val"><select :value="collectionForDoc(selectedDoc) ? collectionKey(collectionForDoc(selectedDoc)!) : ''" @change="moveDoc(selectedDoc, ($event.target as HTMLSelectElement).value)"><option value="">未分组</option><option v-for="c in collections.filter(c => String(c.org_id || '') === String(selectedDoc?.org_id || ''))" :key="collectionKey(c)" :value="collectionKey(c)">{{ c.title }}</option></select><div v-if="moveStatus" class="muted-small">{{ moveStatus }}</div></div></div><div v-if="selectedDoc.parse_message" class="muted-small">{{ selectedDoc.parse_message }}</div><div class="preview-wrap"><div class="preview-toolbar"><div><div class="preview-title">文件预览</div><div class="preview-hint">{{ previewStatus || '点击“预览文件”生成或打开预览。' }}</div></div><button v-if="selectedPreview" class="btn btn-ghost btn-sm" @click="loadDocumentPreview(selectedDoc, selectedPreview)">重新加载</button></div><pre v-if="previewMode === 'text'" class="preview-text">{{ previewText }}</pre><img v-else-if="previewMode === 'image'" class="preview-image" :src="previewUrl" alt="文档预览" /><iframe v-else-if="previewMode === 'frame'" class="preview-frame" :src="previewUrl" title="文档预览"></iframe><div v-else class="preview-empty">{{ previewStatus || 'PDF 可直接预览；Office 文件会转换为 PDF 后预览。扫描件 OCR 敬请期待。' }}</div></div></div>
         <div v-else class="empty-state"><div><div class="empty-icon">📚</div><strong>选择左侧文档查看索引信息</strong><div>这里负责知识库管理；问答请进入“交互问答”。</div></div></div>
       </section></main>
   </section>

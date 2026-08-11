@@ -14,7 +14,8 @@ export default defineConfig({
             next()
             return
           }
-          if (!req.url.startsWith('/platform/live/')) {
+          const pathname = req.url.split('?')[0]
+          if (pathname !== '/platform/live' && !pathname.startsWith('/platform/live/')) {
             next()
             return
           }

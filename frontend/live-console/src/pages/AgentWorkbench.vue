@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import AgentWaitingCard from '../components/AgentWaitingCard.vue'
 import { currentDomain, currentOrgId, makeHeaders, readJson, type JsonMap } from '../lib/platformApi'
 import { notifyError } from '../stores/notify'
+import { formatInterimText } from '../lib/streamText'
 
 const agents = ref<JsonMap[]>([])
 const selectedId = ref('')
@@ -412,6 +413,10 @@ async function onWaitingRejected(msg: JsonMap) {
   await refreshRunMessage(msg)
 }
 
+function displayMessageContent(value: unknown) {
+  return formatInterimText(value)
+}
+
 async function send() {
   const text = query.value.trim()
   if ((!text && !imageInputs.value.length && !documentInputs.value.length) || running.value || documentsUploading.value || !selectedId.value) return
@@ -605,7 +610,7 @@ onMounted(async () => { await loadDomains(); await loadAgents(); await loadSessi
           <div class="msg-avatar" :class="m.role === 'user' ? 'user' : 'ai'">{{ m.role === 'user' ? '你' : 'AI' }}</div>
           <div class="bubble-wrap">
             <details v-if="m.role !== 'user' && (m.steps || []).length" class="wb-steps" :open="m.pending">
-              <summary>执行过程 · {{ m.steps.length }} 步</summary>
+              <summary><span>{{ m.pending ? '正在思考' : '思考过程' }} · {{ m.steps.length }} 步</span><small>展示结构化执行摘要</small></summary>
               <div v-for="(st, si) in m.steps" :key="si" class="wb-step" :class="st.status">
                 <span class="wb-step-dot"></span>
                 <div class="wb-step-ct">
@@ -619,7 +624,7 @@ onMounted(async () => { await loadDomains(); await loadAgents(); await loadSessi
                 </div>
               </div>
             </details>
-            <div v-if="m.role !== 'user' || m.content" class="bubble" :class="[m.role === 'user' ? 'user' : 'ai', m.meta?.error ? 'err' : '', m.pending && !m.content ? 'streaming' : '']">{{ m.content || (m.pending ? (m.steps && m.steps.length ? '生成回答中…' : '运行中…') : '') }}</div>
+            <div v-if="m.role !== 'user' || m.content" class="bubble" :class="[m.role === 'user' ? 'user' : 'ai', m.meta?.error ? 'err' : '', m.pending && !m.content ? 'streaming' : '']">{{ displayMessageContent(m.content || (m.pending ? (m.steps && m.steps.length ? '生成回答中…' : '运行中…') : '')) }}</div>
             <AgentWaitingCard v-if="m.waiting && m.meta?.run_id" :run-id="String(m.meta.run_id)" :waiting="m.waiting" @resumed="onWaitingResumed(m)" @rejected="onWaitingRejected(m)" />
             <div v-if="m.meta && !m.meta.error" class="msg-meta">
               <span v-if="m.meta.route">route: {{ m.meta.route }}</span>
@@ -724,6 +729,8 @@ onMounted(async () => { await loadDomains(); await loadAgents(); await loadSessi
 .msg-meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 4px; }
 .wb-steps { margin-bottom: 6px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; padding: 6px 10px; max-width: 600px; }
 .wb-steps summary { font-size: 11px; font-weight: 600; color: var(--muted); cursor: pointer; }
+.wb-steps summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.wb-steps summary small { color: #94a3b8; font-size: 10px; font-weight: 400; }
 .wb-step { display: flex; align-items: center; gap: 7px; font-size: 12px; padding: 4px 0; color: #334155; }
 .wb-step-dot { width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1; flex-shrink: 0; }
 .wb-step.success .wb-step-dot { background: var(--green); }

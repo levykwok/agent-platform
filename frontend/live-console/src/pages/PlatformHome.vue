@@ -57,7 +57,7 @@ const kafkaStatus = computed(() => {
 })
 
 const infraDetails = computed(() => [
-  { name: 'PostgreSQL', ok: Boolean(infra.value.databases?.platform_configured), sub: '平台库' },
+  { name: '平台数据库', ok: Boolean(infra.value.databases?.platform_configured), sub: '配置持久化' },
   { name: 'Redis', ok: Boolean(infra.value.redis?.configured), sub: infra.value.redis?.enabled ? '缓存/限流' : '未启用' },
   { name: 'Kafka', ok: Boolean(infra.value.kafka?.available), sub: infra.value.kafka?.bootstrap_servers || '消息总线' },
   { name: 'MinIO', ok: Boolean(infra.value.object_storage?.minio_enabled), sub: infra.value.object_storage?.bucket || '对象存储' },

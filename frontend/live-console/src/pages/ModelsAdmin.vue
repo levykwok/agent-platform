@@ -441,13 +441,36 @@ async function testModel(m: JsonMap) {
     body = { query: values.query, documents: (values.documents || '').split('\n').map((s) => s.trim()).filter(Boolean) }
   } else {
     const vision = (m.capabilities || []).map(String).some((capability: string) => capability.toLowerCase() === 'vision')
-    const input = await promptDialog(vision ? '测试视觉模型' : '测试模型', 'Prompt', vision ? '请描述这张图片。' : 'ping')
-    if (input === null) return
     if (vision) {
-      pendingVisionTest.value = { model: m, prompt: input }
-      visionTestInputEl.value?.click()
+      const values = await formDialog({
+        title: '测试视觉模型',
+        message: '视觉模型支持纯文本测试；如果需要验证图片理解，再选择“文字 + 图片”。',
+        fields: [
+          { key: 'prompt', label: 'Prompt', type: 'textarea', default: '请简单介绍一下你自己。' },
+          {
+            key: 'input_mode',
+            label: '输入方式',
+            type: 'select',
+            default: 'text',
+            options: [
+              { value: 'text', label: '仅文字（不上传图片）' },
+              { value: 'image', label: '文字 + 图片' },
+            ],
+          },
+        ],
+      })
+      if (!values) return
+      const prompt = String(values.prompt || '').trim() || 'ping'
+      if (values.input_mode === 'image') {
+        pendingVisionTest.value = { model: m, prompt }
+        visionTestInputEl.value?.click()
+        return
+      }
+      await submitModelTest(m, { prompt, max_tokens: 256 })
       return
     }
+    const input = await promptDialog('测试模型', 'Prompt', 'ping')
+    if (input === null) return
     body = { prompt: input, max_tokens: 256 }
   }
   await submitModelTest(m, body)

@@ -65,12 +65,19 @@ public class YamlToolRegistry implements ToolRegistry {
         return new ToolSpec(
                 tool.toolId(),
                 safe(tool.type(), "java"),
-                tool.className(),
+                normalizeLegacyClassName(tool.className()),
                 tool.description(),
                 tool.enabled(),
                 tool.scriptPath(),
                 tool.parameterSchema(),
                 tool.timeoutMs());
+    }
+
+    private String normalizeLegacyClassName(String className) {
+        if ("com.company.platform.tool.PlatformWebTools".equals(className)) {
+            return "io.agent.platform.tool.PlatformWebTools";
+        }
+        return className;
     }
 
     private ToolSpec normalize(ToolSpec spec) {

@@ -4,6 +4,7 @@
 package io.agent.platform.web;
 
 import io.agent.platform.control.EmbeddingModelRegistry;
+import io.agent.platform.control.PlatformArtifactStore;
 import io.agent.platform.control.PlatformStorageLayer;
 import io.agent.platform.control.ToolRegistry;
 import io.agent.platform.control.ToolSpec;
@@ -16,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.message.TextBlock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -56,6 +58,7 @@ public class PlatformFrontendCompatibilityController {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final PlatformCompatibilityState state;
+    private final PlatformArtifactStore artifactStore;
     private final AgentRuntime runtime;
     private final EmbeddingModelRegistry embeddingModelRegistry;
     private final McpToolDiscoveryService mcpToolDiscoveryService;
@@ -68,6 +71,7 @@ public class PlatformFrontendCompatibilityController {
 
     public PlatformFrontendCompatibilityController(
             PlatformCompatibilityState state,
+            PlatformArtifactStore artifactStore,
             AgentRuntime runtime,
             EmbeddingModelRegistry embeddingModelRegistry,
             McpToolDiscoveryService mcpToolDiscoveryService,
@@ -77,6 +81,7 @@ public class PlatformFrontendCompatibilityController {
             KnowledgeCollectionService knowledgeCollectionService,
             WorkflowAssetService workflowAssetService) {
         this.state = state;
+        this.artifactStore = artifactStore;
         this.runtime = runtime;
         this.embeddingModelRegistry = embeddingModelRegistry;
         this.mcpToolDiscoveryService = mcpToolDiscoveryService;
@@ -131,12 +136,12 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/agents")
-    public Map<String, Object> agents(@RequestParam(required = false) String domain) {
+    public Map<String, Object> agents(@RequestParam(name = "domain", required = false) String domain) {
         return map("items", state.agents(), "agents", state.agents());
     }
 
     @GetMapping("/agents/{agentId}")
-    public Map<String, Object> agent(@PathVariable String agentId) {
+    public Map<String, Object> agent(@PathVariable("agentId") String agentId) {
         return state.agents().stream()
                 .filter(row -> agentId.equals(row.get("agent_id")))
                 .findFirst()
@@ -144,20 +149,20 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/agents/{agentId}/spec")
-    public Map<String, Object> agentSpec(@PathVariable String agentId) {
+    public Map<String, Object> agentSpec(@PathVariable("agentId") String agentId) {
         return state.agentSpec(agentId);
     }
 
     @PutMapping("/agents/{agentId}/spec")
     public Map<String, Object> saveAgentSpec(
-            @PathVariable String agentId, @RequestBody Map<String, Object> payload) {
+            @PathVariable("agentId") String agentId, @RequestBody Map<String, Object> payload) {
         Map<String, Object> agent = state.saveAgentSpec(agentId, payload);
         runtime.evict(agentId);
         return map("ok", true, "item", agent, "agent", agent);
     }
 
     @DeleteMapping("/agents/{agentId}/spec")
-    public Map<String, Object> deleteAgentSpec(@PathVariable String agentId) {
+    public Map<String, Object> deleteAgentSpec(@PathVariable("agentId") String agentId) {
         state.deleteAgentSpec(agentId);
         runtime.evict(agentId);
         return map("ok", true, "agent_id", agentId);
@@ -171,7 +176,7 @@ public class PlatformFrontendCompatibilityController {
 
     @PatchMapping("/agents/{agentId}")
     public Map<String, Object> patchAgent(
-            @PathVariable String agentId, @RequestBody Map<String, Object> payload) {
+            @PathVariable("agentId") String agentId, @RequestBody Map<String, Object> payload) {
         payload.put("agent_id", agentId);
         Map<String, Object> agent = state.upsertAgent(payload);
         return map("item", agent, "agent", agent);
@@ -179,9 +184,9 @@ public class PlatformFrontendCompatibilityController {
 
     @GetMapping("/agents/runs")
     public Map<String, Object> runs(
-            @RequestParam(required = false) String agent_id,
-            @RequestParam(required = false) String status,
-            @RequestParam(defaultValue = "50") int limit) {
+            @RequestParam(name = "agent_id", required = false) String agent_id,
+            @RequestParam(name = "status", required = false) String status,
+            @RequestParam(name = "limit", defaultValue = "50") int limit) {
         List<Map<String, Object>> rows = state.runs(agent_id, status, limit);
         return map("items", rows, "runs", rows);
     }
@@ -252,31 +257,31 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/agents/runs/{runId}")
-    public Map<String, Object> run(@PathVariable String runId) {
+    public Map<String, Object> run(@PathVariable("runId") String runId) {
         return map("run", state.run(runId));
     }
 
     @GetMapping("/agents/runs/{runId}/steps")
-    public Map<String, Object> runSteps(@PathVariable String runId) {
+    public Map<String, Object> runSteps(@PathVariable("runId") String runId) {
         List<Map<String, Object>> rows = state.runSteps(runId);
         return map("items", rows, "steps", rows);
     }
 
     @GetMapping("/agents/runs/{runId}/events")
-    public Map<String, Object> runEvents(@PathVariable String runId) {
+    public Map<String, Object> runEvents(@PathVariable("runId") String runId) {
         List<Map<String, Object>> rows = state.runEvents(runId);
         return map("items", rows, "events", rows, "next_after_id", rows.size());
     }
 
     @GetMapping("/agents/runs/{runId}/waiting")
-    public Map<String, Object> waiting(@PathVariable String runId) {
+    public Map<String, Object> waiting(@PathVariable("runId") String runId) {
         return map("item", state.waiting(runId));
     }
 
     @PostMapping("/agents/runs/{runId}/waiting/{waitingId}/resume")
     public Map<String, Object> resumeWaiting(
-            @PathVariable String runId,
-            @PathVariable String waitingId,
+            @PathVariable("runId") String runId,
+            @PathVariable("waitingId") String waitingId,
             @RequestBody(required = false) Map<String, Object> payload) {
         Map<String, Object> item =
                 state.resumeWaiting(runId, waitingId, payload == null ? Map.of() : payload);
@@ -295,8 +300,8 @@ public class PlatformFrontendCompatibilityController {
 
     @PostMapping("/agents/runs/{runId}/waiting/{waitingId}/reject")
     public Map<String, Object> rejectWaiting(
-            @PathVariable String runId,
-            @PathVariable String waitingId,
+            @PathVariable("runId") String runId,
+            @PathVariable("waitingId") String waitingId,
             @RequestBody(required = false) Map<String, Object> payload) {
         Map<String, Object> item =
                 state.rejectWaiting(runId, waitingId, payload == null ? Map.of() : payload);
@@ -315,21 +320,21 @@ public class PlatformFrontendCompatibilityController {
 
     @GetMapping("/workflows")
     public Map<String, Object> workflows(
-            @RequestParam(required = false) String domain,
-            @RequestParam(required = false) String status) {
+            @RequestParam(name = "domain", required = false) String domain,
+            @RequestParam(name = "status", required = false) String status) {
         List<Map<String, Object>> rows = workflowAssetService.list(domain, status);
         return map("items", rows, "workflows", rows);
     }
 
     @GetMapping("/workflows/{workflowId}")
-    public Map<String, Object> workflow(@PathVariable String workflowId) {
+    public Map<String, Object> workflow(@PathVariable("workflowId") String workflowId) {
         Map<String, Object> item = workflowAssetService.get(workflowId);
         return map("item", item, "workflow", item);
     }
 
     @PostMapping("/workflows/{workflowId}/validate")
     public Map<String, Object> validateWorkflow(
-            @PathVariable String workflowId,
+            @PathVariable("workflowId") String workflowId,
             @RequestBody(required = false) Map<String, Object> payload) {
         var result =
                 payload == null || payload.isEmpty()
@@ -366,32 +371,32 @@ public class PlatformFrontendCompatibilityController {
 
     @PutMapping("/workflows/{workflowId}")
     public Map<String, Object> saveWorkflow(
-            @PathVariable String workflowId, @RequestBody Map<String, Object> payload) {
+            @PathVariable("workflowId") String workflowId, @RequestBody Map<String, Object> payload) {
         Map<String, Object> item = workflowAssetService.save(workflowId, payload);
         return map("ok", true, "item", item, "workflow", item);
     }
 
     @DeleteMapping("/workflows/{workflowId}")
-    public Map<String, Object> deleteWorkflow(@PathVariable String workflowId) {
+    public Map<String, Object> deleteWorkflow(@PathVariable("workflowId") String workflowId) {
         workflowAssetService.delete(workflowId);
         return map("ok", true, "workflow_id", workflowId);
     }
 
     @PostMapping("/workflows/{workflowId}/publish")
-    public Map<String, Object> publishWorkflow(@PathVariable String workflowId) {
+    public Map<String, Object> publishWorkflow(@PathVariable("workflowId") String workflowId) {
         Map<String, Object> item = workflowAssetService.publish(workflowId);
         return map("ok", true, "item", item, "workflow", item);
     }
 
     @PostMapping("/workflows/{workflowId}/unpublish")
-    public Map<String, Object> unpublishWorkflow(@PathVariable String workflowId) {
+    public Map<String, Object> unpublishWorkflow(@PathVariable("workflowId") String workflowId) {
         Map<String, Object> item = workflowAssetService.unpublish(workflowId);
         return map("ok", true, "item", item, "workflow", item);
     }
 
     @PostMapping("/workflows/{workflowId}/run")
     public Mono<Map<String, Object>> runWorkflow(
-            @PathVariable String workflowId,
+            @PathVariable("workflowId") String workflowId,
             @RequestBody(required = false) Map<String, Object> payload,
             @RequestHeader(value = "x-user-id", defaultValue = "platform_admin") String userId,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
@@ -448,7 +453,7 @@ public class PlatformFrontendCompatibilityController {
             value = "/workflows/{workflowId}/run/stream",
             produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<Map<String, Object>>> streamWorkflow(
-            @PathVariable String workflowId,
+            @PathVariable("workflowId") String workflowId,
             @RequestBody(required = false) Map<String, Object> payload,
             @RequestHeader(value = "x-user-id", defaultValue = "platform_admin") String userId,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
@@ -560,7 +565,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/tools")
-    public Map<String, Object> tools(@RequestParam(required = false) String domain) {
+    public Map<String, Object> tools(@RequestParam(name = "domain", required = false) String domain) {
         List<Map<String, Object>> rows = new ArrayList<>(state.tools());
         workflowAssetService.list(domain, "PUBLISHED")
                 .forEach(
@@ -590,15 +595,15 @@ public class PlatformFrontendCompatibilityController {
 
     @PutMapping("/tools/bindings/{toolId}")
     public Map<String, Object> toolBinding(
-            @PathVariable String toolId, @RequestBody Map<String, Object> payload) {
+            @PathVariable("toolId") String toolId, @RequestBody Map<String, Object> payload) {
         Map<String, Object> binding = state.saveToolBinding(toolId, payload);
         return map("ok", true, "tool_id", toolId, "binding", binding);
     }
 
     @PutMapping("/tools/agents/{agentId}/policies/{toolId}")
     public Map<String, Object> toolPolicy(
-            @PathVariable String agentId,
-            @PathVariable String toolId,
+            @PathVariable("agentId") String agentId,
+            @PathVariable("toolId") String toolId,
             @RequestBody Map<String, Object> payload) {
         return map("ok", true, "agent_id", agentId, "tool_id", toolId, "policy", payload);
     }
@@ -631,6 +636,7 @@ public class PlatformFrontendCompatibilityController {
         try {
             Files.createDirectories(dir);
             Files.writeString(scriptPath, script);
+            artifactStore.saveToolFile(toolId, "tool.py", script.getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
             throw new IllegalStateException("Failed to save Python tool script: " + toolId, e);
         }
@@ -670,7 +676,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/tools/python/{toolId}")
-    public Map<String, Object> getPythonTool(@PathVariable String toolId) {
+    public Map<String, Object> getPythonTool(@PathVariable("toolId") String toolId) {
         ToolSpec spec =
                 toolRegistry
                         .find(toolId)
@@ -682,7 +688,17 @@ public class PlatformFrontendCompatibilityController {
         Path scriptPath = resolveWorkspacePath(spec.scriptPath());
         String script;
         try {
-            script = Files.readString(scriptPath);
+            if (Files.isRegularFile(scriptPath)) {
+                script = Files.readString(scriptPath);
+            } else {
+                byte[] persisted = artifactStore.loadToolFiles(toolId).get("tool.py");
+                if (persisted == null) {
+                    throw new IllegalStateException("Python tool script does not exist: " + toolId);
+                }
+                Files.createDirectories(scriptPath.getParent());
+                Files.write(scriptPath, persisted);
+                script = new String(persisted, StandardCharsets.UTF_8);
+            }
         } catch (Exception e) {
             throw new IllegalStateException("Failed to read Python tool script: " + toolId, e);
         }
@@ -707,7 +723,7 @@ public class PlatformFrontendCompatibilityController {
 
     @PutMapping("/tools/python/{toolId}")
     public Map<String, Object> updatePythonTool(
-            @PathVariable String toolId, @RequestBody Map<String, Object> payload) {
+            @PathVariable("toolId") String toolId, @RequestBody Map<String, Object> payload) {
         ToolSpec existing =
                 toolRegistry
                         .find(toolId)
@@ -724,6 +740,7 @@ public class PlatformFrontendCompatibilityController {
         try {
             Files.createDirectories(scriptPath.getParent());
             Files.writeString(scriptPath, script);
+            artifactStore.saveToolFile(toolId, "tool.py", script.getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
             throw new IllegalStateException("Failed to update Python tool script: " + toolId, e);
         }
@@ -822,7 +839,7 @@ public class PlatformFrontendCompatibilityController {
 
     @PostMapping("/tools/{toolId}/test")
     public Map<String, Object> testTool(
-            @PathVariable String toolId,
+            @PathVariable("toolId") String toolId,
             @RequestBody(required = false) Map<String, Object> payload) {
         Instant started = Instant.now();
         if (!toolId.startsWith("mcp:")) {
@@ -901,7 +918,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/tools/{toolId}/schema-snapshots")
-    public Map<String, Object> schemaSnapshots(@PathVariable String toolId) {
+    public Map<String, Object> schemaSnapshots(@PathVariable("toolId") String toolId) {
         return map("items", state.toolSchemaSnapshots(toolId));
     }
 
@@ -923,13 +940,13 @@ public class PlatformFrontendCompatibilityController {
 
     @PatchMapping("/mcp/{id}")
     public Map<String, Object> patchMcp(
-            @PathVariable String id, @RequestBody Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody Map<String, Object> payload) {
         Map<String, Object> server = state.upsertMcpServer(id, payload);
         return map("item", server, "server", server);
     }
 
     @DeleteMapping("/mcp/{id}")
-    public Map<String, Object> deleteMcp(@PathVariable String id) {
+    public Map<String, Object> deleteMcp(@PathVariable("id") String id) {
         state.deleteMcpServer(id);
         return map("ok", true, "id", id);
     }
@@ -943,7 +960,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @PostMapping("/mcp/{id}/probe")
-    public Map<String, Object> probeMcpById(@PathVariable String id) {
+    public Map<String, Object> probeMcpById(@PathVariable("id") String id) {
         Map<String, Object> server =
                 state.mcpServers().stream()
                         .filter(row -> id.equals(String.valueOf(row.get("id"))))
@@ -958,7 +975,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/mcp/{id}/tools")
-    public Map<String, Object> mcpTools(@PathVariable String id) {
+    public Map<String, Object> mcpTools(@PathVariable("id") String id) {
         Map<String, Object> server =
                 state.mcpServers().stream()
                         .filter(row -> id.equals(String.valueOf(row.get("id"))))
@@ -970,13 +987,13 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/mcp/{id}/agents")
-    public Map<String, Object> mcpBoundAgents(@PathVariable String id) {
+    public Map<String, Object> mcpBoundAgents(@PathVariable("id") String id) {
         List<Map<String, Object>> rows = state.mcpBoundAgents(id);
         return map("items", rows, "agents", rows);
     }
 
     @GetMapping("/skills")
-    public Map<String, Object> skills(@RequestParam(required = false) String domain) {
+    public Map<String, Object> skills(@RequestParam(name = "domain", required = false) String domain) {
         return map("items", state.skills(), "skills", state.skills());
     }
 
@@ -988,7 +1005,7 @@ public class PlatformFrontendCompatibilityController {
 
     @PutMapping("/skills/{skillId}")
     public Map<String, Object> updateSkill(
-            @PathVariable String skillId, @RequestBody Map<String, Object> payload) {
+            @PathVariable("skillId") String skillId, @RequestBody Map<String, Object> payload) {
         payload = new LinkedHashMap<>(payload);
         payload.put("skill_id", skillId);
         Map<String, Object> skill = state.upsertSkill(payload);
@@ -1001,62 +1018,62 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @PostMapping("/skills/{skillId}/enable")
-    public Map<String, Object> enableSkill(@PathVariable String skillId) {
+    public Map<String, Object> enableSkill(@PathVariable("skillId") String skillId) {
         Map<String, Object> skill = state.setSkillEnabled(skillId, true);
         return map("ok", true, "skill_id", skillId, "enabled", true, "skill", skill);
     }
 
     @PostMapping("/skills/{skillId}/disable")
-    public Map<String, Object> disableSkill(@PathVariable String skillId) {
+    public Map<String, Object> disableSkill(@PathVariable("skillId") String skillId) {
         Map<String, Object> skill = state.setSkillEnabled(skillId, false);
         return map("ok", true, "skill_id", skillId, "enabled", false, "skill", skill);
     }
 
     @PostMapping("/skills/{skillId}/test")
-    public Map<String, Object> testSkill(@PathVariable String skillId) {
+    public Map<String, Object> testSkill(@PathVariable("skillId") String skillId) {
         return state.testSkill(skillId);
     }
 
     @GetMapping("/skills/{skillId}")
-    public Map<String, Object> skillDetail(@PathVariable String skillId) {
+    public Map<String, Object> skillDetail(@PathVariable("skillId") String skillId) {
         return state.skillDetail(skillId);
     }
 
     @GetMapping("/skills/{skillId}/files")
     public Map<String, Object> skillFile(
-            @PathVariable String skillId, @RequestParam("path") String path) {
+            @PathVariable("skillId") String skillId, @RequestParam("path") String path) {
         return state.skillFileContent(skillId, path);
     }
 
     @PutMapping("/skills/{skillId}/files")
     public Map<String, Object> updateSkillFile(
-            @PathVariable String skillId,
+            @PathVariable("skillId") String skillId,
             @RequestParam("path") String path,
             @RequestBody Map<String, Object> payload) {
         return map("ok", true, "skill", state.updateSkillFile(skillId, path, payload));
     }
 
     @DeleteMapping("/skills/{skillId}")
-    public Map<String, Object> deleteSkill(@PathVariable String skillId) {
+    public Map<String, Object> deleteSkill(@PathVariable("skillId") String skillId) {
         state.deleteSkill(skillId);
         return map("ok", true, "skill_id", skillId);
     }
 
     @GetMapping("/skills/packages")
     public Map<String, Object> packages(
-            @RequestParam(required = false) String domain,
-            @RequestParam(required = false) String status) {
+            @RequestParam(name = "domain", required = false) String domain,
+            @RequestParam(name = "status", required = false) String status) {
         return map("items", state.skillPackages(domain, status));
     }
 
     @PostMapping(value = "/skills/packages/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public Mono<Map<String, Object>> uploadSkillPackage(
             @RequestPart("file") FilePart file,
-            @RequestParam(defaultValue = "platform") String domain,
+            @RequestParam(name = "domain", defaultValue = "platform") String domain,
             @RequestParam(required = false, name = "skill_id") String skillId,
-            @RequestParam(required = false) String name,
-            @RequestParam(required = false) String version,
-            @RequestParam(required = false) String description,
+            @RequestParam(name = "name", required = false) String name,
+            @RequestParam(name = "version", required = false) String version,
+            @RequestParam(name = "description", required = false) String description,
             @RequestParam(required = false, name = "source_note") String sourceNote) {
         return Mono.fromCallable(() -> Files.createTempFile("skill-package-", ".zip"))
                 .flatMap(
@@ -1092,11 +1109,11 @@ public class PlatformFrontendCompatibilityController {
     public Mono<Map<String, Object>> uploadSkillPackageFolder(
             @RequestPart("files") Flux<FilePart> files,
             @RequestPart("manifest") FormFieldPart manifest,
-            @RequestParam(defaultValue = "platform") String domain,
+            @RequestParam(name = "domain", defaultValue = "platform") String domain,
             @RequestParam(required = false, name = "skill_id") String skillId,
-            @RequestParam(required = false) String name,
-            @RequestParam(required = false) String version,
-            @RequestParam(required = false) String description,
+            @RequestParam(name = "name", required = false) String name,
+            @RequestParam(name = "version", required = false) String version,
+            @RequestParam(name = "description", required = false) String description,
             @RequestParam(required = false, name = "source_note") String sourceNote) {
         return files.collectList()
                 .flatMap(
@@ -1131,7 +1148,7 @@ public class PlatformFrontendCompatibilityController {
 
     @PostMapping("/skills/packages/{id}/publish")
     public Map<String, Object> publishPackage(
-            @PathVariable String id, @RequestBody(required = false) Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody(required = false) Map<String, Object> payload) {
         List<String> permissions =
                 payload == null || !(payload.get("permissions") instanceof List<?> list)
                         ? null
@@ -1140,26 +1157,26 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/skills/packages/{id}/preview")
-    public Map<String, Object> previewPackage(@PathVariable String id) {
+    public Map<String, Object> previewPackage(@PathVariable("id") String id) {
         return state.previewSkillPackage(id);
     }
 
     @GetMapping("/skills/packages/{id}/preview-file")
     public Map<String, Object> previewPackageFile(
-            @PathVariable String id, @RequestParam("path") String path) {
+            @PathVariable("id") String id, @RequestParam("path") String path) {
         return state.previewSkillPackageFile(id, path);
     }
 
     @PostMapping("/skills/packages/{id}/reject")
     public Map<String, Object> rejectPackage(
-            @PathVariable String id, @RequestBody(required = false) Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody(required = false) Map<String, Object> payload) {
         return state.rejectSkillPackage(
                 id, string(payload == null ? null : payload.get("reason"), ""));
     }
 
     @PatchMapping("/skills/packages/{id}/permissions")
     public Map<String, Object> packagePermissions(
-            @PathVariable String id, @RequestBody(required = false) Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody(required = false) Map<String, Object> payload) {
         List<String> permissions =
                 payload == null || !(payload.get("permissions") instanceof List<?> list)
                         ? null
@@ -1168,7 +1185,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @DeleteMapping("/skills/packages/{id}")
-    public Map<String, Object> deletePackage(@PathVariable String id) {
+    public Map<String, Object> deletePackage(@PathVariable("id") String id) {
         state.deleteSkillPackage(id);
         return map("id", id, "ok", true);
     }
@@ -1214,19 +1231,19 @@ public class PlatformFrontendCompatibilityController {
 
     @PatchMapping("/models/providers/{id}")
     public Map<String, Object> patchProvider(
-            @PathVariable String id, @RequestBody Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody Map<String, Object> payload) {
         Map<String, Object> provider = state.providerUpsert(id, payload);
         return map("provider", provider);
     }
 
     @DeleteMapping("/models/providers/{id}")
-    public Map<String, Object> deleteProvider(@PathVariable String id) {
+    public Map<String, Object> deleteProvider(@PathVariable("id") String id) {
         state.deleteProvider(id);
         return map("ok", true, "provider_id", id);
     }
 
     @PostMapping("/models/providers/{id}/ping")
-    public Map<String, Object> pingProvider(@PathVariable String id) {
+    public Map<String, Object> pingProvider(@PathVariable("id") String id) {
         return map("ok", true, "provider_id", id, "duration_ms", 1);
     }
 
@@ -1243,25 +1260,25 @@ public class PlatformFrontendCompatibilityController {
 
     @PatchMapping("/models/{id}")
     public Map<String, Object> patchModel(
-            @PathVariable String id, @RequestBody Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody Map<String, Object> payload) {
         Map<String, Object> model = state.modelUpsert(id, payload);
         return map("model", model);
     }
 
     @DeleteMapping("/models/{id}")
-    public Map<String, Object> deleteModel(@PathVariable String id) {
+    public Map<String, Object> deleteModel(@PathVariable("id") String id) {
         state.deleteModel(id);
         return map("ok", true, "model_id", id);
     }
 
     @PostMapping("/models/{id}/ping")
-    public Map<String, Object> pingModel(@PathVariable String id) {
+    public Map<String, Object> pingModel(@PathVariable("id") String id) {
         return map("ok", true, "model_id", id, "duration_ms", 1);
     }
 
     @PostMapping("/models/{id}/test")
     public Mono<Map<String, Object>> testModel(
-            @PathVariable String id, @RequestBody(required = false) Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody(required = false) Map<String, Object> payload) {
         Map<String, Object> model = state.modelRow(id);
         if (model.isEmpty()) {
             return Mono.just(map("ok", false, "model_id", id, "error", "model not found"));
@@ -1480,12 +1497,12 @@ public class PlatformFrontendCompatibilityController {
 
     @PutMapping("/models/slots/{slotKey}/platform/_")
     public Map<String, Object> bindSlot(
-            @PathVariable String slotKey, @RequestBody Map<String, Object> payload) {
+            @PathVariable("slotKey") String slotKey, @RequestBody Map<String, Object> payload) {
         return map("binding", state.bindSlot(slotKey, payload));
     }
 
     @DeleteMapping("/models/slots/{slotKey}/platform/_")
-    public Map<String, Object> clearSlot(@PathVariable String slotKey) {
+    public Map<String, Object> clearSlot(@PathVariable("slotKey") String slotKey) {
         state.clearSlot(slotKey);
         return map("ok", true, "slot_key", slotKey);
     }
@@ -1501,7 +1518,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @DeleteMapping("/models/aliases/{id}")
-    public Map<String, Object> deleteAlias(@PathVariable String id) {
+    public Map<String, Object> deleteAlias(@PathVariable("id") String id) {
         state.deleteAlias(id);
         return map("ok", true, "id", id);
     }
@@ -1518,7 +1535,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/models/resolve")
-    public Map<String, Object> resolveModel(@RequestParam(defaultValue = "qa") String slot) {
+    public Map<String, Object> resolveModel(@RequestParam(name = "slot", defaultValue = "qa") String slot) {
         Map<String, Object> binding =
                 state.slotBindings().stream()
                         .filter(row -> slot.equals(row.get("slot_key")))
@@ -1536,8 +1553,8 @@ public class PlatformFrontendCompatibilityController {
 
     @GetMapping("/chat/sessions")
     public Map<String, Object> sessions(
-            @RequestParam(required = false) String domain,
-            @RequestParam(required = false) String agent_id) {
+            @RequestParam(name = "domain", required = false) String domain,
+            @RequestParam(name = "agent_id", required = false) String agent_id) {
         List<Map<String, Object>> rows = state.sessions(domain, agent_id);
         return map("items", rows, "sessions", rows);
     }
@@ -1551,13 +1568,13 @@ public class PlatformFrontendCompatibilityController {
 
     @GetMapping("/chat/sessions/{id}")
     public Map<String, Object> session(
-            @PathVariable String id, @RequestParam(required = false) String agent_id) {
+            @PathVariable("id") String id, @RequestParam(name = "agent_id", required = false) String agent_id) {
         return state.session(id, agent_id);
     }
 
     @DeleteMapping("/chat/sessions/{id}")
     public Map<String, Object> deleteSession(
-            @PathVariable String id, @RequestParam(required = false) String agent_id) {
+            @PathVariable("id") String id, @RequestParam(name = "agent_id", required = false) String agent_id) {
         state.deleteSession(id, agent_id);
         return map("ok", true, "session_id", id);
     }
@@ -1794,7 +1811,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/live-context/turns/{traceId}")
-    public Map<String, Object> turnContext(@PathVariable String traceId) {
+    public Map<String, Object> turnContext(@PathVariable("traceId") String traceId) {
         return map(
                 "trace_id",
                 traceId,
@@ -1827,18 +1844,18 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/live-context/sessions/{sessionId}/resources")
-    public Map<String, Object> sessionResources(@PathVariable String sessionId) {
+    public Map<String, Object> sessionResources(@PathVariable("sessionId") String sessionId) {
         return emptyResources();
     }
 
     @PostMapping("/live-context/memory/{id}/feedback")
     public Map<String, Object> memoryFeedback(
-            @PathVariable long id, @RequestBody Map<String, Object> payload) {
+            @PathVariable("id") long id, @RequestBody Map<String, Object> payload) {
         return map("ok", true, "id", id, "action", payload.get("action"));
     }
 
     @GetMapping("/knowledge/docs")
-    public Map<String, Object> docs(@RequestParam(required = false) String domain) {
+    public Map<String, Object> docs(@RequestParam(name = "domain", required = false) String domain) {
         List<Map<String, Object>> documents = documentKnowledgeService.documents(domain);
         return map("items", documents, "documents", documents);
     }
@@ -1846,14 +1863,18 @@ public class PlatformFrontendCompatibilityController {
     @PostMapping(value = "/knowledge/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public Mono<Map<String, Object>> uploadDoc(
             @RequestPart("file") FilePart file,
-            @RequestParam(defaultValue = "platform") String domain,
-            @RequestParam(value = "collection_id", required = false) String collectionId,
+            @RequestParam(name = "domain", required = false) String queryDomain,
+            @RequestParam(value = "collection_id", required = false) String queryCollectionId,
+            @RequestPart(value = "domain", required = false) String formDomain,
+            @RequestPart(value = "collection_id", required = false) String formCollectionId,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
         if (!documentKnowledgeService.supports(file.filename())) {
             return Mono.error(
                     new IllegalArgumentException(
-                            "仅支持 PDF、Office、Markdown、TXT、CSV（pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv）。"));
+                        "仅支持 PDF、Office、Markdown、TXT、CSV（pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv）。"));
         }
+        String domain = firstText(formDomain, queryDomain, "platform");
+        String collectionId = firstText(formCollectionId, queryCollectionId);
         String docId = documentKnowledgeService.newDocumentId();
         Path target = documentKnowledgeService.uploadTarget(docId, file.filename());
         return file.transferTo(target)
@@ -1877,7 +1898,7 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/knowledge/collections")
-    public Map<String, Object> collections(@RequestParam(required = false) String domain) {
+    public Map<String, Object> collections(@RequestParam(name = "domain", required = false) String domain) {
         return map("items", knowledgeCollectionService.list(domain));
     }
 
@@ -1891,7 +1912,7 @@ public class PlatformFrontendCompatibilityController {
 
     @DeleteMapping("/knowledge/collections/{id}")
     public Map<String, Object> deleteCollection(
-            @PathVariable String id,
+            @PathVariable("id") String id,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
         knowledgeCollectionService.delete(id, orgId);
         return map("ok", true, "collection_id", id);
@@ -1899,7 +1920,7 @@ public class PlatformFrontendCompatibilityController {
 
     @PostMapping("/knowledge/collections/{id}/items")
     public Map<String, Object> addCollectionItem(
-            @PathVariable String id,
+            @PathVariable("id") String id,
             @RequestBody Map<String, Object> payload,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
         Map<String, Object> collection =
@@ -1911,10 +1932,33 @@ public class PlatformFrontendCompatibilityController {
         return map("ok", true, "collection_id", id, "item", collection);
     }
 
+    @PostMapping("/knowledge/docs/{docId}/{versionId}/move")
+    public Map<String, Object> moveDocument(
+            @PathVariable("docId") String docId,
+            @PathVariable("versionId") String versionId,
+            @RequestBody Map<String, Object> payload,
+            @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
+        String targetCollectionId = string(payload.get("collection_id"), "");
+        Map<String, Object> result =
+                knowledgeCollectionService.moveDocument(
+                        docId, versionId, targetCollectionId, orgId);
+        return map(
+                "ok",
+                true,
+                "doc_id",
+                docId,
+                "version_id",
+                versionId,
+                "collection_id",
+                targetCollectionId,
+                "item",
+                result);
+    }
+
     @DeleteMapping("/knowledge/collections/{id}/items/document/{docId}")
     public Map<String, Object> removeCollectionItem(
-            @PathVariable String id,
-            @PathVariable String docId,
+            @PathVariable("id") String id,
+            @PathVariable("docId") String docId,
             @RequestParam(value = "item_version_id", defaultValue = "") String versionId,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
         Map<String, Object> collection =
@@ -1924,7 +1968,7 @@ public class PlatformFrontendCompatibilityController {
 
     @PostMapping("/knowledge/docs/{docId}/{versionId}/reindex")
     public Map<String, Object> reindexDoc(
-            @PathVariable String docId, @PathVariable String versionId) {
+            @PathVariable("docId") String docId, @PathVariable("versionId") String versionId) {
         Map<String, Object> result = documentKnowledgeService.reindex(docId);
         return map(
                 "ok",
@@ -1941,15 +1985,15 @@ public class PlatformFrontendCompatibilityController {
             value = "/knowledge/docs/{docId}/{versionId}/replace",
             consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public Mono<Map<String, Object>> replaceDoc(
-            @PathVariable String docId,
-            @PathVariable String versionId,
+            @PathVariable("docId") String docId,
+            @PathVariable("versionId") String versionId,
             @RequestPart("file") FilePart file) {
         return Mono.error(new UnsupportedOperationException("首版暂不覆盖历史版本；请上传为新文档以保留可追溯引用。"));
     }
 
     @PostMapping("/knowledge/docs/{docId}/{versionId}/preview/ensure")
     public Mono<Map<String, Object>> ensurePreview(
-            @PathVariable String docId, @PathVariable String versionId) {
+            @PathVariable("docId") String docId, @PathVariable("versionId") String versionId) {
         return Mono.fromCallable(() -> documentKnowledgeService.preparePreview(docId))
                 .subscribeOn(Schedulers.boundedElastic())
                 .map(
@@ -1975,7 +2019,7 @@ public class PlatformFrontendCompatibilityController {
 
     @GetMapping(value = "/knowledge/docs/{docId}/{versionId}/preview")
     public Mono<ResponseEntity<Resource>> previewDocument(
-            @PathVariable String docId, @PathVariable String versionId) {
+            @PathVariable("docId") String docId, @PathVariable("versionId") String versionId) {
         return Mono.fromCallable(
                         () -> {
                             DocumentKnowledgeService.PreviewFile preview =
@@ -1995,7 +2039,7 @@ public class PlatformFrontendCompatibilityController {
 
     @DeleteMapping("/knowledge/docs/{docId}/{versionId}")
     public Map<String, Object> deleteDoc(
-            @PathVariable String docId, @PathVariable String versionId) {
+            @PathVariable("docId") String docId, @PathVariable("versionId") String versionId) {
         documentKnowledgeService.delete(docId);
         knowledgeCollectionService.removeDocumentEverywhere(docId);
         return map("ok", true, "doc_id", docId, "version_id", versionId);
@@ -2003,15 +2047,15 @@ public class PlatformFrontendCompatibilityController {
 
     @GetMapping("/memory/long-term")
     public Map<String, Object> longTermMemory(
-            @RequestParam(required = false) String domain,
-            @RequestParam(required = false) String status) {
+            @RequestParam(name = "domain", required = false) String domain,
+            @RequestParam(name = "status", required = false) String status) {
         List<Map<String, Object>> rows = state.memories(domain, status);
         return map("items", rows, "count", rows.size());
     }
 
     @GetMapping("/memory/daily")
     public Map<String, Object> dailyMemory(
-            @RequestParam(required = false) String agent_id,
+            @RequestParam(name = "agent_id", required = false) String agent_id,
             @RequestHeader(value = "x-user-id", defaultValue = "platform_admin") String userId,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
         String userKey = orgId + "_" + userId;
@@ -2028,19 +2072,19 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/memory/long-term/{id}")
-    public Map<String, Object> getMemory(@PathVariable String id) {
+    public Map<String, Object> getMemory(@PathVariable("id") String id) {
         return map("item", state.updateMemory(id, Map.of()));
     }
 
     @PatchMapping("/memory/long-term/{id}")
     public Map<String, Object> patchMemory(
-            @PathVariable String id, @RequestBody Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody Map<String, Object> payload) {
         return map("item", state.updateMemory(id, payload));
     }
 
     @DeleteMapping("/memory/long-term/{id}")
     public Map<String, Object> deleteMemory(
-            @PathVariable String id,
+            @PathVariable("id") String id,
             @RequestHeader(value = "x-user-id", defaultValue = "platform_admin") String userId,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
         state.deleteMemory(id, orgId + "_" + userId);
@@ -2049,7 +2093,7 @@ public class PlatformFrontendCompatibilityController {
 
     @DeleteMapping("/memory/agent/{agentId}/main-entry")
     public Map<String, Object> deleteAgentMemoryEntry(
-            @PathVariable String agentId,
+            @PathVariable("agentId") String agentId,
             @RequestBody Map<String, Object> payload,
             @RequestHeader(value = "x-user-id", defaultValue = "platform_admin") String userId,
             @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
@@ -2061,19 +2105,19 @@ public class PlatformFrontendCompatibilityController {
 
     @PostMapping("/memory/long-term/{id}/confirm")
     public Map<String, Object> confirmMemory(
-            @PathVariable String id, @RequestBody(required = false) Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody(required = false) Map<String, Object> payload) {
         return map("item", state.confirmMemory(id, payload == null ? Map.of() : payload));
     }
 
     @PostMapping("/memory/long-term/{id}/reject")
     public Map<String, Object> rejectMemory(
-            @PathVariable String id, @RequestBody(required = false) Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody(required = false) Map<String, Object> payload) {
         return map("item", state.rejectMemory(id, payload == null ? Map.of() : payload));
     }
 
     @PostMapping("/memory/long-term/{id}/merge")
     public Map<String, Object> mergeMemory(
-            @PathVariable String id, @RequestBody(required = false) Map<String, Object> payload) {
+            @PathVariable("id") String id, @RequestBody(required = false) Map<String, Object> payload) {
         return map("item", state.mergeMemory(id, payload == null ? Map.of() : payload));
     }
 
@@ -2126,12 +2170,12 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/runtime-sandbox/runs/{id}")
-    public Map<String, Object> sandboxRun(@PathVariable String id) {
+    public Map<String, Object> sandboxRun(@PathVariable("id") String id) {
         return map("sandbox_run_id", id, "status", "unknown");
     }
 
     @GetMapping("/kg/graph-spaces")
-    public Map<String, Object> graphSpaces(@RequestParam(defaultValue = "platform") String domain) {
+    public Map<String, Object> graphSpaces(@RequestParam(name = "domain", defaultValue = "platform") String domain) {
         List<Map<String, Object>> rows =
                 List.of(
                         map(

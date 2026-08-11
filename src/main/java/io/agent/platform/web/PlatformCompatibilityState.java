@@ -13,6 +13,7 @@ import io.agent.platform.control.ModelProviderSpec;
 import io.agent.platform.control.ModelSpec;
 import io.agent.platform.control.OrchestrationMode;
 import io.agent.platform.control.OrchestrationPolicy;
+import io.agent.platform.control.PlatformArtifactStore;
 import io.agent.platform.control.PlatformStorageLayer;
 import io.agent.platform.control.RouteRule;
 import io.agent.platform.control.SkillRegistry;
@@ -59,6 +60,7 @@ import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -93,6 +95,7 @@ public class PlatformCompatibilityState {
     private final PlatformWorkspaceSessionStore workspaceSessionStore;
     private final McpToolDiscoveryService mcpToolDiscoveryService;
     private final SkillSandboxSmokeTestService skillSandboxSmokeTestService;
+    private final PlatformArtifactStore artifactStore;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final PlatformStorageLayer storage;
     private final AtomicLong sequence = new AtomicLong(1);
@@ -122,7 +125,8 @@ public class PlatformCompatibilityState {
     @Value("${agent.platform.mcp.discovery.enabled:true}")
     private boolean mcpDiscoveryEnabled;
 
-    public PlatformCompatibilityState(
+    // Keep the small constructor used by the persistence tests source-compatible.
+    PlatformCompatibilityState(
             AgentDefinitionRegistry agentRegistry,
             ToolRegistry toolRegistry,
             McpRegistry mcpRegistry,
@@ -133,6 +137,33 @@ public class PlatformCompatibilityState {
             McpToolDiscoveryService mcpToolDiscoveryService,
             SkillSandboxSmokeTestService skillSandboxSmokeTestService,
             PlatformStorageLayer storage) {
+        this(
+                agentRegistry,
+                toolRegistry,
+                mcpRegistry,
+                skillRegistry,
+                modelRegistry,
+                providerRegistry,
+                workspaceSessionStore,
+                mcpToolDiscoveryService,
+                skillSandboxSmokeTestService,
+                new PlatformArtifactStore(storage),
+                storage);
+    }
+
+    @Autowired
+    public PlatformCompatibilityState(
+            AgentDefinitionRegistry agentRegistry,
+            ToolRegistry toolRegistry,
+            McpRegistry mcpRegistry,
+            SkillRegistry skillRegistry,
+            ModelConfigRegistry modelRegistry,
+            ModelProviderRegistry providerRegistry,
+            PlatformWorkspaceSessionStore workspaceSessionStore,
+            McpToolDiscoveryService mcpToolDiscoveryService,
+            SkillSandboxSmokeTestService skillSandboxSmokeTestService,
+            PlatformArtifactStore artifactStore,
+            PlatformStorageLayer storage) {
         this.agentRegistry = agentRegistry;
         this.toolRegistry = toolRegistry;
         this.mcpRegistry = mcpRegistry;
@@ -142,6 +173,7 @@ public class PlatformCompatibilityState {
         this.workspaceSessionStore = workspaceSessionStore;
         this.mcpToolDiscoveryService = mcpToolDiscoveryService;
         this.skillSandboxSmokeTestService = skillSandboxSmokeTestService;
+        this.artifactStore = artifactStore;
         this.storage = storage;
         seedModels();
         seedMcps();
@@ -155,6 +187,8 @@ public class PlatformCompatibilityState {
         loadMcpDiscoveryCache();
         applyCachedDiscoveryMetadata();
         loadSkillPackages();
+        loadSkillFiles();
+        loadToolFiles();
         loadDomains();
         loadModelSlots();
         loadMemories();
@@ -836,6 +870,7 @@ public class PlatformCompatibilityState {
                         description,
                         enabled);
         skillRegistry.upsert(spec);
+        syncSkillFiles(skillId, skillDir);
         return skillRow(spec);
     }
 
@@ -1003,6 +1038,11 @@ public class PlatformCompatibilityState {
         } catch (IOException e) {
             throw new IllegalStateException("Failed to write skill file: " + normalized, e);
         }
+        try {
+            artifactStore.saveSkillFile(skillId, normalized, Files.readAllBytes(file));
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to persist skill file: " + normalized, e);
+        }
         if ("SKILL.md".equalsIgnoreCase(fileName(normalized))) {
             Map<String, String> meta = parseSkillMarkdownMeta(content);
             String description = meta.getOrDefault("description", spec.description());
@@ -1032,6 +1072,7 @@ public class PlatformCompatibilityState {
                 deleteDirectory(skillDir);
             }
         }
+        artifactStore.deleteSkillFiles(skillId);
         audit("skill.deleted", skillId, row("skill_id", skillId));
     }
 
@@ -1335,6 +1376,16 @@ public class PlatformCompatibilityState {
             row.put("created_at", Instant.now().toString());
             row.put("validation_errors", List.of(e.getMessage()));
         }
+        if ("validated".equals(row.get("status"))) {
+            try {
+                Path stored = storage.resolveRelativeToWorkspace(String.valueOf(row.get("zip_path")));
+                byte[] content = Files.readAllBytes(stored);
+                artifactStore.saveSkillPackage(id, String.valueOf(row.get("filename")), content);
+                row.put("zip_path", storage.toWorkspaceRelative(stored));
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to persist skill package artifact: " + id, e);
+            }
+        }
         skillPackages.put(id, row);
         persistSkillPackages();
         return Map.copyOf(row);
@@ -1351,7 +1402,7 @@ public class PlatformCompatibilityState {
             preview.put("preview_error", "No package archive is available for preview.");
             return preview;
         }
-        Path archive = storage.resolveRelativeToWorkspace(String.valueOf(zipPath));
+        Path archive = ensureSkillPackageArchive(pkg);
         List<String> files = new ArrayList<>();
         String skillMarkdown = "";
         try (InputStream input = Files.newInputStream(archive);
@@ -1389,7 +1440,7 @@ public class PlatformCompatibilityState {
             throw new IllegalArgumentException("No package archive is available for preview.");
         }
         String normalized = normalizeRelativePath(filePath);
-        Path archive = storage.resolveRelativeToWorkspace(String.valueOf(zipPath));
+        Path archive = ensureSkillPackageArchive(pkg);
         try (InputStream input = Files.newInputStream(archive);
                 ZipInputStream zip = new ZipInputStream(input)) {
             ZipEntry entry;
@@ -1445,7 +1496,7 @@ public class PlatformCompatibilityState {
         if (!"validated".equals(pkg.get("status")) && !"published".equals(pkg.get("status"))) {
             throw new IllegalStateException("Skill package is not publishable: " + id);
         }
-        Path zipPath = storage.resolveRelativeToWorkspace(String.valueOf(pkg.get("zip_path")));
+        Path zipPath = ensureSkillPackageArchive(pkg);
         String skillId = String.valueOf(pkg.get("skill_id"));
         Path target = storage.skillDirectory(skillId).normalize();
         if (Files.exists(target)) {
@@ -1497,6 +1548,7 @@ public class PlatformCompatibilityState {
                     log.warn("Failed to delete skill package zip {}: {}", zipPath, e.getMessage());
                 }
             }
+            artifactStore.deleteSkillPackage(id);
             persistSkillPackages();
         }
     }
@@ -1640,6 +1692,118 @@ public class PlatformCompatibilityState {
         }
         skillPackages.clear();
         loadSkillPackagesFromSqlite();
+    }
+
+    /** Restore persisted skill files into the workspace and migrate legacy files into SQLite. */
+    private void loadSkillFiles() {
+        for (SkillSpec spec : skillRegistry.all()) {
+            if ("classpath".equals(spec.type())) {
+                continue;
+            }
+            Path root = resolveSkillDetailPath(spec);
+            Map<String, byte[]> persisted = artifactStore.loadSkillFiles(spec.skillId());
+            if (!persisted.isEmpty()) {
+                persisted.forEach((relativePath, content) -> writePersistedSkillFile(root, relativePath, content));
+            } else if (Files.isDirectory(root)) {
+                syncSkillFiles(spec.skillId(), root);
+            }
+        }
+    }
+
+    private void writePersistedSkillFile(Path root, String relativePath, byte[] content) {
+        if (relativePath == null || relativePath.isBlank() || content == null) {
+            return;
+        }
+        Path target = root.resolve(relativePath).normalize();
+        if (!target.startsWith(root)) {
+            log.warn("Skip persisted skill file outside skill root: {}", relativePath);
+            return;
+        }
+        try {
+            Files.createDirectories(target.getParent());
+            Files.write(target, content);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to restore skill file: " + relativePath, e);
+        }
+    }
+
+    private void syncSkillFiles(String skillId, Path root) {
+        try (var stream = Files.walk(root)) {
+            stream.filter(Files::isRegularFile).forEach(
+                    file -> {
+                        String relative = root.relativize(file).toString().replace('\\', '/');
+                        try {
+                            artifactStore.saveSkillFile(skillId, relative, Files.readAllBytes(file));
+                        } catch (IOException e) {
+                            throw new IllegalStateException("Failed to persist skill file: " + file, e);
+                        }
+                    });
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to scan skill files: " + root, e);
+        }
+    }
+
+    /** Restore Python tool scripts into the workspace and migrate legacy scripts into SQLite. */
+    private void loadToolFiles() {
+        for (ToolSpec spec : toolRegistry.all()) {
+            if (!"python".equalsIgnoreCase(spec.type()) || spec.toolId() == null) {
+                continue;
+            }
+            Path toolRoot = storage.toolCodeDirectory(spec.toolId()).normalize();
+            Path currentScript = toolRoot.resolve("tool.py").normalize();
+            Map<String, byte[]> persisted = artifactStore.loadToolFiles(spec.toolId());
+            try {
+                if (!persisted.isEmpty()) {
+                    persisted.forEach(
+                            (relativePath, content) -> writePersistedToolFile(toolRoot, relativePath, content));
+                } else {
+                    Path legacy = storage.resolveRelativeToWorkspace(spec.scriptPath());
+                    if (Files.isRegularFile(legacy)) {
+                        artifactStore.saveToolFile(spec.toolId(), "tool.py", Files.readAllBytes(legacy));
+                        if (!legacy.equals(currentScript)) {
+                            Files.createDirectories(toolRoot);
+                            Files.copy(legacy, currentScript, StandardCopyOption.REPLACE_EXISTING);
+                        }
+                    } else if (Files.isRegularFile(currentScript)) {
+                        artifactStore.saveToolFile(spec.toolId(), "tool.py", Files.readAllBytes(currentScript));
+                    }
+                }
+                if (Files.isRegularFile(currentScript)) {
+                    String normalizedPath = storage.toWorkspaceRelative(currentScript);
+                    if (!normalizedPath.equals(spec.scriptPath())) {
+                        toolRegistry.upsert(
+                                new ToolSpec(
+                                        spec.toolId(),
+                                        spec.type(),
+                                        spec.className(),
+                                        spec.description(),
+                                        spec.enabled(),
+                                        normalizedPath,
+                                        spec.parameterSchema(),
+                                        spec.timeoutMs()));
+                    }
+                }
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to restore tool script: " + spec.toolId(), e);
+            }
+        }
+    }
+
+    private void writePersistedToolFile(Path root, String relativePath, byte[] content) {
+        if (relativePath == null || relativePath.isBlank() || content == null) {
+            return;
+        }
+        Path target = root.resolve(relativePath).normalize();
+        if (!target.startsWith(root)) {
+            log.warn("Skip persisted tool file outside tool root: {}", relativePath);
+            return;
+        }
+        try {
+            Files.createDirectories(target.getParent());
+            Files.write(target, content);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to restore tool file: " + relativePath, e);
+        }
     }
 
     private void persistSkillPackages() {
@@ -1820,6 +1984,7 @@ public class PlatformCompatibilityState {
     }
 
     private boolean loadSkillPackagesFromSqlite() {
+        List<Map<String, Object>> loaded = new ArrayList<>();
         try (Connection connection = storage.connection();
                 PreparedStatement statement =
                         connection.prepareStatement(
@@ -1835,10 +2000,9 @@ public class PlatformCompatibilityState {
                     }
                     String id = string(row, "id", resultSet.getString("package_id"));
                     if (!id.isBlank()) {
-                        skillPackages.put(id, row);
+                        loaded.add(row);
                     }
                 }
-                return !skillPackages.isEmpty();
             }
         } catch (Exception e) {
             log.warn(
@@ -1847,6 +2011,22 @@ public class PlatformCompatibilityState {
                     e.getMessage());
             return false;
         }
+        boolean migrated = false;
+        for (Map<String, Object> row : loaded) {
+            String id = string(row, "id", "");
+            skillPackages.put(id, row);
+            Path archive = ensureSkillPackageArchive(row);
+            if (archive != null
+                    && !storage.toWorkspaceRelative(archive)
+                            .equals(String.valueOf(row.get("zip_path")))) {
+                row.put("zip_path", storage.toWorkspaceRelative(archive));
+                migrated = true;
+            }
+        }
+        if (migrated) {
+            persistSkillPackages();
+        }
+        return !skillPackages.isEmpty();
     }
 
     private void upsertSkillPackages() {
@@ -4217,6 +4397,38 @@ public class PlatformCompatibilityState {
             statement.executeUpdate();
         } catch (Exception e) {
             log.warn("Insert audit event failed: {}", e.getMessage());
+        }
+    }
+
+    /** Materialize a package from its SQLite blob, migrating legacy absolute paths when needed. */
+    private Path ensureSkillPackageArchive(Map<String, Object> pkg) {
+        String id = string(pkg, "id", "");
+        if (id.isBlank()) {
+            return null;
+        }
+        Path target = skillPackagesDir().resolve(id + ".zip").normalize();
+        try {
+            Files.createDirectories(target.getParent());
+            var persisted = artifactStore.loadSkillPackage(id);
+            if (persisted.isPresent()) {
+                Files.write(target, persisted.get().content());
+                pkg.put("zip_path", storage.toWorkspaceRelative(target));
+                return target;
+            }
+            String legacyPath = string(pkg, "zip_path", "");
+            if (!legacyPath.isBlank()) {
+                Path legacy = storage.resolveRelativeToWorkspace(legacyPath);
+                if (Files.isRegularFile(legacy)) {
+                    byte[] content = Files.readAllBytes(legacy);
+                    artifactStore.saveSkillPackage(id, string(pkg, "filename", id + ".zip"), content);
+                    Files.write(target, content);
+                    pkg.put("zip_path", storage.toWorkspaceRelative(target));
+                    return target;
+                }
+            }
+            return Files.isRegularFile(target) ? target : null;
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to materialize skill package: " + id, e);
         }
     }
 

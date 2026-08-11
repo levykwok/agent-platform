@@ -4,6 +4,7 @@
 package io.agent.platform.web;
 
 import io.agent.platform.control.PlatformStorageLayer;
+import io.agent.platform.control.PlatformArtifactStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -37,16 +38,19 @@ public class DocumentKnowledgeService {
     private final PlatformStorageLayer storage;
     private final DocumentExtractionService extractionService;
     private final QdrantKnowledgeIndex qdrantIndex;
+    private final PlatformArtifactStore artifactStore;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, Map<String, Object>> documents = new LinkedHashMap<>();
 
     public DocumentKnowledgeService(
             PlatformStorageLayer storage,
             DocumentExtractionService extractionService,
-            QdrantKnowledgeIndex qdrantIndex) {
+            QdrantKnowledgeIndex qdrantIndex,
+            PlatformArtifactStore artifactStore) {
         this.storage = storage;
         this.extractionService = extractionService;
         this.qdrantIndex = qdrantIndex;
+        this.artifactStore = artifactStore;
         loadCatalog();
     }
 
@@ -127,6 +131,7 @@ public class DocumentKnowledgeService {
         document.put("vector_index_message", indexResult.message());
         documents.put(docId, document);
         persist(document);
+        persistArtifact(document, rawFile);
         persistCatalog();
         return publicDocument(document);
     }
@@ -196,6 +201,7 @@ public class DocumentKnowledgeService {
         if (removed != null) {
             qdrantIndex.deleteDocument(docId);
             deleteRecursively(storage.resolveWorkspace("documents", docId));
+            artifactStore.deleteDocument(docId);
             persistCatalog();
         }
     }
@@ -395,6 +401,52 @@ public class DocumentKnowledgeService {
     }
 
     private void loadCatalog() {
+        if (storage.isSqliteEnabled() && loadPersistedDocuments()) {
+            return;
+        }
+        loadCatalogFile();
+        if (storage.isSqliteEnabled()) {
+            for (Map<String, Object> document : documents.values()) {
+                persistArtifact(document, existingRawFile(document));
+            }
+        }
+    }
+
+    private boolean loadPersistedDocuments() {
+        List<PlatformArtifactStore.StoredDocument> rows = artifactStore.loadDocuments();
+        for (PlatformArtifactStore.StoredDocument row : rows) {
+            try {
+                Map<String, Object> document =
+                        objectMapper.readValue(row.payload(), new TypeReference<>() {});
+                if (document.isEmpty()) {
+                    continue;
+                }
+                byte[] raw = row.rawContent();
+                Path target = documentTarget(document);
+                if (raw == null || raw.length == 0) {
+                    Path legacy = existingRawFile(document);
+                    if (legacy != null) {
+                        raw = Files.readAllBytes(legacy);
+                    }
+                }
+                if (raw != null && raw.length > 0) {
+                    Files.createDirectories(target.getParent());
+                    Files.write(target, raw);
+                    document.put("raw_path", storage.toWorkspaceRelative(target));
+                    document.put("raw_available", true);
+                }
+                documents.put(row.docId(), new LinkedHashMap<>(document));
+                if (raw != null && raw.length > 0) {
+                    persistArtifact(document, target, raw);
+                }
+            } catch (Exception e) {
+                throw new IllegalStateException("Failed to restore knowledge document: " + row.docId(), e);
+            }
+        }
+        return !rows.isEmpty();
+    }
+
+    private void loadCatalogFile() {
         Path catalog = catalogFile();
         if (!Files.isRegularFile(catalog)) {
             return;
@@ -413,11 +465,66 @@ public class DocumentKnowledgeService {
         }
     }
 
+    private Path documentTarget(Map<String, Object> document) {
+        String docId = String.valueOf(document.getOrDefault("doc_id", "document"));
+        String versionId = String.valueOf(document.getOrDefault("version_id", "v1"));
+        String filename = safeFilename(String.valueOf(document.getOrDefault("filename", "document")));
+        return storage.resolveWorkspace("documents", docId, versionId, filename).normalize();
+    }
+
+    private Path existingRawFile(Map<String, Object> document) {
+        Object value = document.get("raw_path");
+        if (value == null || String.valueOf(value).isBlank()) {
+            return null;
+        }
+        Path path = Path.of(String.valueOf(value));
+        if (!path.isAbsolute()) {
+            path = storage.resolveWorkspace(String.valueOf(value));
+        }
+        return Files.isRegularFile(path) ? path.normalize() : null;
+    }
+
     private void persist(Map<String, Object> document) {
         Path metadata =
                 storage.resolveWorkspace(
                         "documents", String.valueOf(document.get("doc_id")), "metadata.json");
         writeJson(metadata, document);
+    }
+
+    private void persistArtifact(Map<String, Object> document, Path rawFile) {
+        byte[] raw = null;
+        try {
+            if (rawFile != null && Files.isRegularFile(rawFile)) {
+                raw = Files.readAllBytes(rawFile);
+            }
+            persistArtifact(document, rawFile, raw);
+        } catch (IOException e) {
+            throw new IllegalStateException(
+                    "Failed to read knowledge document artifact: " + document.get("doc_id"), e);
+        }
+    }
+
+    private void persistArtifact(Map<String, Object> document, Path rawFile, byte[] raw) {
+        if (!storage.isSqliteEnabled()) {
+            return;
+        }
+        try {
+            if (rawFile != null && raw != null && raw.length > 0) {
+                Path target = documentTarget(document);
+                if (!target.equals(rawFile.normalize())) {
+                    Files.createDirectories(target.getParent());
+                    Files.write(target, raw);
+                    document.put("raw_path", storage.toWorkspaceRelative(target));
+                }
+            }
+            artifactStore.saveDocument(
+                    String.valueOf(document.get("doc_id")),
+                    objectMapper.writeValueAsString(document),
+                    raw);
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Failed to persist knowledge document artifact: " + document.get("doc_id"), e);
+        }
     }
 
     private void persistCatalog() {
@@ -454,6 +561,7 @@ public class DocumentKnowledgeService {
         document.put("updated_at", Instant.now().toString());
         documents.put(String.valueOf(document.get("doc_id")), document);
         persist(document);
+        persistArtifact(document, existingRawFile(document));
         persistCatalog();
         return new Preview(true, message, mimeType);
     }
