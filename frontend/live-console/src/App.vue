@@ -10,6 +10,7 @@ import ModelsAdmin from './pages/ModelsAdmin.vue'
 import AgentsAdmin from './pages/AgentsAdmin.vue'
 import OrchestrationWorkbench from './pages/OrchestrationWorkbench.vue'
 import AgentWorkbench from './pages/AgentWorkbench.vue'
+import ExternalAgentWorkbench from './pages/ExternalAgentWorkbench.vue'
 import RunsObserve from './pages/RunsObserve.vue'
 import QaWorkspace from './pages/QaWorkspace.vue'
 import MemoryManagement from './pages/MemoryManagement.vue'
@@ -20,7 +21,7 @@ import ToastHost from './components/ToastHost.vue'
 import DialogHost from './components/DialogHost.vue'
 import { contextHref, currentDomain, currentOrgId, currentUser, makeHeaders, readJson } from './lib/platformApi'
 
-type PageKey = 'home' | 'knowledge' | 'qa' | 'kg' | 'skills' | 'tools' | 'mcp' | 'models' | 'agents' | 'orchestration' | 'workbench' | 'memory' | 'runs' | 'infra' | 'docs'
+type PageKey = 'home' | 'knowledge' | 'qa' | 'kg' | 'skills' | 'tools' | 'mcp' | 'models' | 'agents' | 'orchestration' | 'workbench' | 'external-test' | 'memory' | 'runs' | 'infra' | 'docs'
 
 const navItems = [
   { key: 'home', href: '/platform/live', icon: 'home', label: '平台概览', section: '核心能力', native: true },
@@ -33,6 +34,7 @@ const navItems = [
   { key: 'orchestration', href: '/platform/live/orchestration', icon: 'qa', label: '编排中心', section: '核心能力', native: true },
   { key: 'qa', href: '/platform/live/qa', icon: 'qa', label: '交互问答', section: '核心能力', native: true },
   { key: 'workbench', href: '/platform/live/workbench', icon: 'qa', label: 'Agent 工作台', section: '核心能力', native: true },
+  { key: 'external-test', href: '/platform/live/external-test', icon: 'qa', label: '外部接入测试', section: '核心能力', native: true },
   { key: 'memory', href: '/platform/live/memory', icon: 'memory', label: '记忆管理', section: '核心能力', native: true },
   { key: 'docs', href: '/platform/live/docs', icon: 'docs', label: '使用文档', section: '帮助', native: true },
 ]
@@ -45,13 +47,13 @@ function pageKeyFromPath(pathname: string): PageKey {
 
 const activePage = ref<PageKey>(pageKeyFromPath(location.pathname))
 const standaloneCanvasRoute = new URLSearchParams(location.search).get('view') === 'canvas'
-const title = computed(() => ({ home: '平台概览', knowledge: '知识库（Beta）', qa: '交互问答', kg: '知识图谱', skills: 'Skills 中心', tools: 'Tools 目录', mcp: 'MCP 服务器', models: '模型接入', agents: 'Agent 管理', orchestration: '编排中心', workbench: 'Agent 工作台', memory: '记忆管理', runs: '运行观测', infra: '平台状态', docs: '使用文档' }[activePage.value]))
+const title = computed(() => ({ home: '平台概览', knowledge: '知识库（Beta）', qa: '交互问答', kg: '知识图谱', skills: 'Skills 中心', tools: 'Tools 目录', mcp: 'MCP 服务器', models: '模型接入', agents: 'Agent 管理', orchestration: '编排中心', workbench: 'Agent 工作台', 'external-test': '外部接入测试', memory: '记忆管理', runs: '运行观测', infra: '平台状态', docs: '使用文档' }[activePage.value]))
 const coreItems = computed(() => navItems.filter((item) => item.section === '核心能力'))
 const opsItems = computed(() => navItems.filter((item) => item.section === '运维'))
 const helpItems = computed(() => navItems.filter((item) => item.section === '帮助'))
 
 function navigate(key: string, href: string, native = false) {
-  if (native && ['home', 'knowledge', 'qa', 'kg', 'skills', 'tools', 'mcp', 'models', 'agents', 'orchestration', 'workbench', 'memory', 'runs', 'infra', 'docs'].includes(key)) {
+  if (native && ['home', 'knowledge', 'qa', 'kg', 'skills', 'tools', 'mcp', 'models', 'agents', 'orchestration', 'workbench', 'external-test', 'memory', 'runs', 'infra', 'docs'].includes(key)) {
     activePage.value = key as PageKey
     const target = contextHref(href, currentDomain(), currentOrgId())
     if (`${location.pathname}${location.search}` !== target) {
@@ -136,6 +138,7 @@ onUnmounted(() => {
       <AgentsAdmin v-else-if="activePage === 'agents'" />
       <OrchestrationWorkbench v-else-if="activePage === 'orchestration'" />
       <AgentWorkbench v-else-if="activePage === 'workbench'" />
+      <ExternalAgentWorkbench v-else-if="activePage === 'external-test'" />
       <MemoryManagement v-else-if="activePage === 'memory'" />
       <RunsObserve v-else-if="activePage === 'runs'" />
       <Documentation v-else-if="activePage === 'docs'" />
