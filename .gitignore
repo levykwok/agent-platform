@@ -2,6 +2,7 @@ target/
 dist/
 dist-release/
 logs/
+output/
 .run/
 *.db
 *.db-shm
@@ -13,8 +14,10 @@ workspace/agent-state/
 workspace/backup/
 workspace/cache/
 workspace/documents/
+workspace/user-assets/
 workspace/workspace/
 workspace/tool-test-cases/
+workspace/*.db.before-restore-*
 frontend/live-console/node_modules/
 frontend/live-console/*.log
 frontend/live-console/dist/
