@@ -55,15 +55,7 @@ final class OrchestrationCycleValidator {
             case ROUTER -> policy.routes().forEach(route -> targets.add(route.targetAgentId()));
             case SUPERVISOR ->
                     policy.subagents().forEach(binding -> targets.add(binding.targetAgentId()));
-            case WORKFLOW ->
-                    policy.workflowNodes().stream()
-                            .filter(
-                                    node ->
-                                            node.type() == WorkflowNodeType.AGENT_INVOKE
-                                                    || node.type()
-                                                            == WorkflowNodeType.SUBFLOW_INVOKE)
-                            .map(WorkflowNode::refId)
-                            .forEach(targets::add);
+            case WORKFLOW -> policy.workflow().forEach(step -> targets.add(step.agentId()));
             case SINGLE -> {}
         }
         targets.removeIf(target -> target == null || target.isBlank());

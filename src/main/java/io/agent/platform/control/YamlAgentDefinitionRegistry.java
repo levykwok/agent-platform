@@ -7,7 +7,6 @@ import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -158,59 +157,29 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                                 resolve(r.targetAgentId()),
                                                 resolve(r.contains()),
                                                 r.keywords().stream().map(this::resolve).toList(),
-                                                r.defaultRoute()))
+                                        r.defaultRoute()))
                         .toList();
         List<WorkflowStep> workflow =
                 policy.workflow().stream()
                         .map(
-                                s ->
+                                step ->
                                         new WorkflowStep(
-                                                resolve(s.stepId()),
-                                                resolve(s.agentId()),
-                                                resolve(s.instruction()),
-                                                s.timeoutMs(),
-                                                s.maxRetries(),
-                                                s.failurePolicy(),
-                                                s.transitions().stream()
+                                                resolve(step.stepId()),
+                                                resolve(step.agentId()),
+                                                resolve(step.instruction()),
+                                                step.timeoutMs(),
+                                                step.maxRetries(),
+                                                step.failurePolicy(),
+                                                step.transitions().stream()
                                                         .map(
                                                                 transition ->
                                                                         new WorkflowTransition(
-                                                                                resolve(
-                                                                                        transition
-                                                                                                .when()),
-                                                                                resolve(
-                                                                                        transition
-                                                                                                .nextStepId()),
-                                                                                transition
-                                                                                        .defaultTransition()))
+                                                                                resolve(transition.when()),
+                                                                                resolve(transition.nextStepId()),
+                                                                                transition.defaultTransition()))
                                                         .toList()))
                         .toList();
-        List<WorkflowNode> nodes = policy.nodes().stream().map(this::resolveNode).toList();
-        return new OrchestrationPolicy(policy.mode(), subagents, routes, workflow, nodes, policy.edges());
-    }
-
-    private WorkflowNode resolveNode(WorkflowNode node) {
-        return new WorkflowNode(
-                resolve(node.nodeId()),
-                node.type(),
-                resolve(node.refId()),
-                resolve(node.instruction()),
-                node.config(),
-                node.inputMapping(),
-                node.outputSchema(),
-                node.timeoutMs(),
-                node.maxRetries(),
-                node.failurePolicy(),
-                node.transitions().stream().map(this::resolveTransition).toList(),
-                node.inputPorts(),
-                node.outputPorts());
-    }
-
-    private WorkflowTransition resolveTransition(WorkflowTransition transition) {
-        return new WorkflowTransition(
-                resolve(transition.when()),
-                resolve(transition.nextStepId()),
-                transition.defaultTransition());
+        return new OrchestrationPolicy(policy.mode(), subagents, routes, workflow);
     }
 
     private String safe(String value, String fallback) {
@@ -240,11 +209,8 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
             }
             switch (orchestration.mode()) {
                 case ROUTER -> validateRouter(definition, loaded);
-                case WORKFLOW -> validateWorkflow(definition, loaded);
                 case SUPERVISOR, SINGLE -> validateSupervisor(definition, loaded);
-                default ->
-                        throw new IllegalStateException(
-                        "Unsupported orchestration mode: " + orchestration.mode());
+                case WORKFLOW -> validateWorkflow(definition, loaded);
             }
         }
         OrchestrationCycleValidator.validate(loaded);
@@ -276,77 +242,6 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
         }
     }
 
-    private void validateWorkflow(AgentDefinition definition, Map<String, AgentDefinition> loaded) {
-        List<WorkflowNode> nodes = definition.orchestration().workflowNodes();
-        if (nodes.isEmpty()) {
-            throw new IllegalStateException(
-                    "WORKFLOW agent requires at least one workflow step: " + definition.agentId());
-        }
-        Set<String> stepIds = new LinkedHashSet<>();
-        Set<String> allStepIds = stepIdsFor(definition);
-        for (WorkflowNode node : nodes) {
-            if (node.nodeId() == null || node.nodeId().isBlank()) {
-                throw new IllegalStateException(
-                        "Workflow stepId is blank for agent " + definition.agentId());
-            }
-            if (!stepIds.add(node.nodeId())) {
-                throw new IllegalStateException(
-                        "Duplicate workflow stepId "
-                                + node.nodeId()
-                                + " in agent "
-                                + definition.agentId());
-            }
-            if (node.type() == WorkflowNodeType.AGENT_INVOKE
-                    || node.type() == WorkflowNodeType.SUBFLOW_INVOKE) {
-                if (node.refId() == null || node.refId().isBlank()) {
-                    throw new IllegalStateException(
-                            "Workflow refId is blank in node "
-                                    + node.nodeId()
-                                    + " for agent "
-                                    + definition.agentId());
-                }
-                if (!loaded.containsKey(node.refId())) {
-                    throw new IllegalStateException(
-                            "Workflow node target not found for agent "
-                                    + definition.agentId()
-                                    + ": "
-                                    + node.refId());
-                }
-            }
-            for (WorkflowTransition transition : node.transitions()) {
-                if (transition.nextStepId().isBlank()
-                        || !allStepIds.contains(transition.nextStepId())) {
-                    throw new IllegalStateException(
-                            "Workflow transition target not found in step " + node.nodeId());
-                }
-                int targetIndex =
-                        nodes.stream()
-                                .map(WorkflowNode::nodeId)
-                                .toList()
-                                .indexOf(transition.nextStepId());
-                int currentIndex = nodes.indexOf(node);
-                if (targetIndex <= currentIndex) {
-                    throw new IllegalStateException(
-                            "Workflow transition must move forward from step " + node.nodeId());
-                }
-            }
-            if (node.timeoutMs() != null && node.timeoutMs() <= 0) {
-                throw new IllegalStateException(
-                        "Workflow timeoutMs must be positive in step " + node.nodeId());
-            }
-            if (node.maxRetries() != null && node.maxRetries() < 0) {
-                throw new IllegalStateException(
-                        "Workflow maxRetries must not be negative in step " + node.nodeId());
-            }
-        }
-    }
-
-    private Set<String> stepIdsFor(AgentDefinition definition) {
-        return definition.orchestration().workflowNodes().stream()
-                .map(WorkflowNode::nodeId)
-                .collect(java.util.stream.Collectors.toSet());
-    }
-
     private void validateSupervisor(
             AgentDefinition definition, Map<String, AgentDefinition> loaded) {
         for (SubagentBinding binding : definition.orchestration().subagents()) {
@@ -369,6 +264,48 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                 + binding.bindingId()
                                 + ": "
                                 + binding.targetAgentId());
+            }
+        }
+    }
+
+    private void validateWorkflow(
+            AgentDefinition definition, Map<String, AgentDefinition> loaded) {
+        List<WorkflowStep> steps = definition.orchestration().workflow();
+        if (steps.isEmpty()) {
+            throw new IllegalStateException(
+                    "WORKFLOW agent requires at least one step: " + definition.agentId());
+        }
+        Set<String> stepIds = new java.util.LinkedHashSet<>();
+        for (WorkflowStep step : steps) {
+            if (step.stepId() == null || step.stepId().isBlank() || !stepIds.add(step.stepId())) {
+                throw new IllegalStateException(
+                        "Workflow step id must be unique and non-blank for " + definition.agentId());
+            }
+            if (step.agentId() == null || step.agentId().isBlank() || !loaded.containsKey(step.agentId())) {
+                throw new IllegalStateException(
+                        "Workflow step target not found for " + definition.agentId() + ": " + step.agentId());
+            }
+            if (step.timeoutMs() != null && step.timeoutMs() <= 0) {
+                throw new IllegalStateException("Workflow step timeout must be positive: " + step.stepId());
+            }
+            if (step.maxRetries() != null && step.maxRetries() < 0) {
+                throw new IllegalStateException("Workflow step maxRetries cannot be negative: " + step.stepId());
+            }
+        }
+        for (int index = 0; index < steps.size(); index++) {
+            WorkflowStep step = steps.get(index);
+            for (WorkflowTransition transition : step.transitions()) {
+                if (!stepIds.contains(transition.nextStepId())) {
+                    throw new IllegalStateException(
+                            "Workflow transition target not found: " + transition.nextStepId());
+                }
+                if (steps.indexOf(step) >= steps.stream()
+                        .map(WorkflowStep::stepId)
+                        .toList()
+                        .indexOf(transition.nextStepId())) {
+                    throw new IllegalStateException(
+                            "Workflow transition must point forward: " + step.stepId());
+                }
             }
         }
     }

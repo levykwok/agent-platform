@@ -8,6 +8,7 @@ import io.agent.platform.control.PlatformArtifactStore;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.security.MessageDigest;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -69,14 +70,112 @@ public class DocumentKnowledgeService {
         return directory.resolve(safeName).normalize();
     }
 
+    /** Return an owned private document with the same bytes, if one already exists. */
+    public synchronized Map<String, Object> findReusable(
+            Path rawFile, PlatformAuthService.Principal principal, String sourceType) {
+        if (rawFile == null || principal == null || !Files.isRegularFile(rawFile)) {
+            return Map.of();
+        }
+        String hash = contentSha256(rawFile);
+        if (hash.isBlank()) {
+            return Map.of();
+        }
+        return documents.values().stream()
+                .filter(document -> isOwnedPrivate(document, principal))
+                .filter(
+                        document ->
+                                sourceType == null
+                                        || sourceType.isBlank()
+                                        || sourceType.equals(String.valueOf(document.get("source_type"))))
+                .filter(document -> hash.equals(documentContentSha256(document)))
+                .findFirst()
+                .map(DocumentKnowledgeService::publicDocument)
+                .orElseGet(Map::of);
+    }
+
+    public void discardUpload(String docId) {
+        if (docId == null || docId.isBlank()) {
+            return;
+        }
+        deleteRecursively(storage.resolveWorkspace("documents", docId));
+    }
+
     public synchronized Map<String, Object> ingest(
             String docId, Path rawFile, String filename, String domain, String orgId) {
+        return ingestInternal(
+                docId, rawFile, filename, domain, orgId, null, "PUBLIC", Map.of());
+    }
+
+    public synchronized Map<String, Object> ingest(
+            String docId,
+            Path rawFile,
+            String filename,
+            String domain,
+            PlatformAuthService.Principal principal) {
+        return ingest(docId, rawFile, filename, domain, principal, "", "");
+    }
+
+    /** Ingest a private document and retain where it came from for knowledge-base navigation. */
+    public synchronized Map<String, Object> ingest(
+            String docId,
+            Path rawFile,
+            String filename,
+            String domain,
+            PlatformAuthService.Principal principal,
+            String sourceType,
+            String sourceSessionId) {
+        return ingest(docId, rawFile, filename, domain, principal, sourceType, sourceSessionId, "");
+    }
+
+    public synchronized Map<String, Object> ingest(
+            String docId,
+            Path rawFile,
+            String filename,
+            String domain,
+            PlatformAuthService.Principal principal,
+            String sourceType,
+            String sourceSessionId,
+            String sourceMessageId) {
+        if (principal == null) {
+            throw new PlatformAuthService.AuthException(401, "请先登录后上传文档");
+        }
+        Map<String, Object> provenance = new LinkedHashMap<>();
+        if (sourceType != null && !sourceType.isBlank()) {
+            provenance.put("source_type", sourceType.strip());
+        }
+        if (sourceSessionId != null && !sourceSessionId.isBlank()) {
+            provenance.put("source_session_id", sourceSessionId.strip());
+        }
+        if (sourceMessageId != null && !sourceMessageId.isBlank()) {
+            provenance.put("source_message_id", sourceMessageId.strip());
+        }
+        return ingestInternal(
+                docId,
+                rawFile,
+                filename,
+                domain,
+                principal.orgId(),
+                principal.userId(),
+                "PRIVATE",
+                provenance);
+    }
+
+    private Map<String, Object> ingestInternal(
+            String docId,
+            Path rawFile,
+            String filename,
+            String domain,
+            String orgId,
+            String createdBy,
+            String visibility,
+            Map<String, Object> provenance) {
         if (!supports(filename)) {
             throw new IllegalArgumentException(
                     "仅支持 PDF、Office、Markdown、TXT、CSV（pdf/doc/docx/xls/xlsx/ppt/pptx/md/txt/csv）。");
         }
         DocumentExtractionService.Extraction extraction =
                 extractionService.extract(rawFile, filename);
+        String contentSha256 = contentSha256(rawFile);
         List<Map<String, Object>> chunks = new ArrayList<>();
         int ordinal = 1;
         for (String text : extraction.chunks()) {
@@ -98,6 +197,10 @@ public class DocumentKnowledgeService {
                         blankOr(domain, "platform"),
                         "org_id",
                         blankOr(orgId, "platform"),
+                        "created_by",
+                        blankOr(createdBy, "platform_admin"),
+                        "visibility",
+                        blankOr(visibility, "PUBLIC"),
                         "doc_type",
                         extraction.documentType(),
                         "status",
@@ -114,6 +217,8 @@ public class DocumentKnowledgeService {
                         false,
                         "object_mime_type",
                         mimeType(filename),
+                        "content_sha256",
+                        contentSha256,
                         "raw_path",
                         storage.toWorkspaceRelative(rawFile),
                         "chunks",
@@ -122,6 +227,9 @@ public class DocumentKnowledgeService {
                         Instant.now().toString(),
                         "updated_at",
                         Instant.now().toString());
+        if (provenance != null && !provenance.isEmpty()) {
+            document.putAll(provenance);
+        }
         QdrantKnowledgeIndex.IndexResult indexResult =
                 "parsed".equals(extraction.parseStatus())
                         ? qdrantIndex.upsert(document, chunks)
@@ -137,27 +245,42 @@ public class DocumentKnowledgeService {
     }
 
     public synchronized Map<String, Object> reindex(String docId) {
+        return reindex(docId, null);
+    }
+
+    public synchronized Map<String, Object> reindex(
+            String docId, PlatformAuthService.Principal principal) {
         Map<String, Object> existing = document(docId);
         if (existing.isEmpty()) {
             throw new IllegalArgumentException("Document not found: " + docId);
         }
+        requireReadable(existing, principal);
         Path rawFile = resolveStoredPath(String.valueOf(existing.get("raw_path")));
         qdrantIndex.deleteDocument(docId);
         Map<String, Object> refreshed =
-                ingest(
+                ingestInternal(
                         docId,
                         rawFile,
                         String.valueOf(existing.get("filename")),
                         String.valueOf(existing.get("domain")),
-                        String.valueOf(existing.get("org_id")));
+                        String.valueOf(existing.get("org_id")),
+                        String.valueOf(existing.getOrDefault("created_by", "platform_admin")),
+                        String.valueOf(existing.getOrDefault("visibility", "PUBLIC")),
+                        provenance(existing));
         return map("document", refreshed, "indexed", refreshed.get("block_count"));
     }
 
     public synchronized Preview preparePreview(String docId) {
+        return preparePreview(docId, null);
+    }
+
+    public synchronized Preview preparePreview(
+            String docId, PlatformAuthService.Principal principal) {
         Map<String, Object> document = document(docId);
         if (document.isEmpty()) {
             throw new IllegalArgumentException("Document not found: " + docId);
         }
+        requireReadable(document, principal);
         Path rawFile = resolveStoredPath(String.valueOf(document.get("raw_path")));
         if ("pdf".equals(document.get("doc_type"))) {
             return savePreview(document, rawFile, "application/pdf", "PDF 原文件已可预览。");
@@ -184,10 +307,16 @@ public class DocumentKnowledgeService {
     }
 
     public synchronized PreviewFile previewFile(String docId) {
+        return previewFile(docId, null);
+    }
+
+    public synchronized PreviewFile previewFile(
+            String docId, PlatformAuthService.Principal principal) {
         Map<String, Object> document = document(docId);
         if (document.isEmpty()) {
             throw new IllegalArgumentException("Document not found: " + docId);
         }
+        requireReadable(document, principal);
         String path = String.valueOf(document.get("preview_path"));
         if (path.isBlank() || "null".equals(path)) {
             throw new IllegalStateException("请先生成文档预览。");
@@ -197,6 +326,12 @@ public class DocumentKnowledgeService {
     }
 
     public synchronized void delete(String docId) {
+        delete(docId, null);
+    }
+
+    public synchronized void delete(String docId, PlatformAuthService.Principal principal) {
+        Map<String, Object> existing = document(docId);
+        if (!existing.isEmpty()) requireWritable(existing, principal);
         Map<String, Object> removed = documents.remove(docId);
         if (removed != null) {
             qdrantIndex.deleteDocument(docId);
@@ -207,7 +342,13 @@ public class DocumentKnowledgeService {
     }
 
     public synchronized List<Map<String, Object>> documents(String domain) {
+        return documents(domain, null);
+    }
+
+    public synchronized List<Map<String, Object>> documents(
+            String domain, PlatformAuthService.Principal principal) {
         return documents.values().stream()
+                .filter(document -> isReadable(document, principal))
                 .filter(
                         document ->
                                 domain == null
@@ -227,24 +368,96 @@ public class DocumentKnowledgeService {
         return document == null ? Map.of() : new LinkedHashMap<>(document);
     }
 
+    public synchronized Map<String, Object> document(
+            String docId, PlatformAuthService.Principal principal) {
+        Map<String, Object> document = document(docId);
+        if (document.isEmpty()) return document;
+        requireReadable(document, principal);
+        return document;
+    }
+
     public synchronized Retrieval retrieve(String query, List<String> requestedDocIds, int topK) {
-        Set<String> allowedIds =
+        return retrieve(query, requestedDocIds, topK, null);
+    }
+
+    public synchronized Retrieval retrieve(
+            String query,
+            List<String> requestedDocIds,
+            int topK,
+            PlatformAuthService.Principal principal) {
+        List<RequestedDocument> requested =
                 requestedDocIds == null
-                        ? Set.of()
+                        ? List.of()
                         : requestedDocIds.stream()
-                                .filter(id -> id != null && !id.isBlank())
-                                .collect(Collectors.toCollection(LinkedHashSet::new));
+                                .map(id -> new RequestedDocument(id, ""))
+                                .toList();
+        return retrieveScoped(query, requested, topK, principal);
+    }
+
+    public synchronized Retrieval retrieveScoped(
+            String query,
+            List<RequestedDocument> requestedDocuments,
+            int topK,
+            PlatformAuthService.Principal principal) {
+        Set<String> readableIds =
+                documents.values().stream()
+                        .filter(document -> isReadable(document, principal))
+                        .map(document -> String.valueOf(document.get("doc_id")))
+                        .collect(Collectors.toCollection(LinkedHashSet::new));
+        if (principal != null && readableIds.isEmpty()) {
+            return new Retrieval("", List.of());
+        }
+        boolean explicitScope = requestedDocuments != null && !requestedDocuments.isEmpty();
+        Set<String> allowedIds;
+        Map<String, Set<String>> allowedVersions = new LinkedHashMap<>();
+        if (!explicitScope) {
+            allowedIds = readableIds;
+        } else {
+            allowedIds = new LinkedHashSet<>();
+            for (RequestedDocument requested : requestedDocuments) {
+                if (requested == null || requested.docId() == null || requested.docId().isBlank()) {
+                    continue;
+                }
+                if (!readableIds.contains(requested.docId())) {
+                    continue;
+                }
+                String version = requested.versionId() == null ? "" : requested.versionId().strip();
+                allowedIds.add(requested.docId());
+                allowedVersions.computeIfAbsent(requested.docId(), ignored -> new LinkedHashSet<>());
+                if (!version.isBlank()) {
+                    allowedVersions.get(requested.docId()).add(version);
+                }
+            }
+            // An explicit but unauthorized/nonexistent/version-mismatched scope must never fall
+            // through to the default all-readable search.
+            if (allowedIds.isEmpty()) {
+                return new Retrieval("", List.of());
+            }
+        }
         List<String> terms = searchTerms(query);
         int limit = Math.max(1, Math.min(topK <= 0 ? 4 : topK, 8));
         QdrantKnowledgeIndex.SearchResult vectorResult =
                 qdrantIndex.search(query, new ArrayList<>(allowedIds), limit);
         if (vectorResult.available() && !vectorResult.hits().isEmpty()) {
-            return vectorRetrieval(vectorResult.hits());
+            List<QdrantKnowledgeIndex.VectorHit> filtered =
+                    vectorResult.hits().stream()
+                            .filter(
+                                    hit ->
+                                            isAllowedVersion(
+                                                    hit.documentId(), hit.versionId(), allowedIds, allowedVersions))
+                            .toList();
+            if (!filtered.isEmpty()) {
+                return vectorRetrieval(filtered);
+            }
         }
         List<Hit> hits = new ArrayList<>();
         for (Map<String, Object> document : documents.values()) {
             String docId = String.valueOf(document.get("doc_id"));
-            if (!allowedIds.isEmpty() && !allowedIds.contains(docId)) {
+            if (!isAllowedVersion(
+                    docId,
+                    String.valueOf(document.getOrDefault("version_id", "v1")),
+                    allowedIds,
+                    allowedVersions)) {
                 continue;
             }
             if (!"parsed".equals(document.get("parse_status"))) {
@@ -295,6 +508,18 @@ public class DocumentKnowledgeService {
             }
         }
         return new Retrieval(context.toString().strip(), List.copyOf(citations));
+    }
+
+    private static boolean isAllowedVersion(
+            String docId,
+            String versionId,
+            Set<String> allowedIds,
+            Map<String, Set<String>> allowedVersions) {
+        if (!allowedIds.contains(docId)) {
+            return false;
+        }
+        Set<String> versions = allowedVersions.get(docId);
+        return versions == null || versions.isEmpty() || versions.contains(versionId);
     }
 
     private static Retrieval vectorRetrieval(List<QdrantKnowledgeIndex.VectorHit> hits) {
@@ -409,6 +634,50 @@ public class DocumentKnowledgeService {
             for (Map<String, Object> document : documents.values()) {
                 persistArtifact(document, existingRawFile(document));
             }
+        }
+    }
+
+    private static boolean isReadable(
+            Map<String, Object> document, PlatformAuthService.Principal principal) {
+        if (principal == null) return true;
+        if ("PLATFORM_ADMIN".equals(principal.role())) return true;
+        String visibility = String.valueOf(document.getOrDefault("visibility", "PUBLIC"));
+        if ("PUBLIC".equals(visibility)) return true;
+        if (!principal.orgId().equals(String.valueOf(document.getOrDefault("org_id", "")))) {
+            return false;
+        }
+        return "ORGANIZATION".equals(visibility)
+                || ("PRIVATE".equals(visibility)
+                        && principal.userId().equals(String.valueOf(document.get("created_by"))));
+    }
+
+    private static boolean isOwnedPrivate(
+            Map<String, Object> document, PlatformAuthService.Principal principal) {
+        return principal != null
+                && "PRIVATE".equals(String.valueOf(document.getOrDefault("visibility", "PUBLIC")))
+                && principal.orgId().equals(String.valueOf(document.getOrDefault("org_id", "")))
+                && principal.userId().equals(String.valueOf(document.getOrDefault("created_by", "")));
+    }
+
+    private static void requireReadable(
+            Map<String, Object> document, PlatformAuthService.Principal principal) {
+        if (!isReadable(document, principal)) {
+            throw new PlatformAuthService.AuthException(
+                    principal == null ? 401 : 404, "文档不存在或当前账号无权访问");
+        }
+    }
+
+    private static void requireWritable(
+            Map<String, Object> document, PlatformAuthService.Principal principal) {
+        if (principal == null) {
+            throw new PlatformAuthService.AuthException(401, "请先登录后管理文档");
+        }
+        if ("PLATFORM_ADMIN".equals(principal.role())) return;
+        String visibility = String.valueOf(document.getOrDefault("visibility", "PUBLIC"));
+        boolean owner = principal.userId().equals(String.valueOf(document.get("created_by")));
+        boolean sameOrg = principal.orgId().equals(String.valueOf(document.get("org_id")));
+        if (!owner || !sameOrg || "PUBLIC".equals(visibility)) {
+            throw new PlatformAuthService.AuthException(403, "没有权限修改该文档");
         }
     }
 
@@ -642,6 +911,48 @@ public class DocumentKnowledgeService {
         return value == null || value.isBlank() ? fallback : value;
     }
 
+    private String documentContentSha256(Map<String, Object> document) {
+        String recorded = String.valueOf(document.getOrDefault("content_sha256", "")).strip();
+        if (!recorded.isBlank()) {
+            return recorded;
+        }
+        Object rawPath = document.get("raw_path");
+        if (rawPath == null || String.valueOf(rawPath).isBlank()) {
+            return "";
+        }
+        try {
+            Path path = storage.resolveRelativeToWorkspace(String.valueOf(rawPath));
+            return Files.isRegularFile(path) ? contentSha256(path) : "";
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private static String contentSha256(Path path) {
+        try {
+            byte[] bytes = Files.readAllBytes(path);
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+            StringBuilder result = new StringBuilder(digest.length * 2);
+            for (byte value : digest) {
+                result.append(String.format("%02x", value));
+            }
+            return result.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("无法计算文档内容指纹", e);
+        }
+    }
+
+    private static Map<String, Object> provenance(Map<String, Object> document) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (String key : List.of("source_type", "source_session_id", "source_message_id")) {
+            Object value = document.get(key);
+            if (value != null && !String.valueOf(value).isBlank()) {
+                result.put(key, value);
+            }
+        }
+        return result;
+    }
+
     private static void deleteRecursively(Path directory) {
         if (!Files.exists(directory)) {
             return;
@@ -669,6 +980,8 @@ public class DocumentKnowledgeService {
         }
         return row;
     }
+
+    public record RequestedDocument(String docId, String versionId) {}
 
     public record Retrieval(String context, List<Map<String, Object>> citations) {}
 

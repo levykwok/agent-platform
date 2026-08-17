@@ -24,7 +24,6 @@ const ORCHESTRATION_LABELS: Record<string, string> = {
 }
 
 const agents = ref<JsonMap[]>([])
-const flows = ref<JsonMap[]>([])
 const skills = ref<JsonMap[]>([])
 const tools = ref<JsonMap[]>([])
 const toolSourceFilter = ref('')
@@ -71,15 +70,12 @@ const form = reactive({
   workflow_steps: [] as JsonMap[],
   subagents: [] as JsonMap[],
   model_policy: {} as JsonMap,
-  flow_bindings: [] as JsonMap[],
 })
 
 function toolKey(t: JsonMap) { return String(t.name || t.tool_id || '') }
 function agentMode(agent: JsonMap): string {
   const orchestration = (agent.orchestration || {}) as JsonMap
-  const workflowJson = (agent.workflow_json || {}) as JsonMap
-  const workflowOrchestration = (workflowJson.orchestration || {}) as JsonMap
-  return String(agent.orchestration_mode || orchestration.mode || workflowOrchestration.mode || 'SINGLE').toUpperCase()
+  return String(agent.orchestration_mode || orchestration.mode || 'SINGLE').toUpperCase()
 }
 function agentOptionLabel(agent: JsonMap): string {
   const id = String(agent.agent_id || agent.id || '')
@@ -93,11 +89,11 @@ function agentDisplayLabel(agentId: string): string {
 }
 function toolSource(t: JsonMap): string {
   if (t.runtime_name || String(t.source_type || '').includes('mcp') || String(t.category || '').includes('mcp')) return 'mcp'
-  if (String(t.category || '') === 'flow') return 'flow'
+  if (String(t.type || '') === 'workflow') return 'workflow'
   if (String(t.source_type || '') === 'domain_package' || (t.domain && String(t.domain) !== 'platform')) return 'domain'
   return 'platform'
 }
-const TOOL_SRC_LABEL: Record<string, string> = { platform: '平台', domain: '业务域', flow: '工作流', mcp: 'MCP' }
+const TOOL_SRC_LABEL: Record<string, string> = { platform: '平台', domain: '业务域', workflow: 'Workflow Tool', mcp: 'MCP' }
 // MCP tool ids look like "mcp:<server_id>:<tool_name>"; fall back to runtime_config.
 function mcpServerIdOfTool(t: JsonMap): string {
   const m = String(t.tool_id || '').match(/^mcp:([^:]+):/)
@@ -162,21 +158,18 @@ const visible = computed(() => agents.value.filter((a) => {
   if (!q) return true
   return [a.display_name, a.name, a.agent_id, a.description].join(' ').toLowerCase().includes(q)
 }))
-function flowLabel(flowId: string) { const f = flowById(flowId); return f?.display_name || f?.name || flowId }
-const flowBindingList = computed(() => (form.flow_bindings as JsonMap[]).filter((b) => b.flow_id).map((b) => ({ key: String(b.key || ''), flow_id: String(b.flow_id || ''), name: flowLabel(String(b.flow_id || '')) })))
 const modelPolicyList = computed(() => Object.entries(form.model_policy)
   .filter(([slot]) => slot !== 'nodes' && slot !== 'slots')
   .map(([slot, model]) => ({ slot, model: String(model || '') || '跟随默认绑定' })))
 const orchestrationSummary = computed(() => {
   const mode = String(form.orchestration_mode || 'SINGLE').toUpperCase()
-  if (mode === 'WORKFLOW') return `${form.workflow_steps.length} 个步骤`
   if (mode === 'ROUTER') return `${form.orchestration_routes.length} 条路由`
+  if (mode === 'WORKFLOW') return `${form.workflow_steps.length} 个步骤`
   if (mode === 'SUPERVISOR') return `${form.subagents.length} 个子代理`
   return '单代理'
 })
 const stepLabels = ['基本信息', '编排', '技能', '平台工具', 'MCP 服务器', 'Memory 策略', '模型策略', 'Prompt']
 const isBuiltin = computed(() => String(selected.value?.source || 'builtin') === 'builtin')
-const flowKeyOptions = computed(() => form.flow_bindings.map((b) => String(b.key || '')).filter(Boolean))
 const fixedSlotKeys = computed(() => new Set((modelChoices.value.fixed_slots as JsonMap[] || []).map((s) => String(s.slot_key || ''))))
 const aliasKeys = computed(() => new Set((modelChoices.value.aliases as JsonMap[] || []).map((a) => String(a.alias_name || ''))))
 
@@ -184,16 +177,6 @@ function headers(json = false) { return makeHeaders(json, currentOrgId()) }
 async function api(path: string, opts: RequestInit = {}) { return await readJson<JsonMap>(await fetch(path, { headers: headers(Boolean(opts.body)), ...opts })) }
 function domainQuery() { return domainFilter.value ? `?domain=${encodeURIComponent(domainFilter.value)}` : '' }
 
-function flowById(flowId: string): JsonMap | null { return flows.value.find((f) => String(f.flow_id || f.id) === flowId) || null }
-function flowCaps(flowId: string): JsonMap { return (flowById(flowId)?.capabilities as JsonMap) || {} }
-function capBadges(flowId: string): Array<{ label: string; on: boolean; trait: boolean }> {
-  const caps = flowCaps(flowId)
-  if (!Object.keys(caps).length) return []
-  const out: Array<{ label: string; on: boolean; trait: boolean }> = []
-  for (const [k, label] of Object.entries(CAP_LABELS)) out.push({ label, on: caps[k] === true, trait: false })
-  for (const [k, label] of Object.entries(TRAIT_LABELS)) out.push({ label, on: caps[k] === true, trait: true })
-  return out
-}
 function policyLabel(key: string, value: string): string {
   if (value) return `→ ${value}`
   if (fixedSlotKeys.value.has(key)) return '→ 跟随默认绑定'
@@ -211,12 +194,10 @@ async function loadModelChoices(domain: string) {
 }
 
 async function loadDeps() {
-  const [f, s, t] = await Promise.all([
-    api(`/platform/frontend/flows${domainQuery()}`),
+  const [s, t] = await Promise.all([
     api(`/platform/frontend/skills${domainQuery()}`),
     api(`/platform/frontend/tools${domainQuery()}`),
   ])
-  flows.value = (f.items || f.flows || []) as JsonMap[]
   skills.value = (Array.isArray(s) ? s : s.items || s.skills || []) as JsonMap[]
   tools.value = (Array.isArray(t) ? t : t.items || t.tools || []) as JsonMap[]
   await loadMcpServers()
@@ -231,13 +212,6 @@ async function loadAgents() {
         const s = await api(`/platform/frontend/agents/${encodeURIComponent(String(a.agent_id))}/spec`)
         const cfg = (s.config_json || {}) as JsonMap
         Object.assign(a, cfg)
-        const wf = (s.workflow_json || {}) as JsonMap
-        const wfFlows = (wf.flows || {}) as JsonMap
-        if (Object.keys(wfFlows).length) {
-          const fb: JsonMap = {}
-          for (const [k, v] of Object.entries(wfFlows)) fb[k] = typeof v === 'string' ? v : ((v as JsonMap)?.flow_id || v)
-          a.flow_bindings = fb
-        }
       } catch { /* ignore merge failure */ }
     }
   }
@@ -253,11 +227,8 @@ async function selectAgent(id: string) {
     const d = await api(`/platform/frontend/agents/${encodeURIComponent(id)}/spec`)
     spec.value = d
     const cfg = (d.config_json || {}) as JsonMap
-    const wf = (d.workflow_json || {}) as JsonMap
     const a = agents.value.find((x) => x.agent_id === id) || {}
-    const wfFlows = (wf.flows || {}) as JsonMap
-    const orchestration = (wf.orchestration || {}) as JsonMap
-    const flowBindings = Object.entries(wfFlows).map(([key, v]) => ({ key, flow_id: typeof v === 'string' ? v : ((v as JsonMap)?.flow_id || '') }))
+    const orchestration = (cfg.orchestration || {}) as JsonMap
     const pp = (cfg.prompt_policy || {}) as JsonMap
     Object.assign(form, {
       agent_id: id,
@@ -275,7 +246,6 @@ async function selectAgent(id: string) {
       router_rules: (((cfg.router_policy as JsonMap)?.rules as JsonMap[]) || []).map((r) => ({
         intent: r.intent || '',
         keywords: Array.isArray(r.keywords) ? (r.keywords as string[]).join(', ') : (r.keywords || ''),
-        flow_key: r.flow_key || '',
       })),
       orchestration_mode: orchestration.mode || 'SINGLE',
       orchestration_routes: ((orchestration.routes as JsonMap[]) || []).map((r) => ({
@@ -292,7 +262,7 @@ async function selectAgent(id: string) {
         transitions: ((s.transitions as JsonMap[]) || []).map((t) => ({
           when: t.when || '',
           nextStepId: t.nextStepId || t.next_step_id || t.next || '',
-          defaultTransition: t.defaultTransition ?? t.default_transition ?? false,
+          defaultTransition: t.defaultTransition === true || t.default_transition === true,
         })),
       })),
       subagents: ((orchestration.subagents as JsonMap[]) || []).map((s) => ({
@@ -303,7 +273,6 @@ async function selectAgent(id: string) {
         exposeToUser: s.exposeToUser ?? s.expose_to_user ?? true,
       })),
       model_policy: { ...((cfg.model_policy as JsonMap) || {}) },
-      flow_bindings: flowBindings,
     })
     await loadModelChoices(String(form.domain))
     await prepareQuickSession()
@@ -318,7 +287,7 @@ function newAgent() {
     role: '', planner_rules: '', require_structured_plan: true,
     included_skills: [], included_mcps: [], included_tools: [], restrict_tools: false, router_rules: [],
     orchestration_mode: 'SINGLE', orchestration_routes: [], workflow_steps: [], subagents: [],
-    model_policy: {}, flow_bindings: [],
+    model_policy: {},
   })
   spec.value = null; selectedId.value = ''; step.value = 0; output.value = null
   quickSessionId.value = ''; quickSessionTitle.value = ''
@@ -364,9 +333,7 @@ function toggleSkill(id: string) {
   if (i >= 0) form.included_skills.splice(i, 1)
   else form.included_skills.push(id)
 }
-function addFlowBinding() { form.flow_bindings.push({ key: '', flow_id: '' }) }
-function removeFlowBinding(i: number) { form.flow_bindings.splice(i, 1) }
-function addRouterRule() { form.router_rules.push({ intent: '', keywords: '', flow_key: form.flow_bindings[0]?.key || '' }) }
+function addRouterRule() { form.router_rules.push({ intent: '', keywords: '' }) }
 function removeRouterRule(i: number) { form.router_rules.splice(i, 1) }
 function addOrchestrationRoute() { form.orchestration_routes.push({ ruleId: `route_${form.orchestration_routes.length + 1}`, targetAgentId: '', contains: '', keywords: '', defaultRoute: false }) }
 function removeOrchestrationRoute(i: number) { form.orchestration_routes.splice(i, 1) }
@@ -376,7 +343,9 @@ function addWorkflowTransition(step: JsonMap) {
   if (!Array.isArray(step.transitions)) step.transitions = []
   ;(step.transitions as JsonMap[]).push({ when: '', nextStepId: '', defaultTransition: false })
 }
-function removeWorkflowTransition(step: JsonMap, i: number) { (step.transitions as JsonMap[] || []).splice(i, 1) }
+function removeWorkflowTransition(step: JsonMap, index: number) {
+  ;((step.transitions || []) as JsonMap[]).splice(index, 1)
+}
 function addSubagent() { form.subagents.push({ bindingId: `subagent_${form.subagents.length + 1}`, targetAgentId: '', role: '', description: '', exposeToUser: true }) }
 function removeSubagent(i: number) { form.subagents.splice(i, 1) }
 function toggleModelPolicy(key: string) {
@@ -424,30 +393,6 @@ function toggleCustomSlot(a: JsonMap) {
     delete form.model_policy[alias]
   }
 }
-const boundFlowNodeSlots = computed(() => {
-  const out: JsonMap[] = []
-  for (const b of form.flow_bindings as JsonMap[]) {
-    const flowKey = String(b.key || '').trim()
-    const flowId = String(b.flow_id || '').trim()
-    if (!flowKey || !flowId) continue
-    const flow = flowById(flowId)
-    for (const n of ((flow?.nodes as JsonMap[]) || [])) {
-      const nodeId = String(n.node_id || '').trim()
-      if (!nodeId) continue
-      const modelSlots = Array.isArray(n.model_slots) ? n.model_slots.map((s) => String(s || '').trim()).filter(Boolean) : []
-      for (const slotKey of Array.from(new Set(modelSlots))) {
-        out.push({
-          ...n,
-          flow_key: flowKey,
-          flow_id: flowId,
-          policy_key: `${flowKey}.${nodeId}`,
-          slot_key: slotKey,
-        })
-      }
-    }
-  }
-  return out
-})
 function nodePolicies(): JsonMap {
   if (!form.model_policy.nodes || typeof form.model_policy.nodes !== 'object') form.model_policy.nodes = {}
   return form.model_policy.nodes as JsonMap
@@ -529,7 +474,6 @@ async function nextOrSubmit() { if (step.value < stepLabels.length - 1) step.val
 
 async function saveAgent() {
   if (!form.display_name.trim()) { notifyError('请填写显示名'); return }
-  const flowBindings: Record<string, string> = {}
   const mode = String(form.orchestration_mode || 'SINGLE').toUpperCase()
   const orchestration: JsonMap = { mode }
   if (mode === 'ROUTER') {
@@ -551,13 +495,13 @@ async function saveAgent() {
         stepId: String(s.stepId || '').trim(),
         agentId: String(s.agentId || '').trim(),
         instruction: String(s.instruction || '').trim(),
-        transitions: ((s.transitions as JsonMap[]) || [])
+        transitions: ((s.transitions || []) as JsonMap[])
           .map((t) => ({
             when: String(t.when || '').trim(),
             nextStepId: String(t.nextStepId || '').trim(),
             defaultTransition: t.defaultTransition === true,
           }))
-          .filter((t) => t.nextStepId && (t.defaultTransition || t.when)),
+          .filter((t) => t.nextStepId && (t.when || t.defaultTransition)),
       }))
       .filter((s) => s.stepId && s.agentId)
     if (!workflow.length) { notifyError('WORKFLOW 至少需要一个有效步骤'); step.value = 1; return }
@@ -570,19 +514,6 @@ async function saveAgent() {
   if (!subagents.length) { notifyError('SUPERVISOR 至少需要一个子代理'); step.value = 1; return }
     orchestration.subagents = subagents
   }
-  const routerRules: JsonMap[] = []
-  const seenFlowKeys = new Set<string>()
-  for (const r of form.router_rules) {
-    const intent = String(r.intent || '').trim()
-    const keywords = String(r.keywords || '').split(/[\s,，;；、\n]+/).map((s) => s.trim()).filter(Boolean)
-    const flowKey = String(r.flow_key || '').trim()
-    if (!intent && !keywords.length) continue
-    if (!flowKey || !flowBindings[flowKey]) { notifyError('路由意图缺少有效 Flow Key'); step.value = 1; return }
-    if (seenFlowKeys.has(flowKey)) { notifyError(`路由意图重复：${flowKey}`); step.value = 1; return }
-    seenFlowKeys.add(flowKey)
-    routerRules.push({ intent, keywords, flow_key: flowKey })
-  }
-  const routerPolicy = routerRules.length ? { mode: 'hybrid', default_flow: Object.keys(flowBindings)[0] || '', rules: routerRules } : {}
   const skillScope = { include: form.included_skills }
   const mcpScope = { include: form.included_mcps }
   const toolRefs = effectiveToolRefs()
@@ -597,18 +528,13 @@ async function saveAgent() {
     mcp_scope: mcpScope,
     ...(Object.keys(toolScope).length ? { tool_scope: toolScope } : {}),
     ...(Object.keys(modelPolicyPayload()).length ? { model_policy: modelPolicyPayload() } : {}),
-    ...(Object.keys(routerPolicy).length ? { router_policy: routerPolicy } : {}),
+    orchestration,
     prompt_policy: {
       ...(form.role ? { role: form.role } : {}),
       ...(plannerRules.length ? { planner_rules: plannerRules } : {}),
       require_structured_plan: form.require_structured_plan,
     },
     retrieval_policy: { domain: form.domain },
-  }
-  const workflowJson: JsonMap = {
-    default_flow: '',
-    flows: {},
-    orchestration,
   }
   try {
     let agentId = selectedId.value
@@ -617,7 +543,7 @@ async function saveAgent() {
       agentId = String(created.agent_id || (created.agent as JsonMap)?.agent_id || (created.item as JsonMap)?.agent_id || '')
   if (!agentId) throw new Error('创建代理后未返回 agent_id')
     }
-    await api(`/platform/frontend/agents/${encodeURIComponent(agentId)}/spec`, { method: 'PUT', body: JSON.stringify({ config_json: configJson, workflow_json: workflowJson }) })
+    await api(`/platform/frontend/agents/${encodeURIComponent(agentId)}/spec`, { method: 'PUT', body: JSON.stringify({ config_json: configJson }) })
     await loadAgents()
     await selectAgent(agentId)
     configOpen.value = false
@@ -713,10 +639,7 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         <div v-if="form.orchestration_mode === 'WORKFLOW' && form.workflow_steps.length" class="orch-flow">
           <div v-for="(s, i) in form.workflow_steps" :key="`${s.stepId}-${i}`" class="orch-step">
             <div class="orch-index">{{ i + 1 }}</div>
-            <div class="orch-main">
-        <div class="orch-title">{{ s.stepId || `step_${i + 1}` }} <span>→ {{ s.agentId ? agentDisplayLabel(String(s.agentId)) : '未选择代理' }}</span></div>
-              <div class="orch-desc">{{ s.instruction || '无额外指令' }}</div>
-            </div>
+            <div class="orch-main"><div class="orch-title">{{ s.stepId || `step_${i + 1}` }} <span>→ {{ s.agentId ? agentDisplayLabel(String(s.agentId)) : '未选择代理' }}</span></div><div class="orch-desc">{{ s.instruction || '无额外指令' }}</div></div>
           </div>
         </div>
         <div v-else-if="form.orchestration_mode === 'ROUTER' && form.orchestration_routes.length" class="ov-rows">
@@ -825,11 +748,11 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
           <select v-model="form.orchestration_mode">
             <option value="SINGLE">SINGLE - 单代理</option>
 <option value="ROUTER">ROUTER - 按关键词路由到目标代理</option>
-            <option value="WORKFLOW">WORKFLOW - 串行执行多个代理</option>
+            <option value="WORKFLOW">WORKFLOW - 按步骤串行执行多个代理</option>
             <option value="SUPERVISOR">SUPERVISOR - 主代理挂载子代理</option>
           </select>
         </div>
-          <p class="pick-hint">这里保存的是 AgentScope runtime 实际读取的编排配置；WORKFLOW、ROUTER、SUPERVISOR 都属于 Agent 编排。</p>
+          <p class="pick-hint">这里配置 Agent 自身的 SINGLE、ROUTER、WORKFLOW、SUPERVISOR。独立 Workflow 画布仍是另一类资产，需通过 Workflow Tool 注册后在工具区域绑定。</p>
 
         <div v-if="form.orchestration_mode === 'ROUTER'">
           <div class="actions"><button class="btn btn-ghost btn-sm" @click="addOrchestrationRoute">添加路由</button></div>
@@ -857,31 +780,13 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         <div v-else-if="form.orchestration_mode === 'WORKFLOW'">
           <div class="actions"><button class="btn btn-ghost btn-sm" @click="addWorkflowStep">添加步骤</button></div>
           <table>
-          <thead><tr><th>步骤 ID</th><th>执行代理</th><th>指令</th><th>条件分支</th><th></th></tr></thead>
+            <thead><tr><th>步骤 ID</th><th>执行代理</th><th>指令</th><th>条件分支</th><th></th></tr></thead>
             <tbody>
-              <tr v-for="(s,i) in form.workflow_steps" :key="'step'+i">
-                <td><input v-model="s.stepId" placeholder="research"/></td>
-                <td>
-                  <select v-model="s.agentId">
-              <option value="">选择代理</option>
-                    <option v-for="a in agents" :key="String(a.agent_id)" :value="a.agent_id">{{ agentOptionLabel(a) }}</option>
-                  </select>
-                </td>
-                <td><input v-model="s.instruction" placeholder="传给该步骤的额外指令"/></td>
-                <td class="workflow-branch-cell">
-                  <button class="btn btn-ghost btn-sm" @click="addWorkflowTransition(s)">添加分支</button>
-                  <div v-for="(t,ti) in (s.transitions || [])" :key="`transition-${i}-${ti}`" class="workflow-branch-row">
-                    <input v-model="t.when" placeholder="状态，如 needs_review" :disabled="t.defaultTransition" />
-                    <span>→</span>
-                    <select v-model="t.nextStepId">
-                      <option value="">选择后续步骤</option>
-                      <option v-for="target in form.workflow_steps.slice(i + 1)" :key="String(target.stepId)" :value="String(target.stepId)">{{ target.stepId || '未命名步骤' }}</option>
-                    </select>
-                    <label class="workflow-default"><input type="checkbox" v-model="t.defaultTransition" /> 默认</label>
-                    <button class="btn small danger" @click="removeWorkflowTransition(s, ti)">删除</button>
-                  </div>
-                  <div v-if="!(s.transitions || []).length" class="branch-empty">无分支，按顺序执行</div>
-                </td>
+              <tr v-for="(s, i) in form.workflow_steps" :key="`step${i}`">
+                <td><input v-model="s.stepId" placeholder="research" /></td>
+                <td><select v-model="s.agentId"><option value="">选择代理</option><option v-for="a in agents" :key="String(a.agent_id)" :value="a.agent_id">{{ agentOptionLabel(a) }}</option></select></td>
+                <td><input v-model="s.instruction" placeholder="传给该代理的步骤指令" /></td>
+                <td class="workflow-branch-cell"><button class="btn btn-ghost btn-sm" @click="addWorkflowTransition(s)">添加分支</button><div v-for="(t, ti) in (s.transitions || [])" :key="`${i}-${ti}`" class="workflow-branch-row"><input v-model="t.when" placeholder="状态" :disabled="t.defaultTransition === true" /><span>→</span><select v-model="t.nextStepId"><option value="">选择后续步骤</option><option v-for="target in form.workflow_steps.slice(i + 1)" :key="String(target.stepId)" :value="String(target.stepId)">{{ target.stepId || '未命名步骤' }}</option></select><label class="workflow-default"><input type="checkbox" v-model="t.defaultTransition" /> 默认</label><button class="btn small danger" @click="removeWorkflowTransition(s, ti)">删除</button></div><div v-if="!(s.transitions || []).length" class="branch-empty">无分支，按顺序执行</div></td>
                 <td><button class="btn small danger" @click="removeWorkflowStep(i)">删除</button></td>
               </tr>
               <tr v-if="!form.workflow_steps.length"><td colspan="5" class="empty">暂无步骤，保存 WORKFLOW 前至少添加一个。</td></tr>
@@ -1024,27 +929,6 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
                 <div class="model-policy-id">{{ a.domain }} → {{ a.target_slot_key||'qa' }} · {{ a.model_id }}</div>
               </div>
               <div class="model-policy-alias-val">{{ a.model_display_name||a.model_id }}</div>
-            </div>
-          </template>
-          <template v-if="boundFlowNodeSlots.length">
-            <div class="model-policy-group-label">节点覆盖</div>
-            <div v-for="n in boundFlowNodeSlots" :key="`${String(n.policy_key)}:${String(n.slot_key)}`" class="model-policy-item node-policy-item" :class="{selected:!!nodePolicySlot(String(n.policy_key), String(n.slot_key))}">
-              <div class="model-policy-check">{{ nodePolicySlot(String(n.policy_key), String(n.slot_key)) ? '✓' : '' }}</div>
-              <div>
-                <div class="model-policy-name">{{ n.display_name || n.node_id }}<span class="model-policy-kind">{{ n.kind || 'node' }}</span></div>
-                <div class="model-policy-id">{{ n.flow_key }}.{{ n.node_id }} · {{ n.class_name || '' }}</div>
-              </div>
-              <div class="model-policy-slot">{{ slotLabel(String(n.slot_key)) }}</div>
-              <select class="model-policy-select" :value="nodePolicySlot(String(n.policy_key), String(n.slot_key))" @click.stop @change="setNodePolicy(String(n.policy_key), String(n.slot_key), ($event.target as HTMLSelectElement).value)">
-                <option value="">跟随 {{ slotLabel(String(n.slot_key)) }} 默认</option>
-                <optgroup v-if="customSlotsFor(String(n.slot_key)).length" label="自定义插槽">
-                  <option v-for="a in customSlotsFor(String(n.slot_key))" :key="String(a.alias_name)" :value="a.alias_name">{{ a.alias_name }} · {{ a.model_id }}</option>
-                </optgroup>
-                <optgroup v-if="modelsForSlot(String(n.slot_key)).length" label="直接指定模型">
-                  <option v-for="m in modelsForSlot(String(n.slot_key))" :key="String(m.model_id)" :value="m.model_id">{{ modelOptionLabel(m) }}</option>
-                </optgroup>
-              </select>
-              <button v-if="nodePolicySlot(String(n.policy_key), String(n.slot_key))" class="btn btn-ghost btn-sm" @click.stop="clearNodePolicy(String(n.policy_key), String(n.slot_key))">清除</button>
             </div>
           </template>
         </div>

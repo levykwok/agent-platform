@@ -279,7 +279,6 @@ async function readSkillScripts() {
 async function loadSkills() {
   try {
     const d = domain.value.trim()
-    if (d && !activeSource.value) activeSource.value = d
     const qs = d ? `?domain=${encodeURIComponent(d)}` : ''
     const data = await readJson(await fetch(`/platform/frontend/skills${qs}`, { headers: headers(false) }))
     skills.value = asList(data)

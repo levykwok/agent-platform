@@ -22,7 +22,50 @@ public record WorkflowAsset(
         List<WorkflowEdge> edges,
         String createdAt,
         String updatedAt,
-        String publishedAt) {
+        String publishedAt,
+        String ownerType,
+        String ownerId,
+        String orgId,
+        String createdBy,
+        String visibility) {
+
+    /** Backward-compatible constructor for existing system/public workflows. */
+    public WorkflowAsset(
+            String workflowId,
+            int version,
+            String name,
+            String description,
+            String domain,
+            String triggerType,
+            String status,
+            Map<String, Object> inputSchema,
+            Map<String, Object> outputSchema,
+            List<WorkflowNode> nodes,
+            List<WorkflowEdge> edges,
+            String createdAt,
+            String updatedAt,
+            String publishedAt) {
+        this(
+                workflowId,
+                version,
+                name,
+                description,
+                domain,
+                triggerType,
+                status,
+                inputSchema,
+                outputSchema,
+                nodes,
+                edges,
+                createdAt,
+                updatedAt,
+                publishedAt,
+                "SYSTEM",
+                "platform",
+                "platform",
+                "platform_admin",
+                "PUBLIC");
+    }
 
     public WorkflowAsset {
         version = version <= 0 ? 1 : version;
@@ -38,25 +81,11 @@ public record WorkflowAsset(
         createdAt = createdAt == null ? "" : createdAt;
         updatedAt = updatedAt == null ? "" : updatedAt;
         publishedAt = publishedAt == null ? "" : publishedAt;
-    }
-
-    /** Backward-compatible constructor for workflows saved before typed edges existed. */
-    public WorkflowAsset(
-            String workflowId,
-            int version,
-            String name,
-            String description,
-            String domain,
-            String triggerType,
-            String status,
-            Map<String, Object> inputSchema,
-            Map<String, Object> outputSchema,
-            List<WorkflowNode> nodes,
-            String createdAt,
-            String updatedAt,
-            String publishedAt) {
-        this(workflowId, version, name, description, domain, triggerType, status, inputSchema,
-                outputSchema, nodes, List.of(), createdAt, updatedAt, publishedAt);
+        ownerType = ownerType == null || ownerType.isBlank() ? "SYSTEM" : ownerType.toUpperCase();
+        ownerId = ownerId == null || ownerId.isBlank() ? "platform" : ownerId;
+        orgId = orgId == null || orgId.isBlank() ? "platform" : orgId;
+        createdBy = createdBy == null || createdBy.isBlank() ? "platform_admin" : createdBy;
+        visibility = visibility == null || visibility.isBlank() ? "PUBLIC" : visibility.toUpperCase();
     }
 
     public Map<String, Object> metadata() {
@@ -71,6 +100,11 @@ public record WorkflowAsset(
         metadata.put("created_at", createdAt);
         metadata.put("updated_at", updatedAt);
         metadata.put("published_at", publishedAt);
+        metadata.put("owner_type", ownerType);
+        metadata.put("owner_id", ownerId);
+        metadata.put("org_id", orgId);
+        metadata.put("created_by", createdBy);
+        metadata.put("visibility", visibility);
         return metadata;
     }
 }

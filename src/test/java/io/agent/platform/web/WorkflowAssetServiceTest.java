@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 import io.agent.platform.control.AgentDefinition;
 import io.agent.platform.control.AgentDefinitionRegistry;
 import io.agent.platform.control.PlatformStorageLayer;
+import io.agent.platform.control.WorkflowNode;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.List;
@@ -48,15 +49,36 @@ class WorkflowAssetServiceTest {
                                 "Order review",
                                 "nodes",
                                 List.of(
+                                        Map.of("nodeId", "workflow_input", "type", "workflow.input"),
                                         Map.of(
                                                 "nodeId",
                                                 "research",
                                                 "type",
                                                 "agent.invoke",
                                                 "refId",
-                                                "researcher"))));
+                                                "researcher",
+                                                "position",
+                                                Map.of("x", 70, "y", 60)),
+                                        Map.of("nodeId", "workflow_output", "type", "workflow.output")),
+                                "edges",
+                                List.of(
+                                        Map.of(
+                                                "edgeId", "input-research",
+                                                "from", Map.of("nodeId", "workflow_input", "portId", "value"),
+                                                "to", Map.of("nodeId", "research", "portId", "value"),
+                                                "kind", "data"),
+                                        Map.of(
+                                                "edgeId", "research-output",
+                                                "from", Map.of("nodeId", "research", "portId", "value"),
+                                                "to", Map.of("nodeId", "workflow_output", "portId", "value"),
+                                                "kind", "data"))));
 
         assertEquals("DRAFT", created.get("status"));
+        WorkflowNode createdNode =
+                (WorkflowNode) ((List<?>) created.get("nodes")).get(1);
+        assertEquals(
+                Map.of("x", 70, "y", 60),
+                createdNode.config().get("canvas_position"));
         assertEquals(1, service.list(null, null).size());
         assertEquals("PUBLISHED", service.publish("order_review").get("status"));
 
@@ -100,6 +122,41 @@ class WorkflowAssetServiceTest {
                                         "missing"))));
         assertThrows(
                 IllegalArgumentException.class, () -> service.publish("missing_agent_flow"));
+    }
+
+    @Test
+    void privateWorkflowIsOnlyReadableAndWritableByItsOwner() throws Exception {
+        AgentDefinitionRegistry registry = mock(AgentDefinitionRegistry.class);
+        PlatformStorageLayer storage =
+                new PlatformStorageLayer(
+                        tempDir.toString(),
+                        "file",
+                        "",
+                        "platform_config",
+                        "platform_",
+                        "");
+        WorkflowAssetService service = new WorkflowAssetService(storage, registry);
+        invokeLoad(service);
+        PlatformAuthService.Principal owner =
+                new PlatformAuthService.Principal("user_a", "a@example.com", "A", "org_a", "BUILDER");
+        PlatformAuthService.Principal other =
+                new PlatformAuthService.Principal("user_b", "b@example.com", "B", "org_b", "BUILDER");
+        PlatformAuthService.Principal admin =
+                new PlatformAuthService.Principal(
+                        "admin", "admin@example.com", "Admin", "platform", "PLATFORM_ADMIN");
+
+        Map<String, Object> created =
+                service.create(Map.of("workflow_id", "private_flow", "name", "Private"), owner);
+        assertEquals("PRIVATE", created.get("visibility"));
+        assertEquals("user_a", created.get("owner_id"));
+        assertThrows(
+                PlatformAuthService.AuthException.class,
+                () -> service.get("private_flow", other));
+        assertThrows(
+                PlatformAuthService.AuthException.class,
+                () -> service.save("private_flow", Map.of("name", "Hijack"), other));
+        assertEquals("Private", service.get("private_flow", owner).get("name"));
+        assertEquals("Private", service.get("private_flow", admin).get("name"));
     }
 
     private static void invokeLoad(WorkflowAssetService service) throws Exception {

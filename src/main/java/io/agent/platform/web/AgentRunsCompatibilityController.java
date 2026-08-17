@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -29,28 +30,42 @@ public class AgentRunsCompatibilityController {
     private final PlatformCompatibilityState state;
     private final AgentRuntime runtime;
     private final DocumentKnowledgeService documentKnowledgeService;
+    private final PlatformAuthService auth;
+    private final AgentAssetService agentAssetService;
 
     public AgentRunsCompatibilityController(
             PlatformCompatibilityState state,
             AgentRuntime runtime,
-            DocumentKnowledgeService documentKnowledgeService) {
+            DocumentKnowledgeService documentKnowledgeService,
+            PlatformAuthService auth,
+            AgentAssetService agentAssetService) {
         this.state = state;
         this.runtime = runtime;
         this.documentKnowledgeService = documentKnowledgeService;
+        this.auth = auth;
+        this.agentAssetService = agentAssetService;
     }
 
     @PostMapping(value = "/run/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<Map<String, Object>>> streamRun(
             @RequestBody Map<String, Object> payload,
-            @RequestHeader(value = "x-user-id", defaultValue = "platform_admin") String userId,
-            @RequestHeader(value = "x-org-id", defaultValue = "platform") String orgId) {
+            ServerHttpRequest request) {
+        var cookie = request.getCookies().getFirst("platform_session");
+        var principal = auth.current(cookie == null ? "" : cookie.getValue());
+        if (principal == null) throw new PlatformAuthService.AuthException(401, "请先登录");
         String agentId = string(payload.get("agent_id"), "platform_knowledge_agent");
+        agentAssetService.requireReadable(agentId, principal);
+        String userId = principal.userId();
+        String orgId = principal.orgId();
         Map<String, Object> body =
                 payload.get("payload") instanceof Map<?, ?> nested ? copy(nested) : Map.of();
         String query = string(body.get("query"), string(payload.get("query"), ""));
         List<ChatImage> images = chatImages(body.get("images"));
+        Map<String, Object> retrievalPayload = new LinkedHashMap<>(payload);
+        retrievalPayload.putAll(body);
         DocumentKnowledgeService.Retrieval retrieval =
-                documentKnowledgeService.retrieve(query, documentIds(body), 4);
+                documentKnowledgeService.retrieveScoped(
+                        query, documentScope(retrievalPayload), 4, principal);
         String runtimeQuery = DocumentKnowledgeService.withContext(query, retrieval);
         String sessionId = string(payload.get("session_id"), "default");
         Map<String, Object> run = state.createRun(agentId, query, userId);
@@ -387,25 +402,49 @@ public class AgentRunsCompatibilityController {
         return List.copyOf(images);
     }
 
-    private static List<String> documentIds(Map<String, Object> body) {
-        List<String> ids = new ArrayList<>();
+    private static List<DocumentKnowledgeService.RequestedDocument> documentScope(
+            Map<String, Object> body) {
+        List<DocumentKnowledgeService.RequestedDocument> documents = new ArrayList<>();
+        addRequestedDocument(
+                documents, body.get("doc_id"), body.get("version_id"));
+        addRequestedDocument(
+                documents, body.get("document_id"), body.get("version_id"));
         Object values = body.get("document_ids");
         if (values instanceof List<?> rows) {
             for (Object value : rows) {
-                String id = string(value, "");
-                if (!id.isBlank()) ids.add(id);
+                if (value instanceof Map<?, ?> row) {
+                    addRequestedDocument(
+                            documents, row.get("doc_id"), row.get("version_id"));
+                } else {
+                    addRequestedDocument(documents, value, "");
+                }
             }
         }
         Object attachments = body.get("attachments");
         if (attachments instanceof List<?> rows) {
             for (Object value : rows) {
                 if (value instanceof Map<?, ?> row) {
-                    String id = string(row.get("doc_id"), "");
-                    if (!id.isBlank()) ids.add(id);
+                    addRequestedDocument(
+                            documents, row.get("doc_id"), row.get("version_id"));
                 }
             }
         }
-        return ids.stream().distinct().toList();
+        return documents.stream()
+                .filter(document -> document.docId() != null && !document.docId().isBlank())
+                .distinct()
+                .toList();
+    }
+
+    private static void addRequestedDocument(
+            List<DocumentKnowledgeService.RequestedDocument> documents,
+            Object docId,
+            Object versionId) {
+        String id = string(docId, "");
+        if (!id.isBlank()) {
+            documents.add(
+                    new DocumentKnowledgeService.RequestedDocument(
+                            id, string(versionId, "")));
+        }
     }
 
     private static String string(Object value, String fallback) {

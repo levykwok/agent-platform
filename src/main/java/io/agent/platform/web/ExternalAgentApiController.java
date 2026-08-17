@@ -55,7 +55,7 @@ public class ExternalAgentApiController {
     }
 
     @GetMapping("/agents/{agentId}")
-    public PublicAgent agent(@PathVariable String agentId) {
+    public PublicAgent agent(@PathVariable("agentId") String agentId) {
         return registry
                 .findPublished(agentId)
                 .filter(AgentDefinition::enabled)
@@ -68,7 +68,7 @@ public class ExternalAgentApiController {
 
     @PostMapping("/agents/{agentId}/chat")
     public Mono<ResponseEntity<Object>> chat(
-            @PathVariable String agentId, @RequestBody Map<String, Object> payload) {
+            @PathVariable("agentId") String agentId, @RequestBody Map<String, Object> payload) {
         ExternalChatRequest request = ExternalChatRequest.from(payload);
         ensureAgent(agentId);
         ensureMessage(request);
@@ -87,7 +87,7 @@ public class ExternalAgentApiController {
 
     @PostMapping(value = "/agents/{agentId}/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<AgentEventEnvelope>> stream(
-            @PathVariable String agentId, @RequestBody Map<String, Object> payload) {
+            @PathVariable("agentId") String agentId, @RequestBody Map<String, Object> payload) {
         ExternalChatRequest request = ExternalChatRequest.from(payload);
         ensureAgent(agentId);
         ensureMessage(request);

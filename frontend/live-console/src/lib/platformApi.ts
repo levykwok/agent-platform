@@ -9,6 +9,12 @@ export function localValue(name: string, fallback = ''): string {
 }
 
 export function currentUser(): string {
+  try {
+    const authenticated = localStorage.getItem('platform_auth_user_id')
+    if (authenticated) return authenticated
+  } catch {
+    // fall through to legacy context
+  }
   return localValue('platform_live_user_id', localValue('user_id', 'platform_admin'))
 }
 
@@ -27,6 +33,12 @@ export function currentDomain(fallback = 'platform'): string {
 
 export function currentOrgId(fallback = 'platform'): string {
   try {
+    const authenticated = localStorage.getItem('platform_auth_org_id')
+    if (authenticated) return authenticated
+  } catch {
+    // fall through to URL/legacy context
+  }
+  try {
     const params = new URLSearchParams(location.search)
     const fromQuery = params.get('org_id') || params.get('org')
     if (fromQuery) {
@@ -36,7 +48,27 @@ export function currentOrgId(fallback = 'platform'): string {
   } catch {
     // ignore
   }
-  return localValue('platform_live_org_id', fallback)
+  return localValue('platform_auth_org_id', localValue('platform_live_org_id', fallback))
+}
+
+export function setAuthContext(userId: string, orgId: string): void {
+  try {
+    localStorage.setItem('platform_auth_user_id', userId)
+    localStorage.setItem('platform_auth_org_id', orgId || 'platform')
+    localStorage.setItem('platform_live_user_id', userId)
+    localStorage.setItem('platform_live_org_id', orgId || 'platform')
+  } catch {
+    // The session cookie remains authoritative when storage is unavailable.
+  }
+}
+
+export function clearAuthContext(): void {
+  try {
+    localStorage.removeItem('platform_auth_user_id')
+    localStorage.removeItem('platform_auth_org_id')
+  } catch {
+    // ignore storage failures
+  }
 }
 
 export function makeHeaders(json = false, org = 'platform'): Record<string, string> {

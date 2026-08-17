@@ -5,6 +5,7 @@ package io.agent.platform.web;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -43,6 +44,51 @@ class PlatformRunPersistenceTest {
         assertEquals(4, reloaded.runEvents(runId).size());
         assertEquals("resumed", reloaded.waiting(runId).get("status"));
         assertEquals("yes", reloaded.waiting(runId).get("answer"));
+    }
+
+    @Test
+    void sessionAttachmentsSurviveStateReload() throws Exception {
+        PlatformStorageLayer storage = storage(tempDir);
+        PlatformCompatibilityState first = newState(storage);
+
+        var attachment =
+                first.attachDocument(
+                        "session-1",
+                        java.util.Map.of(
+                                "doc_id", "doc-1",
+                                "version_id", "v1",
+                                "filename", "notes.md",
+                                "parse_status", "parsed"),
+                        "org-1",
+                        "user-1");
+
+        PlatformCompatibilityState reloaded = newState(storage);
+
+        assertEquals(1, reloaded.attachments("session-1", "user-1", "org-1").size());
+        assertEquals(
+                        attachment.get("attachment_id"),
+                reloaded
+                        .attachments("session-1", "user-1", "org-1")
+                        .get(0)
+                        .get("attachment_id"));
+    }
+
+    @Test
+    void sessionOwnershipIsCheckedAcrossUsersAndOrganizations() {
+        PlatformStorageLayer storage = storage(tempDir);
+        PlatformWorkspaceSessionStore sessions = new PlatformWorkspaceSessionStore(storage);
+        sessions.create(
+                java.util.Map.of(
+                        "agent_id", "agent-a",
+                        "session_id", "session-owned",
+                        "title", "owned"),
+                "org-a",
+                "user-a");
+
+        assertTrue(sessions.ownedBy("session-owned", "org-a", "user-a"));
+        assertFalse(sessions.ownedBy("session-owned", "org-a", "user-b"));
+        assertFalse(sessions.ownedBy("session-owned", "org-b", "user-a"));
+        assertFalse(sessions.ownedBy("missing", "org-a", "user-a"));
     }
 
     private static PlatformStorageLayer storage(Path workspace) {

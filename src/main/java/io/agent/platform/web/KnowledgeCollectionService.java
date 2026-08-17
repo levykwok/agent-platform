@@ -36,12 +36,21 @@ public class KnowledgeCollectionService {
     }
 
     public synchronized List<Map<String, Object>> list(String domain) {
+        return list(domain, null);
+    }
+
+    public synchronized List<Map<String, Object>> list(String domain, String orgId) {
         return collections.values().stream()
                 .filter(
                         collection ->
                                 domain == null
                                         || domain.isBlank()
                                         || domain.equals(collection.get("domain")))
+                .filter(
+                        collection ->
+                                orgId == null
+                                        || orgId.isBlank()
+                                        || orgId.equals(String.valueOf(collection.get("org_id"))))
                 .sorted(
                         Comparator.comparing(
                                         (Map<String, Object> collection) ->

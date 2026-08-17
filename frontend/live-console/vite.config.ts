@@ -55,6 +55,8 @@ export default defineConfig({
     proxy: {
       '/api': apiProxy,
       '/platform/frontend': apiProxy,
+      '/platform/auth': apiProxy,
+      '/platform/admin': apiProxy,
       '/platform/session': apiProxy,
       '/platform/media': apiProxy,
       '/platform/chat': apiProxy,

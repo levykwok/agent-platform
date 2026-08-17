@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { currentDomain, currentOrgId, makeHeaders, readJson, type JsonMap } from '../lib/platformApi'
+import { currentDomain, currentOrgId, currentUser, makeHeaders, readJson, type JsonMap } from '../lib/platformApi'
 import { notifyError, notifySuccess } from '../stores/notify'
 
 const tools = ref<JsonMap[]>([])
@@ -12,7 +12,7 @@ const activeCategory = ref('')
 const activeToolTab = ref('all')
 const output = ref<JsonMap | null>(null)
 const error = ref('')
-const createKind = ref<'http' | 'db-query' | 'python'>('python')
+const createKind = ref<'http' | 'db-query' | 'python'>('http')
 const createOpen = ref(false)
 const editingToolId = ref('')
 function resetForm() {
@@ -34,7 +34,7 @@ function resetForm() {
 }
 function openCreate() {
   editingToolId.value = ''
-  createKind.value = 'python'
+  createKind.value = 'http'
   resetForm()
   createOpen.value = true
 }
@@ -171,6 +171,11 @@ function toolVisibleLabel(t: JsonMap): string {
 }
 function toolEnabledLabel(t: JsonMap): string {
   return String(t.binding_status || 'enabled') === 'disabled' ? '已停用' : '已启用'
+}
+function isPersonalTool(t: JsonMap): boolean {
+  return String(t.source_type || '').toLowerCase() === 'http'
+    && String(t.owner_id || '') === currentUser()
+    && String(t.visibility || 'PRIVATE').toUpperCase() === 'PRIVATE'
 }
 function parameterCount(t: JsonMap): number {
   if (Array.isArray(t.parameter_names)) return (t.parameter_names as unknown[]).length
@@ -551,11 +556,11 @@ onMounted(async () => {
                 <div class="kv"><span>可见</span><b>{{ toolVisibleLabel(t) }}</b></div>
               </div>
               <div class="tool-actions">
-                <label class="toggle" :title="t.binding_status === 'disabled' ? '点击启用' : '点击停用'">
+                <label v-if="!isPersonalTool(t)" class="toggle" :title="t.binding_status === 'disabled' ? '点击启用' : '点击停用'">
                   <input type="checkbox" :checked="t.binding_status !== 'disabled'" @change="setBinding(t, t.binding_status === 'disabled' ? 'enabled' : 'disabled')" />
                   <span class="toggle-slider"></span>
                 </label>
-                <select class="select-sm" :value="t.binding_visibility || 'discoverable'" @change="setBinding(t, String(t.binding_status || 'enabled'), ($event.target as HTMLSelectElement).value)">
+                <select v-if="!isPersonalTool(t)" class="select-sm" :value="t.binding_visibility || 'discoverable'" @change="setBinding(t, String(t.binding_status || 'enabled'), ($event.target as HTMLSelectElement).value)">
                   <option value="discoverable">可见</option>
                   <option value="hidden">隐藏</option>
                 </select>
@@ -586,14 +591,14 @@ onMounted(async () => {
         <div class="drawer-head">
           <div>
             <div class="drawer-title">{{ editingToolId ? '编辑工具' : '创建工具' }}</div>
-            <div class="drawer-sub">{{ editingToolId ? form.tool_name || '编辑中' : '创建 Python 脚本工具' }}</div>
+            <div class="drawer-sub">{{ editingToolId ? form.tool_name || '编辑中' : createKind === 'http' ? '创建个人 HTTP 工具' : createKind === 'python' ? '创建 Python 脚本工具' : '创建数据库查询工具' }}</div>
           </div>
           <div class="drawer-head-actions">
             <button class="btn btn-ghost btn-sm" @click="createOpen = false; editingToolId = ''">关闭</button>
           </div>
         </div>
         <div class="tool-drawer-body">
-          <div class="form-group"><label>类型</label><select v-model="createKind" disabled><option value="python">Python 脚本工具</option></select><div class="hint">HTTP / DB 工具后端暂未完整实现，先不开放创建入口。</div></div>
+          <div class="form-group"><label>类型</label><select v-model="createKind"><option value="http">HTTP 远程工具（个人）</option><option value="python">Python 脚本工具（管理员）</option><option value="db-query">数据库查询工具（管理员）</option></select><div class="hint">普通用户只能创建自己的 HTTP 远程工具；Python、数据库工具仍需管理员配置。</div></div>
         <div class="form-row">
           <div class="form-group"><label>工具 ID *</label><input v-model="form.tool_id" :disabled="!!editingToolId" placeholder="weather_lookup" /></div>
           <div class="form-group"><label>业务域</label><select v-model="domain" @change="loadTools"><option v-for="d in domainOptions" :key="String(d.domain)" :value="d.domain">{{ d.label || d.domain }}</option></select></div>

@@ -7,7 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Generic workflow node. Legacy agent steps are represented as agent.invoke nodes. */
+/** A node in an independent Workflow asset. */
 public record WorkflowNode(
         String nodeId,
         WorkflowNodeType type,
@@ -18,8 +18,7 @@ public record WorkflowNode(
         Map<String, Object> outputSchema,
         Long timeoutMs,
         Integer maxRetries,
-        WorkflowStep.FailurePolicy failurePolicy,
-        List<WorkflowTransition> transitions,
+        WorkflowFailurePolicy failurePolicy,
         List<WorkflowPort> inputPorts,
         List<WorkflowPort> outputPorts) {
 
@@ -29,29 +28,11 @@ public record WorkflowNode(
         inputMapping = inputMapping == null ? Map.of() : Map.copyOf(inputMapping);
         outputSchema = outputSchema == null ? Map.of() : Map.copyOf(outputSchema);
         maxRetries = maxRetries == null ? 0 : maxRetries;
-        failurePolicy = failurePolicy == null ? WorkflowStep.FailurePolicy.FAIL_FAST : failurePolicy;
-        transitions = transitions == null ? List.of() : List.copyOf(transitions);
+        failurePolicy = failurePolicy == null ? WorkflowFailurePolicy.FAIL_FAST : failurePolicy;
         inputPorts = normalizePorts(inputPorts, type, true, config);
         outputPorts = normalizePorts(outputPorts, type, false, config);
     }
 
-    /** Backward-compatible constructor for the pre-contract node shape. */
-    public WorkflowNode(
-            String nodeId,
-            WorkflowNodeType type,
-            String refId,
-            String instruction,
-            Map<String, Object> config,
-            Map<String, Object> inputMapping,
-            Map<String, Object> outputSchema,
-            Long timeoutMs,
-            Integer maxRetries,
-            WorkflowStep.FailurePolicy failurePolicy,
-            List<WorkflowTransition> transitions) {
-        this(nodeId, type, refId, instruction, config, inputMapping, outputSchema, timeoutMs,
-                maxRetries, failurePolicy, transitions, List.of(), List.of());
-    }
-
     public WorkflowNode(
             String nodeId,
             WorkflowNodeType type,
@@ -59,25 +40,11 @@ public record WorkflowNode(
             String instruction,
             Long timeoutMs,
             Integer maxRetries,
-            WorkflowStep.FailurePolicy failurePolicy,
-            List<WorkflowTransition> transitions) {
+            WorkflowFailurePolicy failurePolicy,
+            List<WorkflowPort> inputPorts,
+            List<WorkflowPort> outputPorts) {
         this(nodeId, type, refId, instruction, Map.of(), Map.of(), Map.of(), timeoutMs,
-                maxRetries, failurePolicy, transitions, List.of(), List.of());
-    }
-
-    public static WorkflowNode fromLegacy(WorkflowStep step) {
-        return new WorkflowNode(
-                step.stepId(), WorkflowNodeType.AGENT_INVOKE, step.agentId(), step.instruction(),
-                Map.of(), Map.of(), Map.of(), step.timeoutMs(), step.maxRetries(),
-                step.failurePolicy(), step.transitions(), List.of(), List.of());
-    }
-
-    public WorkflowStep asAgentStep() {
-        if (type != WorkflowNodeType.AGENT_INVOKE) {
-            throw new IllegalStateException(
-                    "Workflow node " + nodeId + " is not an agent.invoke node: " + type.value());
-        }
-        return new WorkflowStep(nodeId, refId, instruction, timeoutMs, maxRetries, failurePolicy, transitions);
+                maxRetries, failurePolicy, inputPorts, outputPorts);
     }
 
     public Map<String, Object> effectiveConfig() {

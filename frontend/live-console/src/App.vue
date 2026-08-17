@@ -16,10 +16,11 @@ import QaWorkspace from './pages/QaWorkspace.vue'
 import MemoryManagement from './pages/MemoryManagement.vue'
 import InfraStatus from './pages/InfraStatus.vue'
 import Documentation from './pages/Documentation.vue'
+import AccountCenter from './pages/AccountCenter.vue'
 import Icon from './components/Icon.vue'
 import ToastHost from './components/ToastHost.vue'
 import DialogHost from './components/DialogHost.vue'
-import { contextHref, currentDomain, currentOrgId, currentUser, makeHeaders, readJson } from './lib/platformApi'
+import { clearAuthContext, contextHref, currentDomain, currentOrgId, currentUser, makeHeaders, readJson, setAuthContext } from './lib/platformApi'
 
 type PageKey = 'home' | 'knowledge' | 'qa' | 'kg' | 'skills' | 'tools' | 'mcp' | 'models' | 'agents' | 'orchestration' | 'workbench' | 'external-test' | 'memory' | 'runs' | 'infra' | 'docs'
 
@@ -47,6 +48,9 @@ function pageKeyFromPath(pathname: string): PageKey {
 
 const activePage = ref<PageKey>(pageKeyFromPath(location.pathname))
 const standaloneCanvasRoute = new URLSearchParams(location.search).get('view') === 'canvas'
+const accountRoute = location.pathname === '/platform/live/access'
+const authReady = ref(accountRoute)
+const authenticatedUser = ref<{ user_id?: string; org_id?: string; display_name?: string; role?: string } | null>(null)
 const title = computed(() => ({ home: '平台概览', knowledge: '知识库（Beta）', qa: '交互问答', kg: '知识图谱', skills: 'Skills 中心', tools: 'Tools 目录', mcp: 'MCP 服务器', models: '模型接入', agents: 'Agent 管理', orchestration: '编排中心', workbench: 'Agent 工作台', 'external-test': '外部接入测试', memory: '记忆管理', runs: '运行观测', infra: '平台状态', docs: '使用文档' }[activePage.value]))
 const coreItems = computed(() => navItems.filter((item) => item.section === '核心能力'))
 const opsItems = computed(() => navItems.filter((item) => item.section === '运维'))
@@ -70,6 +74,24 @@ const healthDotClass = computed(() => ({ checking: 'gray', ok: 'green', down: 'r
 const appDomain = ref('')
 let healthTimer: number | undefined
 
+async function loadAuthContext() {
+  if (accountRoute) return
+  try {
+    const response = await fetch('/platform/auth/me', { cache: 'no-store' })
+    if (response.ok) {
+      const data = await readJson<{ user_id?: string; org_id?: string; display_name?: string; role?: string }>(response)
+      authenticatedUser.value = data
+      if (data.user_id) setAuthContext(String(data.user_id), String(data.org_id || 'platform'))
+    } else {
+      clearAuthContext()
+    }
+  } catch {
+    clearAuthContext()
+  } finally {
+    authReady.value = true
+  }
+}
+
 async function loadHealth() {
   try {
     const data = await readJson(await fetch('/platform/frontend/infra/health', { cache: 'no-store' }))
@@ -89,7 +111,8 @@ async function loadDomainBadge() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
+  await loadAuthContext()
   loadHealth()
   healthTimer = window.setInterval(loadHealth, 10000)
   loadDomainBadge()
@@ -103,11 +126,13 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <template v-if="standaloneCanvasRoute">
+  <AccountCenter v-if="accountRoute" />
+  <template v-else-if="standaloneCanvasRoute">
     <OrchestrationWorkbench />
     <ToastHost />
     <DialogHost />
   </template>
+  <div v-else-if="!authReady" class="auth-loading">正在同步账号权限…</div>
   <div v-else class="pl-shell">
     <aside class="sidebar">
       <div class="logo"><div class="logo-icon">AI</div><div class="logo-text">AI Agent Platform<span class="logo-sub">私有化智能体平台</span></div></div>
@@ -123,7 +148,7 @@ onUnmounted(() => {
           <button v-for="item in helpItems" :key="item.key" class="nav-item" :class="{active: activePage === item.key}" @click="navigate(item.key, item.href, Boolean(item.native))"><Icon :name="item.icon" />{{ item.label }}</button>
         </template>
       </nav>
-      <div class="sidebar-footer"><div class="user-row"><div class="avatar">PA</div><div><div class="user-name">Platform Admin</div><div class="user-role">{{ currentUser() }}</div></div><a class="logout-link" href="/platform/live/logout">⎋</a></div></div>
+      <div class="sidebar-footer"><div class="user-row"><div class="avatar">{{ (authenticatedUser?.display_name || 'U').slice(0, 2).toUpperCase() }}</div><div><div class="user-name">{{ authenticatedUser?.display_name || '未登录用户' }}</div><div class="user-role">{{ authenticatedUser?.role || currentUser() }}</div></div><a class="logout-link" href="/platform/live/access">账号</a></div></div>
     </aside>
     <main class="main">
       <div class="topbar"><div class="topbar-title">{{ title }}</div><span class="status-dot" :class="healthDotClass"></span><span class="status-label">{{ healthLabel }}</span><span v-if="appDomain" class="domain-badge">当前域: {{ appDomain }}</span></div>

@@ -12,8 +12,12 @@ import io.agent.platform.control.SkillSpec;
 import io.agent.platform.control.ToolRegistry;
 import io.agent.platform.control.ToolSpec;
 import io.agent.platform.runtime.AgentRuntime;
+import io.agent.platform.tool.PlatformHttpTool;
 import io.agent.platform.tool.WorkflowTool;
+import io.agent.platform.web.PlatformAuthService;
+import io.agent.platform.web.PlatformUserCapabilityService;
 import io.agent.platform.web.WorkflowAssetService;
+import io.agent.platform.web.WorkflowToolRegistry;
 import io.agent.platform.tool.PythonScriptTool;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.ClasspathSkillRepository;
@@ -48,7 +52,9 @@ public class AgentCapabilityAssembler {
     private final Environment environment;
     private final PlatformStorageLayer storage;
     private final WorkflowAssetService workflowAssetService;
+    private final WorkflowToolRegistry workflowToolRegistry;
     private final ObjectProvider<AgentRuntime> runtimeProvider;
+    private final PlatformUserCapabilityService userCapabilities;
 
     public AgentCapabilityAssembler(
             ToolRegistry toolRegistry,
@@ -57,52 +63,76 @@ public class AgentCapabilityAssembler {
             Environment environment,
             PlatformStorageLayer storage,
             WorkflowAssetService workflowAssetService,
-            ObjectProvider<AgentRuntime> runtimeProvider) {
+            WorkflowToolRegistry workflowToolRegistry,
+            ObjectProvider<AgentRuntime> runtimeProvider,
+            PlatformUserCapabilityService userCapabilities) {
         this.toolRegistry = toolRegistry;
         this.mcpRegistry = mcpRegistry;
         this.skillRegistry = skillRegistry;
         this.environment = environment;
         this.storage = storage;
         this.workflowAssetService = workflowAssetService;
+        this.workflowToolRegistry = workflowToolRegistry;
         this.runtimeProvider = runtimeProvider;
+        this.userCapabilities = userCapabilities;
     }
 
     public void applyToolsAndMcps(Toolkit toolkit, AgentDefinition definition) {
-        List<String> toolRefs = safeRefs(definition.toolRefs());
-        applyWorkflowTools(toolkit, workflowToolRefs(toolRefs));
-        applyTools(toolkit, javaToolRefs(toolRefs));
-        applyMcps(toolkit, definition.mcpRefs(), toolRefs);
+        applyToolsAndMcps(toolkit, definition, "", "");
     }
 
-    private void applyWorkflowTools(Toolkit toolkit, List<String> workflowRefs) {
+    public void applyToolsAndMcps(
+            Toolkit toolkit, AgentDefinition definition, String tenantId, String userId) {
+        PlatformAuthService.Principal principal = principal(tenantId, userId);
+        List<String> toolRefs = safeRefs(definition.toolRefs());
+        applyWorkflowTools(toolkit, definition, workflowToolRefs(toolRefs));
+        applyTools(toolkit, javaToolRefs(toolRefs), principal);
+        applyMcps(toolkit, definition.mcpRefs(), toolRefs, principal);
+    }
+
+    private void applyWorkflowTools(Toolkit toolkit, AgentDefinition definition, List<String> workflowRefs) {
         if (workflowRefs.isEmpty()) {
             return;
         }
         AgentRuntime runtime = runtimeProvider.getObject();
         for (String ref : workflowRefs) {
-            String workflowId = ref.substring("workflow:".length()).trim();
-            if (workflowId.isBlank()) {
-                throw new IllegalStateException("Invalid workflow tool ref: " + ref);
-            }
+            String toolId = ref.trim();
+            var registration = workflowToolRegistry.requireForAgent(toolId, definition.agentId());
+            var workflow = workflowAssetService.requirePublished(registration.workflowId());
             toolkit.registration()
-                    .agentTool(new WorkflowTool(workflowAssetService.requirePublished(workflowId), runtime))
+                    .agentTool(new WorkflowTool(workflow, registration, runtime))
                     .apply();
         }
     }
 
     public List<AgentSkillRepository> buildSkillRepositories(AgentDefinition definition) {
+        return buildSkillRepositories(definition, "", "");
+    }
+
+    public List<AgentSkillRepository> buildSkillRepositories(
+            AgentDefinition definition, String tenantId, String userId) {
+        PlatformAuthService.Principal principal = principal(tenantId, userId);
         List<AgentSkillRepository> repos = new ArrayList<>();
         for (String skillRef : definition.skillRefs()) {
             SkillSpec spec =
-                    skillRegistry
-                            .find(skillRef)
-                            .orElseThrow(
-                                    () ->
-                                            new IllegalStateException(
-                                                    "Unknown skill ref "
-                                                            + skillRef
-                                                            + " in agent "
-                                                            + definition.agentId()));
+                    principal == null
+                            ? null
+                            : userCapabilities
+                                    .findSkill(skillRef, principal)
+                                    .map(PlatformUserCapabilityService.PersonalSkill::spec)
+                                    .orElse(null);
+            if (spec == null) {
+                spec =
+                        skillRegistry
+                                .find(skillRef)
+                                .orElseThrow(
+                                        () ->
+                                                new IllegalStateException(
+                                                        "Unknown skill ref "
+                                                                + skillRef
+                                                                + " in agent "
+                                                                + definition.agentId()));
+            }
             if (!spec.enabled()) {
                 continue;
             }
@@ -111,9 +141,28 @@ public class AgentCapabilityAssembler {
         return repos;
     }
 
-    private void applyTools(Toolkit toolkit, List<String> toolRefs) {
+    private void applyTools(
+            Toolkit toolkit, List<String> toolRefs, PlatformAuthService.Principal principal) {
         Set<String> seen = new HashSet<>();
         for (String toolRef : safeRefs(toolRefs)) {
+            if (principal != null) {
+                var personal = userCapabilities.findTool(toolRef, principal);
+                if (personal.isPresent()) {
+                    var tool = personal.get();
+                    toolkit.registration()
+                            .agentTool(
+                                    new PlatformHttpTool(
+                                            tool.toolId(),
+                                            tool.description(),
+                                            tool.parameterSchema(),
+                                            tool.endpoint(),
+                                            tool.method(),
+                                            tool.headers(),
+                                            Duration.ofMillis(tool.timeoutMs())))
+                            .apply();
+                    continue;
+                }
+            }
             ToolSpec spec =
                     toolRegistry
                             .find(toolRef)
@@ -172,19 +221,29 @@ public class AgentCapabilityAssembler {
         log.info("Registered Python script tool {} from {}", spec.toolId(), scriptPath);
     }
 
-    private void applyMcps(Toolkit toolkit, List<String> mcpRefs, List<String> toolRefs) {
+    private void applyMcps(
+            Toolkit toolkit,
+            List<String> mcpRefs,
+            List<String> toolRefs,
+            PlatformAuthService.Principal principal) {
         Map<String, McpServerConfig> configs = new LinkedHashMap<>();
         Map<String, List<String>> agentToolFilters = mcpToolRefs(toolRefs);
         for (String mcpRef : safeRefs(mcpRefs)) {
             McpSpec spec =
-                    mcpRegistry
-                            .find(mcpRef)
-                            .orElseThrow(
-                                    () ->
-                                            new IllegalStateException(
-                                                    "Unknown mcp ref "
-                                                            + mcpRef
-                                                            + " in agent refs"));
+                    principal == null
+                            ? null
+                            : userCapabilities.findMcp(mcpRef, principal).orElse(null);
+            if (spec == null) {
+                spec =
+                        mcpRegistry
+                                .find(mcpRef)
+                                .orElseThrow(
+                                        () ->
+                                                new IllegalStateException(
+                                                        "Unknown mcp ref "
+                                                                + mcpRef
+                                                                + " in agent refs"));
+            }
             if (!spec.enabled()) {
                 continue;
             }
@@ -216,12 +275,12 @@ public class AgentCapabilityAssembler {
     private List<String> javaToolRefs(List<String> toolRefs) {
         return safeRefs(toolRefs)
                 .stream()
-                .filter(ref -> !ref.startsWith("mcp:") && !ref.startsWith("workflow:"))
+                .filter(ref -> !ref.startsWith("mcp:") && workflowToolRegistry.find(ref).isEmpty())
                 .toList();
     }
 
     private List<String> workflowToolRefs(List<String> toolRefs) {
-        return safeRefs(toolRefs).stream().filter(ref -> ref.startsWith("workflow:")).toList();
+        return safeRefs(toolRefs).stream().filter(ref -> workflowToolRegistry.find(ref).isPresent()).toList();
     }
 
     private Map<String, List<String>> mcpToolRefs(List<String> toolRefs) {
@@ -349,5 +408,15 @@ public class AgentCapabilityAssembler {
         } catch (IllegalArgumentException e) {
             return value;
         }
+    }
+
+    private PlatformAuthService.Principal principal(String tenantId, String userId) {
+        if (userId == null || userId.isBlank()) return null;
+        return new PlatformAuthService.Principal(
+                userId,
+                "",
+                userId,
+                tenantId == null || tenantId.isBlank() ? "platform" : tenantId,
+                "BUILDER");
     }
 }

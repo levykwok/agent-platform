@@ -56,33 +56,47 @@ public class PlatformWorkspaceSessionStore {
     }
 
     public Map<String, Object> create(Map<String, Object> payload, String orgId) {
+        return create(payload, orgId, string(payload.get("user_id"), "platform_admin"));
+    }
+
+    public Map<String, Object> create(Map<String, Object> payload, String orgId, String userId) {
         String agentId = string(payload.get("agent_id"), DEFAULT_AGENT_ID);
         String sessionId =
                 string(
                         payload.get("session_id"),
                         "sess_" + UUID.randomUUID().toString().replace("-", ""));
         String title = string(payload.get("title"), "新对话");
-        String userId = string(payload.get("user_id"), "platform_admin");
+        String resolvedUserId = string(userId, "platform_admin");
         if (!storage.isSqliteEnabled()) {
             workspaceManager.updateSessionIndex(
-                    runtimeContext(sessionId, userId), agentId, sessionId, title);
+                    runtimeContext(sessionId, resolvedUserId), agentId, sessionId, title);
         } else {
             ensureSqliteReady();
-            upsertSession(agentId, sessionId, title, userId, orgId);
+            upsertSession(agentId, sessionId, title, resolvedUserId, orgId);
         }
-        return sessionRow(agentId, sessionId, title, Instant.now().toString(), orgId);
+        return sessionRow(
+                agentId, sessionId, title, Instant.now().toString(), orgId, resolvedUserId);
     }
 
     public List<Map<String, Object>> list(String agentId, String orgId) {
+        return list(agentId, orgId, null);
+    }
+
+    public List<Map<String, Object>> list(String agentId, String orgId, String userId) {
         String resolvedAgentId = string(agentId, DEFAULT_AGENT_ID);
         if (!storage.isSqliteEnabled()) {
             return listFromFiles(resolvedAgentId, orgId);
         }
         ensureSqliteReady();
-        return listFromSqlite(resolvedAgentId, orgId);
+        return listFromSqlite(resolvedAgentId, orgId, userId);
     }
 
     public Map<String, Object> get(String agentId, String sessionId, String orgId) {
+        return get(agentId, sessionId, orgId, null);
+    }
+
+    public Map<String, Object> get(
+            String agentId, String sessionId, String orgId, String userId) {
         String resolvedAgentId = string(agentId, DEFAULT_AGENT_ID);
         if (!storage.isSqliteEnabled()) {
             Map<String, Object> session = findFileSession(resolvedAgentId, sessionId, orgId);
@@ -121,7 +135,7 @@ public class PlatformWorkspaceSessionStore {
                             WorkspaceConstants.MEMORY_MD));
         }
         ensureSqliteReady();
-        Map<String, Object> session = findSession(resolvedAgentId, sessionId, orgId);
+        Map<String, Object> session = findSession(resolvedAgentId, sessionId, orgId, userId);
         String contextRaw = readContextFromSqlite(resolvedAgentId, sessionId);
         String tasksRaw = readTasksFromSqlite(resolvedAgentId, sessionId);
         String memoryRaw = readMemoryFromWorkspace();
@@ -157,6 +171,35 @@ public class PlatformWorkspaceSessionStore {
                         WorkspaceConstants.MEMORY_MD));
     }
 
+    /** Check session ownership without exposing the session contents. */
+    public boolean ownedBy(String sessionId, String orgId, String userId) {
+        if (sessionId == null
+                || sessionId.isBlank()
+                || orgId == null
+                || orgId.isBlank()
+                || userId == null
+                || userId.isBlank()
+                || !storage.isSqliteEnabled()) {
+            return false;
+        }
+        ensureSqliteReady();
+        String query =
+                "SELECT 1 FROM "
+                        + sessionsTable
+                        + " WHERE session_id = ? AND user_id = ? AND org_id = ? LIMIT 1";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(query)) {
+            statement.setString(1, sessionId);
+            statement.setString(2, userId);
+            statement.setString(3, orgId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
+        } catch (SQLException error) {
+            return false;
+        }
+    }
+
     public void appendMessage(
             String agentId, String sessionId, String userId, String role, String content) {
         if (sessionId == null || sessionId.isBlank()) {
@@ -181,8 +224,17 @@ public class PlatformWorkspaceSessionStore {
         upsertMessage(resolvedAgentId, sessionId, role, text, resolvedUserId);
     }
 
-    public void delete(String agentId, String sessionId) {
+    public boolean delete(String agentId, String sessionId) {
+        return delete(agentId, sessionId, null, null);
+    }
+
+    public boolean delete(String agentId, String sessionId, String orgId, String userId) {
         String resolvedAgentId = string(agentId, DEFAULT_AGENT_ID);
+        if (userId != null && !userId.isBlank()) {
+            if (!storage.isSqliteEnabled() || !sessionOwnedBy(resolvedAgentId, sessionId, orgId, userId)) {
+                return false;
+            }
+        }
         if (!storage.isSqliteEnabled()) {
             String rel = sessionStorePath(resolvedAgentId);
             String json =
@@ -206,10 +258,30 @@ public class PlatformWorkspaceSessionStore {
                     runtimeContext(sessionId, "platform_admin"),
                     sessionLogPath(resolvedAgentId, sessionId),
                     "");
-            return;
+            return true;
         }
         ensureSqliteReady();
         deleteSessionFromSqlite(resolvedAgentId, sessionId);
+        return true;
+    }
+
+    private boolean sessionOwnedBy(String agentId, String sessionId, String orgId, String userId) {
+        String query =
+                "SELECT 1 FROM "
+                        + sessionsTable
+                        + " WHERE agent_id = ? AND session_id = ? AND user_id = ? AND org_id = ? LIMIT 1";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(query)) {
+            statement.setString(1, agentId);
+            statement.setString(2, sessionId);
+            statement.setString(3, userId);
+            statement.setString(4, orgId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
+        } catch (SQLException error) {
+            return false;
+        }
     }
 
     private List<Map<String, Object>> listFromFiles(String agentId, String orgId) {
@@ -242,15 +314,23 @@ public class PlatformWorkspaceSessionStore {
     }
 
     private List<Map<String, Object>> listFromSqlite(String agentId, String orgId) {
+        return listFromSqlite(agentId, orgId, null);
+    }
+
+    private List<Map<String, Object>> listFromSqlite(
+            String agentId, String orgId, String userId) {
         String query =
                 "SELECT session_id, title, created_at, updated_at, user_id, domain, org_id "
                         + "FROM "
                         + sessionsTable
-                        + " WHERE agent_id = ? ORDER BY updated_at DESC";
+                        + " WHERE agent_id = ?"
+                        + (userId == null || userId.isBlank() ? "" : " AND user_id = ?")
+                        + " ORDER BY updated_at DESC";
         List<Map<String, Object>> rows = new ArrayList<>();
         try (Connection connection = storage.connection();
                 PreparedStatement statement = connection.prepareStatement(query)) {
             statement.setString(1, agentId);
+            if (userId != null && !userId.isBlank()) statement.setString(2, userId);
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
                     rows.add(
@@ -259,7 +339,8 @@ public class PlatformWorkspaceSessionStore {
                                     rs.getString("session_id"),
                                     rs.getString("title"),
                                     rs.getString("updated_at"),
-                                    rs.getString("org_id")));
+                                    rs.getString("org_id"),
+                                    rs.getString("user_id")));
                 }
             }
             return rows;
@@ -269,15 +350,23 @@ public class PlatformWorkspaceSessionStore {
     }
 
     private Map<String, Object> findSession(String agentId, String sessionId, String orgId) {
+        return findSession(agentId, sessionId, orgId, null);
+    }
+
+    private Map<String, Object> findSession(
+            String agentId, String sessionId, String orgId, String userId) {
         String query =
                 "SELECT session_id, title, created_at, updated_at, user_id, domain, org_id "
                         + "FROM "
                         + sessionsTable
-                        + " WHERE agent_id = ? AND session_id = ? LIMIT 1";
+                        + " WHERE agent_id = ? AND session_id = ?"
+                        + (userId == null || userId.isBlank() ? "" : " AND user_id = ?")
+                        + " LIMIT 1";
         try (Connection connection = storage.connection();
                 PreparedStatement statement = connection.prepareStatement(query)) {
             statement.setString(1, agentId);
             statement.setString(2, sessionId);
+            if (userId != null && !userId.isBlank()) statement.setString(3, userId);
             try (ResultSet rs = statement.executeQuery()) {
                 if (rs.next()) {
                     return sessionRow(
@@ -285,31 +374,35 @@ public class PlatformWorkspaceSessionStore {
                             rs.getString("session_id"),
                             rs.getString("title"),
                             rs.getString("updated_at"),
-                            rs.getString("org_id"));
+                            rs.getString("org_id"),
+                            rs.getString("user_id"));
                 }
             }
         } catch (SQLException e) {
             if (isMissingTable(e)) {
                 initSqliteSchema();
-                return findSessionAfterSchemaRetry(agentId, sessionId, orgId);
+                return findSessionAfterSchemaRetry(agentId, sessionId, orgId, userId);
             }
             throw new IllegalStateException(
                     "Failed to fetch session " + sessionId + " for " + agentId, e);
         }
-        return sessionRow(agentId, sessionId, "新对话", "", orgId);
+        return sessionRow(agentId, sessionId, "新对话", "", orgId, userId);
     }
 
     private Map<String, Object> findSessionAfterSchemaRetry(
-            String agentId, String sessionId, String orgId) {
+            String agentId, String sessionId, String orgId, String userId) {
         String query =
                 "SELECT session_id, title, created_at, updated_at, user_id, domain, org_id "
                         + "FROM "
                         + sessionsTable
-                        + " WHERE agent_id = ? AND session_id = ? LIMIT 1";
+                        + " WHERE agent_id = ? AND session_id = ?"
+                        + (userId == null || userId.isBlank() ? "" : " AND user_id = ?")
+                        + " LIMIT 1";
         try (Connection connection = storage.connection();
                 PreparedStatement statement = connection.prepareStatement(query)) {
             statement.setString(1, agentId);
             statement.setString(2, sessionId);
+            if (userId != null && !userId.isBlank()) statement.setString(3, userId);
             try (ResultSet rs = statement.executeQuery()) {
                 if (rs.next()) {
                     return sessionRow(
@@ -317,14 +410,15 @@ public class PlatformWorkspaceSessionStore {
                             rs.getString("session_id"),
                             rs.getString("title"),
                             rs.getString("updated_at"),
-                            rs.getString("org_id"));
+                            rs.getString("org_id"),
+                            rs.getString("user_id"));
                 }
             }
         } catch (SQLException retryError) {
             throw new IllegalStateException(
                     "Failed to fetch session " + sessionId + " for " + agentId, retryError);
         }
-        return sessionRow(agentId, sessionId, "新对话", "", orgId);
+        return sessionRow(agentId, sessionId, "新对话", "", orgId, userId);
     }
 
     private Map<String, Object> findFileSession(String agentId, String sessionId, String orgId) {
@@ -745,6 +839,16 @@ public class PlatformWorkspaceSessionStore {
 
     private static Map<String, Object> sessionRow(
             String agentId, String sessionId, String title, String updatedAt, String orgId) {
+        return sessionRow(agentId, sessionId, title, updatedAt, orgId, null);
+    }
+
+    private static Map<String, Object> sessionRow(
+            String agentId,
+            String sessionId,
+            String title,
+            String updatedAt,
+            String orgId,
+            String userId) {
         String now = Instant.now().toString();
         return map(
                 "session_id",
@@ -759,6 +863,8 @@ public class PlatformWorkspaceSessionStore {
                 "platform",
                 "org_id",
                 orgId,
+                "user_id",
+                userId,
                 "created_at",
                 now,
                 "updated_at",

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref } from 'vue'
 import AgentWaitingCard from '../components/AgentWaitingCard.vue'
 import { currentDomain, currentOrgId, makeHeaders, readJson, type JsonMap } from '../lib/platformApi'
+import { confirmDialog } from '../stores/dialog'
 import { notifyError } from '../stores/notify'
 import { formatInterimText } from '../lib/streamText'
 
@@ -21,9 +22,11 @@ const imageInputs = ref<JsonMap[]>([])
 const imageInputEl = ref<HTMLInputElement | null>(null)
 type DocumentInput = {
   localId: string
-  file: File
+  file?: File
+  filename: string
   status: 'uploading' | 'ready' | 'error'
   docId?: string
+  attachmentId?: string
   error?: string
 }
 const documentInputs = ref<DocumentInput[]>([])
@@ -61,6 +64,7 @@ const compactionEntries = computed(() => {
 })
 const compactionCount = computed(() => compactionEntries.value.length)
 const documentsUploading = computed(() => documentInputs.value.some((item) => item.status === 'uploading'))
+const hasReadyDocuments = computed(() => documentInputs.value.some((item) => item.status === 'ready' && item.docId))
 
 function headers(json = false) { return makeHeaders(json, currentOrgId()) }
 function isBuiltin(a: JsonMap) { return String(a.source || 'builtin') === 'builtin' }
@@ -105,7 +109,23 @@ async function createSession() {
 }
 async function selectSession(id: string) {
   selectedSessionId.value = id
+  documentInputs.value = []
   await loadSessionDetail(id, true)
+  await loadSessionAttachments(id)
+}
+async function loadSessionAttachments(sessionId: string) {
+  try {
+    const data = await readJson<JsonMap>(await fetch(`/platform/session/sessions/${encodeURIComponent(sessionId)}/attachments`, { headers: headers(false) }))
+    const rows = Array.isArray(data.items) ? data.items as JsonMap[] : []
+    documentInputs.value = rows.map((item, index) => ({
+      localId: `restored_${String(item.attachment_id || item.id || index)}`,
+      filename: String(item.filename || item.file_name || item.name || '对话文件'),
+      attachmentId: String(item.attachment_id || item.id || ''),
+      docId: String(item.doc_id || ''),
+      status: String(item.status || '').toLowerCase() === 'ready' || String(item.parse_status || '').toLowerCase() === 'parsed' ? 'ready' : 'error',
+      error: String(item.parse_message || ''),
+    }))
+  } catch (err) { notifyError(err) }
 }
 async function loadSessionDetail(id: string, replaceMessages: boolean) {
   try {
@@ -120,7 +140,7 @@ async function deleteSession(id: string) {
   try {
     const qs = selectedId.value ? `?agent_id=${encodeURIComponent(selectedId.value)}` : ''
     await readJson<JsonMap>(await fetch(`/platform/frontend/chat/sessions/${encodeURIComponent(id)}${qs}`, { method: 'DELETE', headers: headers(false) }))
-    if (selectedSessionId.value === id) { selectedSessionId.value = ''; messages.value = []; sessionDetail.value = null }
+    if (selectedSessionId.value === id) { selectedSessionId.value = ''; messages.value = []; sessionDetail.value = null; documentInputs.value = [] }
     await loadSessions()
   } catch (err) { notifyError(err) }
 }
@@ -130,6 +150,7 @@ async function selectAgent(id: string) {
   sessionDetail.value = null
   flowKey.value = ''
   selectedSessionId.value = ''
+  documentInputs.value = []
   await loadSessions()
 }
 
@@ -419,16 +440,15 @@ function displayMessageContent(value: unknown) {
 
 async function send() {
   const text = query.value.trim()
-  if ((!text && !imageInputs.value.length && !documentInputs.value.length) || running.value || documentsUploading.value || !selectedId.value) return
+  if ((!text && !imageInputs.value.length && !hasReadyDocuments.value) || running.value || documentsUploading.value || !selectedId.value) return
   if (!selectedSessionId.value) await createSession()
   const documents = documentInputs.value.filter((item) => item.status === 'ready' && item.docId)
-  messages.value.push({ role: 'user', content: text || '（附件）', image_count: imageInputs.value.length, document_count: documents.length, documents: documents.map((item) => item.file.name) })
+  messages.value.push({ role: 'user', content: text || '（附件）', image_count: imageInputs.value.length, document_count: documents.length, documents: documents.map((item) => item.filename) })
   messages.value.push({ role: 'assistant', content: '', steps: [], meta: null, pending: true })
   const msg = messages.value[messages.value.length - 1]
   query.value = ''
   const images = imageInputs.value
   imageInputs.value = []
-  documentInputs.value = []
   running.value = true
   await scrollDown()
   const t0 = Date.now()
@@ -447,7 +467,7 @@ async function send() {
       msg.steps.push({ step: 'waiting_user_input', title: '等待用户输入', status: 'warning', summary: String((ev.waiting || ev).question || '') })
       scrollDown()
     } else if (ev.type === 'done') {
-      const out = (ev.output_ref || {}) as JsonMap
+      const out = (ev.result || ev.output_ref || ev) as JsonMap
       const res = (out.result || out) as JsonMap
       msg.content = ev.status === 'waiting_user_input' ? '' : String(res.answer || res.text || msg.content || '').trim() || '（无回答）'
       msg.meta = { route: res.route || res.effective_mode || ev.flow_name, trace_id: ev.trace_id, citations: Array.isArray(res.citations) ? res.citations : [], elapsed: Date.now() - t0, run_id: ev.run_id }
@@ -524,7 +544,7 @@ async function addDocuments(ev: Event) {
       notifyError(`${file.name} 不是支持的文档类型`)
       continue
     }
-    const item: DocumentInput = { localId: `${Date.now()}_${Math.random().toString(36).slice(2)}`, file, status: 'uploading' }
+    const item: DocumentInput = { localId: `${Date.now()}_${Math.random().toString(36).slice(2)}`, file, filename: file.name, status: 'uploading' }
     documentInputs.value.push(item)
     try {
       if (!selectedSessionId.value) await createSession()
@@ -535,20 +555,30 @@ async function addDocuments(ev: Event) {
       const data = await readJson<JsonMap>(await fetch('/platform/session/attachments', { method: 'POST', headers: headers(false), body: form }))
       const attached = (data.item || data) as JsonMap
       const docId = String(attached.doc_id || '')
+      const attachmentId = String(attached.attachment_id || attached.id || '')
       if (!docId) throw new Error('上传后没有生成文档标识')
       if (String(attached.parse_status || '') !== 'parsed') throw new Error('未提取到原生文本，OCR 版本上线后可处理扫描件')
-      item.docId = docId
-      item.status = 'ready'
+      documentInputs.value = documentInputs.value.map((current) => current.localId === item.localId
+        ? { ...current, docId, attachmentId, status: 'ready' }
+        : current)
     } catch (err) {
-      item.status = 'error'
-      item.error = err instanceof Error ? err.message : String(err)
-      notifyError(`${file.name} 上传失败：${item.error}`)
+      const error = err instanceof Error ? err.message : String(err)
+      documentInputs.value = documentInputs.value.map((current) => current.localId === item.localId
+        ? { ...current, status: 'error', error }
+        : current)
+      notifyError(`${file.name} 上传失败：${error}`)
     }
   }
 }
 
-function removeDocument(localId: string) {
-  documentInputs.value = documentInputs.value.filter((item) => item.localId !== localId)
+async function removeDocument(item: DocumentInput) {
+  if (item.attachmentId) {
+    if (!await confirmDialog(`确定从当前会话移除「${item.filename}」吗？知识库中的文件仍会保留。`, { title: '移除对话附件', confirmLabel: '移除', danger: true })) return
+    try {
+      await readJson(await fetch(`/platform/session/attachments/${encodeURIComponent(item.attachmentId)}`, { method: 'DELETE', headers: headers(false) }))
+    } catch (err) { notifyError(err); return }
+  }
+  documentInputs.value = documentInputs.value.filter((current) => current.localId !== item.localId)
 }
 
 onMounted(async () => { await loadDomains(); await loadAgents(); await loadSessions() })
@@ -645,9 +675,9 @@ onMounted(async () => { await loadDomains(); await loadAgents(); await loadSessi
         <div v-if="documentInputs.length" class="document-queue">
           <span v-for="item in documentInputs" :key="item.localId" class="document-chip" :class="item.status">
             <span>{{ item.status === 'uploading' ? '⏳' : item.status === 'ready' ? '📄' : '⚠️' }}</span>
-            <span class="document-chip-name">{{ item.file.name }}</span>
+            <span class="document-chip-name">{{ item.filename }}</span>
             <span class="document-chip-status">{{ item.status === 'uploading' ? '上传解析中' : item.status === 'ready' ? '本轮会检索' : item.error || '上传失败' }}</span>
-            <button type="button" title="移除此文件" @click="removeDocument(item.localId)">×</button>
+            <button type="button" title="从当前会话移除（知识库文件仍保留）" @click="removeDocument(item)">×</button>
           </span>
         </div>
         <input ref="imageInputEl" type="file" accept="image/*" multiple class="hidden" @change="addImage" />
@@ -655,7 +685,7 @@ onMounted(async () => { await loadDomains(); await loadAgents(); await loadSessi
         <button class="btn btn-ghost" :disabled="running || !selectedId" @click="imageInputEl?.click()">图片{{ imageInputs.length ? ` (${imageInputs.length})` : '' }}</button>
         <button class="btn btn-ghost" :disabled="running || !selectedId" @click="documentInputEl?.click()">文档{{ documentInputs.length ? ` (${documentInputs.length})` : '' }}</button>
         <textarea v-model="query" :disabled="!selectedId" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行…" @keydown.enter.exact.prevent="send" />
-        <button class="btn btn-primary" :disabled="running || documentsUploading || (!query.trim() && !imageInputs.length && !documentInputs.length) || !selectedId" @click="send">{{ documentsUploading ? '文档解析中…' : running ? '运行中…' : '发送' }}</button>
+        <button class="btn btn-primary" :disabled="running || documentsUploading || (!query.trim() && !imageInputs.length && !hasReadyDocuments) || !selectedId" @click="send">{{ documentsUploading ? '文档解析中…' : running ? '运行中…' : '发送' }}</button>
       </div>
     </main>
 

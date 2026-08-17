@@ -21,11 +21,6 @@ import io.agent.platform.control.SkillSpec;
 import io.agent.platform.control.SubagentBinding;
 import io.agent.platform.control.ToolRegistry;
 import io.agent.platform.control.ToolSpec;
-import io.agent.platform.control.WorkflowNode;
-import io.agent.platform.control.WorkflowNodeType;
-import io.agent.platform.control.WorkflowEdge;
-import io.agent.platform.control.WorkflowEndpoint;
-import io.agent.platform.control.WorkflowPort;
 import io.agent.platform.control.WorkflowStep;
 import io.agent.platform.control.WorkflowTransition;
 import io.agent.platform.control.YamlAgentDefinitionRegistry;
@@ -83,6 +78,7 @@ public class PlatformCompatibilityState {
     private static final String SQLITE_RUN_STEPS_TABLE = "platform_agent_run_steps";
     private static final String SQLITE_RUN_EVENTS_TABLE = "platform_agent_run_events";
     private static final String SQLITE_WAITINGS_TABLE = "platform_agent_waitings";
+    private static final String SQLITE_ATTACHMENTS_TABLE = "platform_session_attachments";
     private static final String MEMORY_BLOCK_START = "<!-- agent-platform-memory:start -->";
     private static final String MEMORY_BLOCK_END = "<!-- agent-platform-memory:end -->";
 
@@ -194,6 +190,7 @@ public class PlatformCompatibilityState {
         loadMemories();
         loadAudit();
         loadRunState();
+        loadAttachments();
         seedPlatformDomain();
     }
 
@@ -289,9 +286,9 @@ public class PlatformCompatibilityState {
 
         Map<String, Object> flows = new LinkedHashMap<>();
         flows.put("default", "agentscope_runtime");
+        config.put("orchestration", definition.orchestration());
         Map<String, Object> workflow = new LinkedHashMap<>();
         workflow.put("flows", flows);
-        workflow.put("orchestration", definition.orchestration());
         return Map.of("agent_id", agentId, "config_json", config, "workflow_json", workflow);
     }
 
@@ -312,7 +309,6 @@ public class PlatformCompatibilityState {
 
     public Map<String, Object> saveAgentSpec(String agentId, Map<String, Object> payload) {
         Map<String, Object> config = childMap(payload, "config_json");
-        Map<String, Object> workflow = childMap(payload, "workflow_json");
         AgentDefinition existing = agentRegistry.findPublished(agentId).orElse(null);
         String name = string(config, "name", existing == null ? agentId : existing.name());
         String systemPrompt =
@@ -343,7 +339,7 @@ public class PlatformCompatibilityState {
         }
         OrchestrationPolicy orchestration =
                 orchestration(
-                        workflow.get("orchestration"),
+                        config.get("orchestration"),
                         existing == null ? OrchestrationPolicy.single() : existing.orchestration());
         String workspace =
                 existing == null
@@ -468,13 +464,15 @@ public class PlatformCompatibilityState {
             return fallback;
         }
         Map<String, Object> map = normalize(raw);
+        if (map.containsKey("nodes") || map.containsKey("edges")) {
+            throw new IllegalArgumentException(
+                    "Standalone Workflow nodes and edges cannot be embedded in Agent orchestration");
+        }
         return new OrchestrationPolicy(
                 mode(string(map, "mode", fallback.mode().name())),
                 subagents(map.get("subagents")),
                 routes(map.get("routes")),
-                workflowSteps(map.get("workflow")),
-                workflowNodes(map.get("nodes")),
-                workflowEdges(map.get("edges")));
+                workflowSteps(map.get("workflow")));
     }
 
     private OrchestrationMode mode(String value) {
@@ -552,81 +550,6 @@ public class PlatformCompatibilityState {
                 numberInt(map.get("maxRetries"), map.get("max_retries")),
                 workflowFailurePolicy(map),
                 workflowTransitions(map.get("transitions")));
-    }
-
-    private List<WorkflowNode> workflowNodes(Object value) {
-        if (!(value instanceof List<?> list)) {
-            return List.of();
-        }
-        return list.stream()
-                .filter(Map.class::isInstance)
-                .map(Map.class::cast)
-                .map(this::workflowNode)
-                .toList();
-    }
-
-    private WorkflowNode workflowNode(Map<?, ?> raw) {
-        Map<String, Object> map = normalize(raw);
-        return new WorkflowNode(
-                stringAny(map, "nodeId", "node_id", "stepId", "step_id", "id"),
-                WorkflowNodeType.fromValue(stringAny(map, "type", "nodeType", "node_type")),
-                stringAny(map, "refId", "ref_id", "agentId", "agent_id", "targetAgentId"),
-                string(map, "instruction", ""),
-                objectMap(map.get("config")),
-                objectMap(
-                        map.get("inputMapping") == null
-                                ? map.get("input_mapping")
-                                : map.get("inputMapping")),
-                objectMap(
-                        map.get("outputSchema") == null
-                                ? map.get("output_schema")
-                                : map.get("outputSchema")),
-                numberLong(map.get("timeoutMs"), map.get("timeout_ms")),
-                numberInt(map.get("maxRetries"), map.get("max_retries")),
-                workflowFailurePolicy(map),
-                workflowTransitions(map.get("transitions")),
-                workflowPorts(map.get("inputPorts") == null ? map.get("input_ports") : map.get("inputPorts")),
-                workflowPorts(map.get("outputPorts") == null ? map.get("output_ports") : map.get("outputPorts")));
-    }
-
-    private List<WorkflowPort> workflowPorts(Object value) {
-        if (!(value instanceof List<?> list)) return List.of();
-        return list.stream().filter(Map.class::isInstance).map(Map.class::cast).map(this::workflowPort).toList();
-    }
-
-    private WorkflowPort workflowPort(Map<?, ?> raw) {
-        Map<String, Object> map = normalize(raw);
-        return new WorkflowPort(
-                stringAny(map, "portId", "port_id", "id"),
-                string(map, "direction", "input"),
-                stringAny(map, "contractRef", "contract_ref"),
-                objectMap(map.get("schema")),
-                Boolean.TRUE.equals(map.get("required")),
-                string(map, "cardinality", "one"),
-                string(map, "description", ""));
-    }
-
-    private List<WorkflowEdge> workflowEdges(Object value) {
-        if (!(value instanceof List<?> list)) return List.of();
-        return list.stream().filter(Map.class::isInstance).map(Map.class::cast).map(this::workflowEdge).toList();
-    }
-
-    private WorkflowEdge workflowEdge(Map<?, ?> raw) {
-        Map<String, Object> map = normalize(raw);
-        return new WorkflowEdge(
-                stringAny(map, "edgeId", "edge_id", "id"),
-                workflowEndpoint(map.get("from")),
-                workflowEndpoint(map.get("to")),
-                string(map, "kind", "data"),
-                objectMap(map.get("binding")),
-                objectMap(map.get("condition")),
-                Boolean.TRUE.equals(map.get("defaultEdge")) || Boolean.TRUE.equals(map.get("default_edge")));
-    }
-
-    private WorkflowEndpoint workflowEndpoint(Object value) {
-        if (!(value instanceof Map<?, ?> raw)) return null;
-        Map<String, Object> map = normalize(raw);
-        return new WorkflowEndpoint(stringAny(map, "nodeId", "node_id"), stringAny(map, "portId", "port_id"));
     }
 
     private List<WorkflowTransition> workflowTransitions(Object value) {
@@ -2224,7 +2147,14 @@ public class PlatformCompatibilityState {
                     "CREATE TABLE IF NOT EXISTS "
                             + SQLITE_WAITINGS_TABLE
                             + " (waiting_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, payload TEXT"
-                            + " NOT NULL, updated_at TEXT NOT NULL)");
+                            + " NOT NULL, updated_at TEXT NOT NULL)",
+                    "CREATE TABLE IF NOT EXISTS "
+                            + SQLITE_ATTACHMENTS_TABLE
+                            + " (attachment_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,"
+                            + " payload TEXT NOT NULL, updated_at TEXT NOT NULL)",
+                    "CREATE INDEX IF NOT EXISTS idx_platform_session_attachments_session_id ON "
+                            + SQLITE_ATTACHMENTS_TABLE
+                            + " (session_id)");
         } catch (IllegalStateException e) {
             throw new IllegalStateException("Failed to init sqlite compatibility schema", e);
         }
@@ -2447,6 +2377,11 @@ public class PlatformCompatibilityState {
         return workspaceSessionStore.create(payload, orgId);
     }
 
+    public Map<String, Object> newSession(
+            Map<String, Object> payload, String orgId, String userId) {
+        return workspaceSessionStore.create(payload, orgId, userId);
+    }
+
     public Map<String, Object> createRun(String agentId, String query, String userId) {
         String runId = "run_" + UUID.randomUUID().toString().replace("-", "");
         Instant now = Instant.now();
@@ -2583,11 +2518,20 @@ public class PlatformCompatibilityState {
                         Instant.now().toString());
         attachments.computeIfAbsent(sessionId, ignored -> new ArrayList<>()).add(item);
         attachmentsById.put(id, item);
+        persistAttachment(item);
         return item;
     }
 
     public Map<String, Object> attachDocument(
             String sessionId, Map<String, Object> document, String orgId) {
+        return attachDocument(sessionId, document, orgId, null);
+    }
+
+    public Map<String, Object> attachDocument(
+            String sessionId,
+            Map<String, Object> document,
+            String orgId,
+            String userId) {
         String id = "att_" + sequence.getAndIncrement();
         String parseStatus = String.valueOf(document.getOrDefault("parse_status", "failed"));
         Map<String, Object> item =
@@ -2602,12 +2546,20 @@ public class PlatformCompatibilityState {
                         document.get("doc_id"),
                         "version_id",
                         document.getOrDefault("version_id", "v1"),
+                        "source_type",
+                        document.getOrDefault("source_type", "conversation_attachment"),
+                        "source_session_id",
+                        sessionId,
+                        "source_message_id",
+                        document.getOrDefault("source_message_id", ""),
                         "filename",
                         document.get("filename"),
                         "file_name",
                         document.get("filename"),
                         "org_id",
                         orgId,
+                        "user_id",
+                        userId,
                         "status",
                         "parsed".equals(parseStatus) ? "ready" : "error",
                         "parse_status",
@@ -2620,6 +2572,7 @@ public class PlatformCompatibilityState {
                         Instant.now().toString());
         attachments.computeIfAbsent(sessionId, ignored -> new ArrayList<>()).add(item);
         attachmentsById.put(id, item);
+        persistAttachment(item);
         return item;
     }
 
@@ -2680,7 +2633,12 @@ public class PlatformCompatibilityState {
     }
 
     public List<Map<String, Object>> sessions(String domain, String agentId) {
-        return workspaceSessionStore.list(agentId, "platform").stream()
+        return sessions(domain, agentId, null);
+    }
+
+    public List<Map<String, Object>> sessions(
+            String domain, String agentId, String userId) {
+        return workspaceSessionStore.list(agentId, "platform", userId).stream()
                 .filter(
                         row ->
                                 domain == null
@@ -2697,6 +2655,14 @@ public class PlatformCompatibilityState {
         return workspaceSessionStore.get(agentId, id, "platform");
     }
 
+    public Map<String, Object> session(String id, String agentId, String orgId, String userId) {
+        return workspaceSessionStore.get(agentId, id, orgId, userId);
+    }
+
+    public boolean sessionOwnedBy(String sessionId, String orgId, String userId) {
+        return workspaceSessionStore.ownedBy(sessionId, orgId, userId);
+    }
+
     public void appendSessionMessage(
             String agentId, String sessionId, String userId, String role, String content) {
         workspaceSessionStore.appendMessage(agentId, sessionId, userId, role, content);
@@ -2708,15 +2674,54 @@ public class PlatformCompatibilityState {
 
     public void deleteSession(String sessionId, String agentId) {
         workspaceSessionStore.delete(agentId, sessionId);
-        attachments.remove(sessionId);
+        deleteSessionAttachments(sessionId, null, null);
+    }
+
+    public void deleteSession(String sessionId, String agentId, String orgId, String userId) {
+        if (workspaceSessionStore.delete(agentId, sessionId, orgId, userId)) {
+            deleteSessionAttachments(sessionId, userId, orgId);
+        }
     }
 
     public List<Map<String, Object>> attachments(String sessionId) {
         return attachments.getOrDefault(sessionId, List.of());
     }
 
+    public List<Map<String, Object>> attachments(String sessionId, String userId, String orgId) {
+        return attachments(sessionId).stream()
+                .filter(
+                        row ->
+                                (userId == null
+                                                || userId.isBlank()
+                                                || userId.equals(String.valueOf(row.get("user_id"))))
+                                        && (orgId == null
+                                                || orgId.isBlank()
+                                                || orgId.equals(String.valueOf(row.get("org_id")))))
+                .toList();
+    }
+
+    public List<Map<String, Object>> sessions(
+            String domain, String agentId, String orgId, String userId) {
+        return workspaceSessionStore.list(agentId, orgId, userId).stream()
+                .filter(
+                        row ->
+                                domain == null
+                                        || domain.isBlank()
+                                        || domain.equals(row.get("domain")))
+                .toList();
+    }
+
     public Map<String, Object> attachment(String id) {
         return attachmentsById.getOrDefault(id, Map.of("attachment_id", id, "status", "ready"));
+    }
+
+    public Map<String, Object> attachment(String id, String userId, String orgId) {
+        Map<String, Object> item = attachment(id);
+        if (!String.valueOf(item.getOrDefault("user_id", "")).equals(userId)
+                || !String.valueOf(item.getOrDefault("org_id", "")).equals(orgId)) {
+            return Map.of("attachment_id", id, "status", "not_found");
+        }
+        return item;
     }
 
     public void deleteAttachment(String id) {
@@ -2731,9 +2736,15 @@ public class PlatformCompatibilityState {
                     rows.removeIf(row -> id.equals(row.get("attachment_id")));
                     return rows;
                 });
+        deletePersistedAttachment(id);
     }
 
     public List<Map<String, Object>> runs(String agentId, String status, int limit) {
+        return runs(agentId, status, limit, null);
+    }
+
+    public List<Map<String, Object>> runs(
+            String agentId, String status, int limit, String userId) {
         return runs.values().stream()
                 .filter(
                         row ->
@@ -2745,6 +2756,11 @@ public class PlatformCompatibilityState {
                                 status == null
                                         || status.isBlank()
                                         || status.equals(row.get("status")))
+                .filter(
+                        row ->
+                                userId == null
+                                        || userId.isBlank()
+                                        || userId.equals(String.valueOf(row.get("user_id"))))
                 .sorted(
                         Comparator.comparing(
                                         (Map<String, Object> row) ->
@@ -3237,6 +3253,10 @@ public class PlatformCompatibilityState {
         memories.put(id, item);
         persistMemory(item);
         return item;
+    }
+
+    public Map<String, Object> memoryById(String id) {
+        return memories.getOrDefault(id, Map.of("id", id, "status", "not_found"));
     }
 
     public Map<String, Object> confirmMemory(String id, Map<String, Object> payload) {
@@ -4440,6 +4460,105 @@ public class PlatformCompatibilityState {
         loadRunSteps();
         loadRunEvents();
         loadWaitings();
+    }
+
+    private void loadAttachments() {
+        if (!isSqliteEnabled()) {
+            return;
+        }
+        String sql =
+                "SELECT attachment_id, session_id, payload FROM "
+                        + SQLITE_ATTACHMENTS_TABLE
+                        + " ORDER BY updated_at";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet resultSet = statement.executeQuery()) {
+            attachments.clear();
+            attachmentsById.clear();
+            while (resultSet.next()) {
+                Map<String, Object> item = mapFromJson(resultSet.getString("payload"));
+                if (item.isEmpty()) {
+                    continue;
+                }
+                String attachmentId =
+                        string(item, "attachment_id", resultSet.getString("attachment_id"));
+                String sessionId = string(item, "session_id", resultSet.getString("session_id"));
+                if (attachmentId.isBlank() || sessionId.isBlank()) {
+                    continue;
+                }
+                item.put("attachment_id", attachmentId);
+                item.put("id", attachmentId);
+                item.put("session_id", sessionId);
+                attachments.computeIfAbsent(sessionId, ignored -> new ArrayList<>()).add(item);
+                attachmentsById.put(attachmentId, item);
+            }
+        } catch (Exception e) {
+            log.warn("Load session attachments from sqlite failed: {}", e.getMessage());
+        }
+    }
+
+    private void persistAttachment(Map<String, Object> attachment) {
+        if (!isSqliteEnabled()) {
+            return;
+        }
+        String attachmentId = string(attachment, "attachment_id", "");
+        String sessionId = string(attachment, "session_id", "");
+        if (attachmentId.isBlank() || sessionId.isBlank()) {
+            return;
+        }
+        String sql =
+                "INSERT INTO "
+                        + SQLITE_ATTACHMENTS_TABLE
+                        + " (attachment_id, session_id, payload, updated_at) VALUES (?, ?, ?, ?)"
+                        + " ON CONFLICT(attachment_id) DO UPDATE SET session_id = excluded.session_id,"
+                        + " payload = excluded.payload, updated_at = excluded.updated_at";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, attachmentId);
+            statement.setString(2, sessionId);
+            statement.setString(3, objectMapper.writeValueAsString(attachment));
+            statement.setString(4, string(attachment, "created_at", Instant.now().toString()));
+            statement.executeUpdate();
+        } catch (Exception e) {
+            log.warn("Persist session attachment {} failed: {}", attachmentId, e.getMessage());
+        }
+    }
+
+    private void deletePersistedAttachment(String attachmentId) {
+        if (!isSqliteEnabled() || attachmentId == null || attachmentId.isBlank()) {
+            return;
+        }
+        try (Connection connection = storage.connection();
+                PreparedStatement statement =
+                        connection.prepareStatement(
+                                "DELETE FROM "
+                                        + SQLITE_ATTACHMENTS_TABLE
+                                        + " WHERE attachment_id = ?")) {
+            statement.setString(1, attachmentId);
+            statement.executeUpdate();
+        } catch (Exception e) {
+            log.warn("Delete session attachment {} failed: {}", attachmentId, e.getMessage());
+        }
+    }
+
+    private void deleteSessionAttachments(String sessionId, String userId, String orgId) {
+        List<Map<String, Object>> rows =
+                new ArrayList<>(attachments.getOrDefault(sessionId, List.of()));
+        for (Map<String, Object> row : rows) {
+            boolean matches =
+                    (userId == null
+                                    || userId.isBlank()
+                                    || userId.equals(String.valueOf(row.get("user_id"))))
+                            && (orgId == null
+                                    || orgId.isBlank()
+                                    || orgId.equals(String.valueOf(row.get("org_id"))));
+            if (matches) {
+                deleteAttachment(string(row, "attachment_id", ""));
+            }
+        }
+        if (userId == null && orgId == null) {
+            attachments.remove(sessionId);
+        }
     }
 
     private void loadRuns() {

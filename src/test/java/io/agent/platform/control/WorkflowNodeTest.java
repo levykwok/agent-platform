@@ -18,18 +18,14 @@ class WorkflowNodeTest {
     private final ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
 
     @Test
-    void legacyStepsBecomeAgentInvokeNodes() {
-        WorkflowStep step =
-                new WorkflowStep(
-                        "research", "researcher", "Analyze", 1200L, 2,
-                        WorkflowStep.FailurePolicy.USE_INPUT, List.of());
-
-        WorkflowNode node = WorkflowNode.fromLegacy(step);
+    void standaloneNodesDoNotConvertAgentSteps() {
+        WorkflowNode node = new WorkflowNode(
+                "research", WorkflowNodeType.AGENT_INVOKE, "researcher", "Analyze",
+                null, 0, null, List.of(), List.of());
 
         assertEquals("research", node.nodeId());
         assertEquals(WorkflowNodeType.AGENT_INVOKE, node.type());
         assertEquals("researcher", node.refId());
-        assertEquals(step, node.asAgentStep());
     }
 
     @Test
@@ -63,7 +59,7 @@ class WorkflowNodeTest {
     }
 
     @Test
-    void policyFallsBackToLegacyWorkflowWhenNodesAreAbsent() {
+    void agentPolicyKeepsItsOwnOrderedWorkflowSteps() {
         OrchestrationPolicy policy =
                 new OrchestrationPolicy(
                         OrchestrationMode.WORKFLOW,
@@ -71,9 +67,8 @@ class WorkflowNodeTest {
                         List.of(),
                         List.of(new WorkflowStep("write", "writer", "Write")));
 
-        assertTrue(policy.nodes().isEmpty());
-        assertEquals(1, policy.workflowNodes().size());
-        assertEquals(WorkflowNodeType.AGENT_INVOKE, policy.workflowNodes().get(0).type());
+        assertEquals(1, policy.workflow().size());
+        assertEquals("writer", policy.workflow().get(0).agentId());
     }
 
     @Test
@@ -90,7 +85,6 @@ class WorkflowNodeTest {
                         null,
                         0,
                         null,
-                        List.of(),
                         List.of(
                                 new WorkflowPort(
                                         "input",
@@ -123,7 +117,6 @@ class WorkflowNodeTest {
                         null,
                         0,
                         null,
-                        List.of(),
                         List.of(
                                 new WorkflowPort(
                                         "order",

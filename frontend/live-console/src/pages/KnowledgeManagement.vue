@@ -8,7 +8,7 @@ const domainOptions = ref<JsonMap[]>([{ domain: 'platform', label: '平台', org
 const selectedDomain = ref(currentDomain())
 const docs = ref<JsonMap[]>([])
 const collections = ref<JsonMap[]>([])
-const selectedFolder = ref('all')
+const selectedFolder = ref('conversation')
 const selectedDocKey = ref('')
 const search = ref('')
 const newFolderTitle = ref('')
@@ -28,6 +28,7 @@ const previewRequestId = ref(0)
 const currentOrg = computed(() => String(domainOptions.value.find((item) => item.domain === selectedDomain.value)?.org_id || selectedDomain.value || 'platform'))
 const selectedDoc = computed(() => docs.value.find((doc) => docKey(doc) === selectedDocKey.value) || null)
 const specialFolders = computed(() => [
+  { key: 'conversation', title: '对话文件', count: docsInFolder('conversation').length, icon: '💬' },
   { key: 'all', title: '全部文档', count: docs.value.length, icon: '▦' },
   { key: 'unfiled', title: '未分组', count: docsInFolder('unfiled').length, icon: '▸' },
 ])
@@ -46,7 +47,7 @@ const folderGroups = computed(() => {
 })
 // 扁平列表仅供「上传到」下拉等使用
 const folders = computed(() => [
-  ...specialFolders.value,
+  ...specialFolders.value.filter((folder) => folder.key !== 'conversation'),
   ...collections.value.map((c) => ({ key: collectionKey(c), title: `${orgLabel(c.org_id)} / ${c.title || c.collection_id}`, count: Number(c.item_count ?? c.resource_count ?? (c.items || []).length), icon: '▸' })),
 ])
 function folderTitle(key: string) { return folders.value.find((folder) => folder.key === key)?.title || '全部文档' }
@@ -55,7 +56,7 @@ function toggleOrg(org: string) { const s = new Set(collapsedOrgs.value); s.has(
 function orgExpanded(org: string) { return !collapsedOrgs.value.has(org) }
 function pickFolder(key: string) {
   selectedFolder.value = key
-  uploadTarget.value = key
+  uploadTarget.value = key === 'conversation' ? 'all' : key
   const next = docsInFolder(key)[0]
   if (next) void selectDoc(next)
   else { selectedDocKey.value = ''; resetPreview() }
@@ -77,6 +78,9 @@ function parseCollectionKey(key: string) { const idx = key.indexOf('::'); return
 function orgLabel(orgId: unknown) { const value = String(orgId || '').trim() || 'unknown'; const d = domainOptions.value.find((item) => item.org_id === value); return d ? `${d.label} · ${value}` : value }
 function collectionForDoc(doc: JsonMap) { const key = `${doc.doc_id || doc.id || ''}::${doc.version_id || ''}`; return collections.value.find((c) => String(c.org_id || '') === String(doc.org_id || '') && Array.isArray(c.items) && c.items.some((item: JsonMap) => itemKey(item) === key)) || null }
 function docsInFolder(folderKey: string) {
+  if (folderKey === 'conversation') {
+    return docs.value.filter((doc) => ['conversation_attachment', 'conversation_generated'].includes(String(doc.source_type || '')))
+  }
   if (folderKey === 'all') return docs.value
   const assigned = new Set(collections.value.flatMap((c) => (c.items || []).map((item: JsonMap) => `${c.org_id || ''}::${itemKey(item)}`)))
   if (folderKey === 'unfiled') return docs.value.filter((doc) => !assigned.has(`${doc.org_id || ''}::${doc.doc_id || doc.id || ''}::${doc.version_id || ''}`))
@@ -144,7 +148,7 @@ async function changeDomain() {
   params.set('domain', selectedDomain.value)
   params.set('org_id', currentOrg.value)
   history.replaceState(null, '', `${location.pathname}?${params.toString()}${location.hash}`)
-  selectedFolder.value = 'all'
+  selectedFolder.value = 'conversation'
   uploadTarget.value = 'all'
   selectedDocKey.value = ''
   resetPreview()

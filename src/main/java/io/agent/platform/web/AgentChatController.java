@@ -28,13 +28,14 @@ public class AgentChatController {
     }
 
     @PostMapping
-    public Mono<ChatResponse> chat(@PathVariable String agentId, @RequestBody ChatRequest request) {
+    public Mono<ChatResponse> chat(
+            @PathVariable("agentId") String agentId, @RequestBody ChatRequest request) {
         return runtime.chat(agentId, request);
     }
 
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<AgentEventEnvelope>> stream(
-            @PathVariable String agentId, @RequestBody ChatRequest request) {
+            @PathVariable("agentId") String agentId, @RequestBody ChatRequest request) {
         return runtime.stream(agentId, request)
                 .map(event -> ServerSentEvent.builder(event).event(event.type()).build());
     }

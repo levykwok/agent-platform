@@ -1,6 +1,14 @@
 spring:
   application:
     name: agent-platform
+  mail:
+    host: ${AGENT_PLATFORM_SMTP_HOST:}
+    port: ${AGENT_PLATFORM_SMTP_PORT:587}
+    username: ${AGENT_PLATFORM_SMTP_USERNAME:}
+    password: ${AGENT_PLATFORM_SMTP_PASSWORD:}
+    properties:
+      mail.smtp.auth: ${AGENT_PLATFORM_SMTP_AUTH:true}
+      mail.smtp.starttls.enable: ${AGENT_PLATFORM_SMTP_STARTTLS:true}
   codec:
     # Image uploads are sent as base64 in the agent-run and model-test JSON body.
     # DashScope accepts base64 images below 7 MB; 12 MB covers their encoded form.
@@ -25,6 +33,16 @@ agent:
         enabled: ${AGENT_PLATFORM_EXTERNAL_API_ENABLED:false}
         api-keys: ${AGENT_PLATFORM_EXTERNAL_API_KEYS:}
     workspace: ${AGENT_PLATFORM_WORKSPACE:${user.dir}/workspace}
+    auth:
+      # Set AGENT_PLATFORM_AUTH_BOOTSTRAP_ADMIN_PASSWORD on first deployment to create
+      # the initial platform admin account. The password is never written to config tables.
+      bootstrap-admin-email: ${AGENT_PLATFORM_AUTH_BOOTSTRAP_ADMIN_EMAIL:admin@platform.local}
+      bootstrap-admin-password: ${AGENT_PLATFORM_AUTH_BOOTSTRAP_ADMIN_PASSWORD:}
+      base-url: ${AGENT_PLATFORM_AUTH_BASE_URL:http://localhost:8080}
+      secure-cookie: ${AGENT_PLATFORM_AUTH_SECURE_COOKIE:false}
+      mail:
+        enabled: ${AGENT_PLATFORM_AUTH_MAIL_ENABLED:false}
+        retry-delay-ms: ${AGENT_PLATFORM_AUTH_MAIL_RETRY_DELAY_MS:60000}
     persistence:
       mode: ${AGENT_PLATFORM_PERSISTENCE_MODE:sqlite}
       sqlite:

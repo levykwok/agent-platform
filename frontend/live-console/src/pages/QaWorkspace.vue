@@ -217,6 +217,8 @@ async function uploadAttachment(ev: Event) {
 async function removeAttachment(item: JsonMap) {
   const id = item.attachment_id || item.id
   if (!id) return
+  const filename = item.filename || item.file_name || item.name || '该文件'
+  if (!await confirmDialog(`确定从当前对话移除「${filename}」吗？知识库中的文件仍会保留。`, { title: '移除对话附件', confirmLabel: '移除', danger: true })) return
   await readJson(await fetch(`/platform/session/attachments/${encodeURIComponent(String(id))}`, { method: 'DELETE', headers: makeHeaders(false, currentOrg.value) }))
   await loadAttachments()
 }

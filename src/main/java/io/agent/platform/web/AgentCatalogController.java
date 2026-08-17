@@ -16,6 +16,7 @@ import io.agent.platform.control.ToolRegistry;
 import io.agent.platform.control.ToolSpec;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -34,27 +35,49 @@ public class AgentCatalogController {
     private final McpRegistry mcpRegistry;
     private final SkillRegistry skillRegistry;
     private final ModelConfigRegistry modelRegistry;
+    private final AgentAssetService assetService;
+    private final PlatformAssetAccessService assetAccess;
+    private final PlatformAuthService auth;
 
     public AgentCatalogController(
             AgentDefinitionRegistry registry,
             ToolRegistry toolRegistry,
             McpRegistry mcpRegistry,
             SkillRegistry skillRegistry,
-            ModelConfigRegistry modelRegistry) {
+            ModelConfigRegistry modelRegistry,
+            AgentAssetService assetService,
+            PlatformAssetAccessService assetAccess,
+            PlatformAuthService auth) {
         this.registry = registry;
         this.toolRegistry = toolRegistry;
         this.mcpRegistry = mcpRegistry;
         this.skillRegistry = skillRegistry;
         this.modelRegistry = modelRegistry;
+        this.assetService = assetService;
+        this.assetAccess = assetAccess;
+        this.auth = auth;
+    }
+
+    private PlatformAuthService.Principal principal(ServerHttpRequest request) {
+        var cookie = request.getCookies().getFirst("platform_session");
+        return auth.current(cookie == null ? "" : cookie.getValue());
     }
 
     @GetMapping
-    public Map<String, List<AgentCatalogItem>> list() {
-        return Map.of("agents", registry.allPublished().stream().map(this::toCatalogItem).toList());
+    public Map<String, List<AgentCatalogItem>> list(ServerHttpRequest request) {
+        PlatformAuthService.Principal current = principal(request);
+        return Map.of(
+                "agents",
+                registry.allPublished().stream()
+                        .filter(agent -> assetService.canRead(agent.agentId(), current))
+                        .map(this::toCatalogItem)
+                        .toList());
     }
 
     @GetMapping("/{agentId}")
-    public ResponseEntity<AgentCatalogItem> byId(@PathVariable String agentId) {
+    public ResponseEntity<AgentCatalogItem> byId(
+            @PathVariable("agentId") String agentId, ServerHttpRequest request) {
+        assetService.requireReadable(agentId, principal(request));
         return registry.findPublished(agentId)
                 .map(this::toCatalogItem)
                 .map(ResponseEntity::ok)
@@ -88,12 +111,19 @@ public class AgentCatalogController {
             OrchestrationPolicy orchestration) {}
 
     @GetMapping("/tools")
-    public Map<String, List<ToolSpec>> allTools() {
-        return Map.of("tools", toolRegistry.all());
+    public Map<String, List<ToolSpec>> allTools(ServerHttpRequest request) {
+        PlatformAuthService.Principal current = requirePrincipal(request);
+        return Map.of(
+                "tools",
+                toolRegistry.all().stream()
+                        .filter(spec -> assetAccess.canRead("TOOL", spec.toolId(), current))
+                        .toList());
     }
 
     @GetMapping("/tools/{toolId}")
-    public ResponseEntity<ToolSpec> byTool(@PathVariable String toolId) {
+    public ResponseEntity<ToolSpec> byTool(
+            @PathVariable("toolId") String toolId, ServerHttpRequest request) {
+        assetAccess.requireReadable("TOOL", toolId, requirePrincipal(request));
         return toolRegistry
                 .find(toolId)
                 .map(ResponseEntity::ok)
@@ -101,12 +131,19 @@ public class AgentCatalogController {
     }
 
     @GetMapping("/mcps")
-    public Map<String, List<McpSpec>> allMcps() {
-        return Map.of("mcps", mcpRegistry.all());
+    public Map<String, List<McpSpec>> allMcps(ServerHttpRequest request) {
+        PlatformAuthService.Principal current = requirePrincipal(request);
+        return Map.of(
+                "mcps",
+                mcpRegistry.all().stream()
+                        .filter(spec -> assetAccess.canRead("MCP", spec.mcpId(), current))
+                        .toList());
     }
 
     @GetMapping("/mcps/{mcpId}")
-    public ResponseEntity<McpSpec> byMcp(@PathVariable String mcpId) {
+    public ResponseEntity<McpSpec> byMcp(
+            @PathVariable("mcpId") String mcpId, ServerHttpRequest request) {
+        assetAccess.requireReadable("MCP", mcpId, requirePrincipal(request));
         return mcpRegistry
                 .find(mcpId)
                 .map(ResponseEntity::ok)
@@ -114,12 +151,19 @@ public class AgentCatalogController {
     }
 
     @GetMapping("/skills")
-    public Map<String, List<SkillSpec>> allSkills() {
-        return Map.of("skills", skillRegistry.all());
+    public Map<String, List<SkillSpec>> allSkills(ServerHttpRequest request) {
+        PlatformAuthService.Principal current = requirePrincipal(request);
+        return Map.of(
+                "skills",
+                skillRegistry.all().stream()
+                        .filter(spec -> assetAccess.canRead("SKILL", spec.skillId(), current))
+                        .toList());
     }
 
     @GetMapping("/skills/{skillId}")
-    public ResponseEntity<SkillSpec> bySkill(@PathVariable String skillId) {
+    public ResponseEntity<SkillSpec> bySkill(
+            @PathVariable("skillId") String skillId, ServerHttpRequest request) {
+        assetAccess.requireReadable("SKILL", skillId, requirePrincipal(request));
         return skillRegistry
                 .find(skillId)
                 .map(ResponseEntity::ok)
@@ -127,12 +171,15 @@ public class AgentCatalogController {
     }
 
     @GetMapping("/models")
-    public Map<String, List<ModelSpec>> allModels() {
+    public Map<String, List<ModelSpec>> allModels(ServerHttpRequest request) {
+        requirePrincipal(request);
         return Map.of("models", modelRegistry.all());
     }
 
     @GetMapping("/models/{modelId}")
-    public ResponseEntity<ModelSpec> byModel(@PathVariable String modelId) {
+    public ResponseEntity<ModelSpec> byModel(
+            @PathVariable("modelId") String modelId, ServerHttpRequest request) {
+        requirePrincipal(request);
         return modelRegistry
                 .find(modelId)
                 .map(ResponseEntity::ok)
@@ -140,26 +187,45 @@ public class AgentCatalogController {
     }
 
     @PostMapping("/models")
-    public Map<String, ModelSpec> upsertModel(@RequestBody ModelSpec spec) {
+    public Map<String, ModelSpec> upsertModel(
+            @RequestBody ModelSpec spec, ServerHttpRequest request) {
+        auth.requireAdmin(requirePrincipal(request));
         modelRegistry.upsert(spec);
         return Map.of("model", modelRegistry.find(spec.modelId()).orElseThrow());
     }
 
     @PostMapping("/tools")
-    public Map<String, ToolSpec> upsertTool(@RequestBody ToolSpec spec) {
+    public Map<String, ToolSpec> upsertTool(
+            @RequestBody ToolSpec spec, ServerHttpRequest request) {
+        auth.requireAdmin(requirePrincipal(request));
         toolRegistry.upsert(spec);
+        assetAccess.ensurePublic("TOOL", spec.toolId());
         return Map.of("tool", toolRegistry.find(spec.toolId()).orElseThrow());
     }
 
     @PostMapping("/mcps")
-    public Map<String, McpSpec> upsertMcp(@RequestBody McpSpec spec) {
+    public Map<String, McpSpec> upsertMcp(
+            @RequestBody McpSpec spec, ServerHttpRequest request) {
+        auth.requireAdmin(requirePrincipal(request));
         mcpRegistry.upsert(spec);
+        assetAccess.ensurePublic("MCP", spec.mcpId());
         return Map.of("mcp", mcpRegistry.find(spec.mcpId()).orElseThrow());
     }
 
     @PostMapping("/skills")
-    public Map<String, SkillSpec> upsertSkill(@RequestBody SkillSpec spec) {
+    public Map<String, SkillSpec> upsertSkill(
+            @RequestBody SkillSpec spec, ServerHttpRequest request) {
+        auth.requireAdmin(requirePrincipal(request));
         skillRegistry.upsert(spec);
+        assetAccess.ensurePublic("SKILL", spec.skillId());
         return Map.of("skill", skillRegistry.find(spec.skillId()).orElseThrow());
+    }
+
+    private PlatformAuthService.Principal requirePrincipal(ServerHttpRequest request) {
+        PlatformAuthService.Principal current = principal(request);
+        if (current == null) {
+            throw new PlatformAuthService.AuthException(401, "请先登录");
+        }
+        return current;
     }
 }

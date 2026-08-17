@@ -83,11 +83,15 @@ public class AgentScopeHarnessFactory {
     }
 
     public HarnessAgent create(AgentDefinition definition) {
+        return create(definition, "", "");
+    }
+
+    public HarnessAgent create(AgentDefinition definition, String tenantId, String userId) {
         ensureWorkspace(definition);
         Toolkit toolkit = new Toolkit();
-        capabilityAssembler.applyToolsAndMcps(toolkit, definition);
+        capabilityAssembler.applyToolsAndMcps(toolkit, definition, tenantId, userId);
         List<AgentSkillRepository> skillRepositories =
-                capabilityAssembler.buildSkillRepositories(definition);
+                capabilityAssembler.buildSkillRepositories(definition, tenantId, userId);
         HarnessAgent.Builder builder =
                 HarnessAgent.builder()
                         .name(definition.name())

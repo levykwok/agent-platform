@@ -14,7 +14,6 @@ import io.agent.platform.control.WorkflowEndpoint;
 import io.agent.platform.control.WorkflowValidationResult;
 import io.agent.platform.control.WorkflowNode;
 import io.agent.platform.control.WorkflowNodeType;
-import io.agent.platform.control.WorkflowTransition;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -28,6 +27,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /** CRUD and lifecycle service for standalone Workflow assets. */
@@ -39,13 +39,23 @@ public class WorkflowAssetService {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final PlatformStorageLayer storage;
     private final AgentDefinitionRegistry agentRegistry;
+    private final PlatformAuthService auth;
     private final WorkflowContractValidator contractValidator = new WorkflowContractValidator();
     private final Map<String, WorkflowAsset> workflows = new ConcurrentHashMap<>();
 
     public WorkflowAssetService(
             PlatformStorageLayer storage, AgentDefinitionRegistry agentRegistry) {
+        this(storage, agentRegistry, null);
+    }
+
+    @Autowired
+    public WorkflowAssetService(
+            PlatformStorageLayer storage,
+            AgentDefinitionRegistry agentRegistry,
+            PlatformAuthService auth) {
         this.storage = storage;
         this.agentRegistry = agentRegistry;
+        this.auth = auth;
         if (storage.isSqliteEnabled()) {
             storage.initializeSqliteSchema(
                     "CREATE TABLE IF NOT EXISTS "
@@ -64,7 +74,13 @@ public class WorkflowAssetService {
     }
 
     public List<Map<String, Object>> list(String domain, String status) {
+        return list(domain, status, null);
+    }
+
+    public List<Map<String, Object>> list(
+            String domain, String status, PlatformAuthService.Principal principal) {
         return workflows.values().stream()
+                .filter(asset -> principal == null || canRead(asset, principal))
                 .filter(asset -> domain == null || domain.isBlank() || domain.equals(asset.domain()))
                 .filter(
                         asset ->
@@ -77,7 +93,14 @@ public class WorkflowAssetService {
     }
 
     public Map<String, Object> get(String workflowId) {
-        return toMap(require(workflowId));
+        return get(workflowId, null);
+    }
+
+    public Map<String, Object> get(
+            String workflowId, PlatformAuthService.Principal principal) {
+        WorkflowAsset asset = require(workflowId);
+        requireReadable(asset, principal);
+        return toMap(asset);
     }
 
     public WorkflowAsset require(String workflowId) {
@@ -89,7 +112,13 @@ public class WorkflowAssetService {
     }
 
     public WorkflowAsset requirePublished(String workflowId) {
+        return requirePublished(workflowId, null);
+    }
+
+    public WorkflowAsset requirePublished(
+            String workflowId, PlatformAuthService.Principal principal) {
         WorkflowAsset asset = require(workflowId);
+        requireReadable(asset, principal);
         if (!"PUBLISHED".equals(asset.status())) {
             throw new IllegalArgumentException("Workflow is not published: " + workflowId);
         }
@@ -97,30 +126,59 @@ public class WorkflowAssetService {
     }
 
     public WorkflowValidationResult validateContracts(String workflowId) {
-        return contractValidator.validate(require(workflowId));
+        return validateContracts(workflowId, (PlatformAuthService.Principal) null);
+    }
+
+    public WorkflowValidationResult validateContracts(
+            String workflowId, PlatformAuthService.Principal principal) {
+        WorkflowAsset asset = require(workflowId);
+        requireReadable(asset, principal);
+        return contractValidator.validate(asset);
     }
 
     public WorkflowValidationResult validateContracts(
             String workflowId, Map<String, Object> payload) {
+        return validateContracts(workflowId, payload, null);
+    }
+
+    public WorkflowValidationResult validateContracts(
+            String workflowId,
+            Map<String, Object> payload,
+            PlatformAuthService.Principal principal) {
         WorkflowAsset existing = require(workflowId);
+        requireReadable(existing, principal);
         return contractValidator.validate(
-                normalize(workflowId, payload == null ? Map.of() : payload, existing));
+                normalize(workflowId, payload == null ? Map.of() : payload, existing, principal));
     }
 
     public synchronized Map<String, Object> create(Map<String, Object> payload) {
+        return create(payload, null);
+    }
+
+    public synchronized Map<String, Object> create(
+            Map<String, Object> payload, PlatformAuthService.Principal principal) {
         String workflowId = workflowId(payload, "workflow_" + UUID.randomUUID().toString().replace("-", ""));
         if (workflows.containsKey(workflowId)) {
             throw new IllegalArgumentException("Workflow already exists: " + workflowId);
         }
-        return save(workflowId, payload);
+        return save(workflowId, payload, principal);
     }
 
     public synchronized Map<String, Object> save(String workflowId, Map<String, Object> payload) {
+        return save(workflowId, payload, null);
+    }
+
+    public synchronized Map<String, Object> save(
+            String workflowId,
+            Map<String, Object> payload,
+            PlatformAuthService.Principal principal) {
         if (workflowId == null || workflowId.isBlank()) {
             throw new IllegalArgumentException("workflow_id is required");
         }
         WorkflowAsset existing = workflows.get(workflowId);
-        WorkflowAsset asset = normalize(workflowId, payload == null ? Map.of() : payload, existing);
+        if (existing != null) requireWritable(existing, principal);
+        WorkflowAsset asset =
+                normalize(workflowId, payload == null ? Map.of() : payload, existing, principal);
         validate(asset, false);
         workflows.put(workflowId, asset);
         persist(asset);
@@ -128,7 +186,13 @@ public class WorkflowAssetService {
     }
 
     public synchronized Map<String, Object> publish(String workflowId) {
+        return publish(workflowId, null);
+    }
+
+    public synchronized Map<String, Object> publish(
+            String workflowId, PlatformAuthService.Principal principal) {
         WorkflowAsset existing = require(workflowId);
+        requireWritable(existing, principal);
         validate(existing, true);
         WorkflowAsset published =
                 new WorkflowAsset(
@@ -145,7 +209,12 @@ public class WorkflowAssetService {
                         existing.edges(),
                         existing.createdAt(),
                         Instant.now().toString(),
-                        Instant.now().toString());
+                        Instant.now().toString(),
+                        existing.ownerType(),
+                        existing.ownerId(),
+                        existing.orgId(),
+                        existing.createdBy(),
+                        existing.visibility());
         workflows.put(workflowId, published);
         try {
             validateWorkflowCycles();
@@ -158,7 +227,13 @@ public class WorkflowAssetService {
     }
 
     public synchronized Map<String, Object> unpublish(String workflowId) {
+        return unpublish(workflowId, null);
+    }
+
+    public synchronized Map<String, Object> unpublish(
+            String workflowId, PlatformAuthService.Principal principal) {
         WorkflowAsset existing = require(workflowId);
+        requireWritable(existing, principal);
         WorkflowAsset draft =
                 new WorkflowAsset(
                         existing.workflowId(),
@@ -174,14 +249,24 @@ public class WorkflowAssetService {
                         existing.edges(),
                         existing.createdAt(),
                         Instant.now().toString(),
-                        existing.publishedAt());
+                        existing.publishedAt(),
+                        existing.ownerType(),
+                        existing.ownerId(),
+                        existing.orgId(),
+                        existing.createdBy(),
+                        existing.visibility());
         workflows.put(workflowId, draft);
         persist(draft);
         return toMap(draft);
     }
 
     public synchronized void delete(String workflowId) {
-        require(workflowId);
+        delete(workflowId, null);
+    }
+
+    public synchronized void delete(
+            String workflowId, PlatformAuthService.Principal principal) {
+        requireWritable(require(workflowId), principal);
         workflows.remove(workflowId);
         if (storage.isSqliteEnabled()) {
             try (Connection connection = storage.connection();
@@ -199,7 +284,10 @@ public class WorkflowAssetService {
     }
 
     private WorkflowAsset normalize(
-            String workflowId, Map<String, Object> payload, WorkflowAsset existing) {
+            String workflowId,
+            Map<String, Object> payload,
+            WorkflowAsset existing,
+            PlatformAuthService.Principal principal) {
         String now = Instant.now().toString();
         List<WorkflowNode> nodes = nodes(payload.get("nodes"));
         List<WorkflowEdge> edges = edges(payload.get("edges"));
@@ -229,7 +317,12 @@ public class WorkflowAssetService {
                         : edges,
                 existing == null ? now : existing.createdAt(),
                 now,
-                existing == null ? "" : existing.publishedAt());
+                existing == null ? "" : existing.publishedAt(),
+                existing == null ? ownerType(principal) : existing.ownerType(),
+                existing == null ? ownerId(principal) : existing.ownerId(),
+                existing == null ? orgId(principal) : existing.orgId(),
+                existing == null ? createdBy(principal) : existing.createdBy(),
+                existing == null ? visibility(principal, payload) : existing.visibility());
     }
 
     private Map<String, Object> boundarySchema(
@@ -266,21 +359,6 @@ public class WorkflowAssetService {
                 if (agentRegistry.findPublished(node.refId()).isEmpty()) {
                     throw new IllegalArgumentException("Agent not found: " + node.refId());
                 }
-                agentRegistry
-                        .findPublished(node.refId())
-                        .filter(
-                                agent ->
-                                        agent.toolRefs().contains(
-                                                "workflow:" + asset.workflowId()))
-                        .ifPresent(
-                                agent ->
-                                        { throw new IllegalArgumentException(
-                                                "Workflow cycle detected: "
-                                                        + asset.workflowId()
-                                                        + " -> agent:"
-                                                        + agent.agentId()
-                                                        + " -> workflow:"
-                                                        + asset.workflowId()); });
             }
             if (publishing && node.type() == WorkflowNodeType.SUBFLOW_INVOKE) {
                 if (node.refId() == null || node.refId().isBlank()) {
@@ -297,25 +375,37 @@ public class WorkflowAssetService {
                     throw new IllegalArgumentException("HTTP node requires config.url: " + node.nodeId());
                 }
             }
-            for (WorkflowTransition transition : node.transitions()) {
-                Integer target = indexes.get(transition.nextStepId());
-                if (target == null) {
-                    if (publishing) {
-                        throw new IllegalArgumentException(
-                                "Transition target not found: " + transition.nextStepId());
-                    }
-                    continue;
-                }
-                if (target <= i) {
-                    throw new IllegalArgumentException(
-                            "Workflow transitions must move forward: " + node.nodeId());
-                }
-            }
         }
         if (publishing && asset.nodes().isEmpty()) {
             throw new IllegalArgumentException("A published workflow requires at least one node");
         }
         if (publishing) {
+            long inputCount = asset.nodes().stream().filter(node -> node.type() == WorkflowNodeType.INPUT).count();
+            long outputCount = asset.nodes().stream().filter(node -> node.type() == WorkflowNodeType.OUTPUT).count();
+            if (inputCount != 1 || outputCount != 1) {
+                throw new IllegalArgumentException(
+                        "A published workflow requires exactly one workflow.input and one workflow.output node");
+            }
+            String inputNodeId = asset.nodes().stream()
+                    .filter(node -> node.type() == WorkflowNodeType.INPUT)
+                    .map(WorkflowNode::nodeId)
+                    .findFirst()
+                    .orElse("");
+            String outputNodeId = asset.nodes().stream()
+                    .filter(node -> node.type() == WorkflowNodeType.OUTPUT)
+                    .map(WorkflowNode::nodeId)
+                    .findFirst()
+                    .orElse("");
+            boolean inputConnected = asset.edges().stream()
+                    .anyMatch(edge -> edge != null && edge.from() != null
+                            && inputNodeId.equals(edge.from().nodeId()));
+            boolean outputConnected = asset.edges().stream()
+                    .anyMatch(edge -> edge != null && edge.to() != null
+                            && outputNodeId.equals(edge.to().nodeId()));
+            if (!inputConnected || !outputConnected) {
+                throw new IllegalArgumentException(
+                        "Published workflow boundaries must be connected by explicit edges");
+            }
             WorkflowValidationResult contracts = contractValidator.validate(asset);
             if (!contracts.valid()) {
                 String message =
@@ -379,8 +469,27 @@ public class WorkflowAssetService {
                 .map(Map.class::cast)
                 .map(
                         raw -> {
+                            // The canvas keeps its layout position outside the runtime node
+                            // model. Accept that UI shape on create as well as the persisted
+                            // config.canvas_position shape used by later saves.
+                            Map<String, Object> normalized = new LinkedHashMap<>();
+                            raw.forEach((key, item) -> normalized.put(String.valueOf(key), item));
+                            Object position = normalized.remove("position");
+                            Object canvasPosition = normalized.remove("canvas_position");
+                            if (position != null || canvasPosition != null) {
+                                Map<String, Object> config =
+                                        objectMap(normalized.get("config"), new LinkedHashMap<>());
+                                if (!config.containsKey("canvas_position")) {
+                                    config.put(
+                                            "canvas_position",
+                                            objectMap(
+                                                    position == null ? canvasPosition : position,
+                                                    Map.of()));
+                                }
+                                normalized.put("config", config);
+                            }
                             try {
-                                return objectMapper.convertValue(raw, WorkflowNode.class);
+                                return objectMapper.convertValue(normalized, WorkflowNode.class);
                             } catch (IllegalArgumentException e) {
                                 throw new IllegalArgumentException("Invalid workflow node", e);
                             }
@@ -522,7 +631,74 @@ public class WorkflowAssetService {
                 edges(map.get("edges")),
                 string(map, "created_at", ""),
                 string(map, "updated_at", ""),
-                string(map, "published_at", ""));
+                string(map, "published_at", ""),
+                string(map, "owner_type", "SYSTEM"),
+                string(map, "owner_id", "platform"),
+                string(map, "org_id", "platform"),
+                string(map, "created_by", "platform_admin"),
+                string(map, "visibility", "PUBLIC"));
+    }
+
+    private boolean canRead(WorkflowAsset asset, PlatformAuthService.Principal principal) {
+        if (principal == null) return false;
+        if ("PLATFORM_ADMIN".equals(principal.role())) return true;
+        if ("PUBLIC".equals(asset.visibility())) return true;
+        if ("ORGANIZATION".equals(asset.visibility())
+                && asset.orgId().equals(principal.orgId())) return true;
+        return "PRIVATE".equals(asset.visibility()) && asset.ownerId().equals(principal.userId());
+    }
+
+    private boolean canWrite(WorkflowAsset asset, PlatformAuthService.Principal principal) {
+        if (principal == null) return false;
+        if ("PLATFORM_ADMIN".equals(principal.role())) return true;
+        if ("ORGANIZATION".equals(asset.ownerType())
+                && "ORG_ADMIN".equals(principal.role())
+                && asset.orgId().equals(principal.orgId())) return true;
+        return asset.ownerId().equals(principal.userId());
+    }
+
+    private void requireReadable(WorkflowAsset asset, PlatformAuthService.Principal principal) {
+        // A null principal is retained for internal runtime callers and legacy tests.
+        // HTTP controllers must resolve and require a session before calling this service.
+        if (principal == null) return;
+        if (!canRead(asset, principal)) {
+            throw new PlatformAuthService.AuthException(404, "Workflow 不存在");
+        }
+    }
+
+    private void requireWritable(WorkflowAsset asset, PlatformAuthService.Principal principal) {
+        // A null principal is the explicit compatibility path for internal runtime calls.
+        if (principal == null) return;
+        if (!canWrite(asset, principal)) {
+            throw new PlatformAuthService.AuthException(403, "没有权限修改该 Workflow");
+        }
+    }
+
+    private String ownerType(PlatformAuthService.Principal principal) {
+        return principal == null ? "SYSTEM" : "USER";
+    }
+
+    private String ownerId(PlatformAuthService.Principal principal) {
+        return principal == null ? "platform" : principal.userId();
+    }
+
+    private String orgId(PlatformAuthService.Principal principal) {
+        return principal == null ? "platform" : principal.orgId();
+    }
+
+    private String createdBy(PlatformAuthService.Principal principal) {
+        return principal == null ? "platform_admin" : principal.userId();
+    }
+
+    private String visibility(
+            PlatformAuthService.Principal principal, Map<String, Object> payload) {
+        if (principal == null) return "PUBLIC";
+        String requested = string(payload, "visibility", "PRIVATE").toUpperCase();
+        if ("PUBLIC".equals(requested)
+                && !"PLATFORM_ADMIN".equals(principal.role())) return "PRIVATE";
+        if ("ORGANIZATION".equals(requested)
+                && !List.of("PLATFORM_ADMIN", "ORG_ADMIN").contains(principal.role())) return "PRIVATE";
+        return List.of("PRIVATE", "ORGANIZATION", "PUBLIC").contains(requested) ? requested : "PRIVATE";
     }
 
     private Map<String, Object> mapFromJson(String json) {
@@ -560,7 +736,7 @@ public class WorkflowAssetService {
 
     private Map<String, Object> objectMap(Object value, Map<String, Object> fallback) {
         if (!(value instanceof Map<?, ?> raw)) {
-            return fallback;
+            return new LinkedHashMap<>(fallback);
         }
         Map<String, Object> result = new LinkedHashMap<>();
         raw.forEach((key, item) -> result.put(String.valueOf(key), item));

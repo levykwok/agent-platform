@@ -16,6 +16,8 @@ import io.agent.platform.control.AgentDefinitionRegistry;
 import io.agent.platform.control.OrchestrationMode;
 import io.agent.platform.control.OrchestrationPolicy;
 import io.agent.platform.control.WorkflowAsset;
+import io.agent.platform.control.WorkflowEdge;
+import io.agent.platform.control.WorkflowEndpoint;
 import io.agent.platform.control.WorkflowNode;
 import io.agent.platform.control.WorkflowNodeType;
 import io.agent.platform.web.PlatformCompatibilityState;
@@ -84,7 +86,9 @@ class GenericWorkflowNodeRuntimeTest {
                                             5000L,
                                             0,
                                             null,
+                                            List.of(),
                                             List.of())),
+                            List.of(),
                             "now",
                             "now",
                             "now");
@@ -126,57 +130,38 @@ class GenericWorkflowNodeRuntimeTest {
                     .when(writer)
                     .call(any(UserMessage.class), any(RuntimeContext.class));
             AgentDefinition writerDefinition = definition("writer", OrchestrationPolicy.single());
-            AgentDefinition flowDefinition =
-                    definition(
-                            "order-flow",
-                            new OrchestrationPolicy(
-                                    OrchestrationMode.WORKFLOW,
-                                    List.of(),
-                                    List.of(),
-                                    List.of(),
-                                    List.of(
-                                            new WorkflowNode(
-                                                    "query",
-                                                    WorkflowNodeType.HTTP_REQUEST,
-                                                    "",
-                                                    "",
-                                                    Map.of(
-                                                            "url",
-                                                            "http://127.0.0.1:"
-                                                                    + server.getAddress().getPort()
-                                                                    + "/orders",
-                                                            "method",
-                                                            "POST",
-                                                            "body",
-                                                            "{\"query\":\"{{input}}\"}"),
-                                                    Map.of(),
-                                                    Map.of(),
-                                                    5000L,
-                                                    0,
-                                                    null,
-                                                    List.of()),
-                                            new WorkflowNode(
-                                                    "write",
-                                                    WorkflowNodeType.AGENT_INVOKE,
-                                                    "writer",
-                                                    "Write the result",
-                                                    null,
-                                                    0,
-                                                    null,
-                                                    List.of()))));
+            WorkflowAsset asset =
+                    new WorkflowAsset(
+                            "order-flow", 1, "Order flow", "", "platform", "manual", "PUBLISHED",
+                            Map.of(), Map.of(),
+                            List.of(
+                                    new WorkflowNode(
+                                            "query", WorkflowNodeType.HTTP_REQUEST, "", "", Map.of(
+                                                    "url", "http://127.0.0.1:" + server.getAddress().getPort() + "/orders",
+                                                    "method", "POST", "body", "{\"query\":\"{{input}}\"}"),
+                                            Map.of(), Map.of(), 5000L, 0, null, List.of(), List.of()),
+                                    new WorkflowNode(
+                                            "write", WorkflowNodeType.AGENT_INVOKE, "writer", "Write the result",
+                                            Map.of(), Map.of(), Map.of(), null, 0, null, List.of(), List.of())),
+                            List.of(new WorkflowEdge(
+                                    "query-write",
+                                    new WorkflowEndpoint("query", "value"),
+                                    new WorkflowEndpoint("write", "value"),
+                                    "data", Map.of())),
+                            "now", "now", "now");
             when(registry.findPublished(anyString()))
                     .thenAnswer(
                             invocation -> {
                                 String id = invocation.getArgument(0);
                                 return Optional.ofNullable(
-                                        "writer".equals(id) ? writerDefinition : flowDefinition);
+                                        "writer".equals(id) ? writerDefinition : null);
                             });
             when(factory.create(any(AgentDefinition.class))).thenReturn(writer);
 
             AgentRuntimeService runtime =
                     new AgentRuntimeService(registry, factory, platformState);
 
-            assertEquals("final answer", runtime.chat("order-flow", new ChatRequest("t", "u", "s", "10086")).block().text());
+            assertEquals("final answer", runtime.workflow(asset, new ChatRequest("t", "u", "s", "10086")).block().text());
         } finally {
             server.stop(0);
         }

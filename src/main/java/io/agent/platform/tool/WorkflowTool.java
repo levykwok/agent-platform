@@ -5,6 +5,7 @@ package io.agent.platform.tool;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agent.platform.control.WorkflowAsset;
+import io.agent.platform.control.WorkflowToolRegistration;
 import io.agent.platform.runtime.AgentRuntime;
 import io.agent.platform.runtime.ChatRequest;
 import io.agentscope.core.message.ToolResultBlock;
@@ -20,29 +21,23 @@ public final class WorkflowTool extends ToolBase {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final WorkflowAsset workflow;
+    private final WorkflowToolRegistration registration;
     private final AgentRuntime runtime;
 
-    public WorkflowTool(WorkflowAsset workflow, AgentRuntime runtime) {
+    public WorkflowTool(WorkflowAsset workflow, WorkflowToolRegistration registration, AgentRuntime runtime) {
         super(
                 ToolBase.builder()
-                        .name(toolName(workflow))
+                        .name(registration.name())
                         .description(
-                                workflow.description().isBlank()
+                                registration.description().isBlank()
                                         ? workflow.name()
-                                        : workflow.description())
-                        .inputSchema(normalizeSchema(workflow.inputSchema()))
+                                        : registration.description())
+                        .inputSchema(normalizeSchema(registration.inputSchema()))
                         .readOnly(false)
                         .concurrencySafe(false));
         this.workflow = workflow;
+        this.registration = registration;
         this.runtime = runtime;
-    }
-
-    public static String ref(String workflowId) {
-        return "workflow:" + workflowId;
-    }
-
-    public static String toolName(WorkflowAsset workflow) {
-        return "workflow_" + workflow.workflowId();
     }
 
     @Override
