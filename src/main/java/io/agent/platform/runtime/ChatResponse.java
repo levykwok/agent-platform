@@ -3,4 +3,16 @@
  */
 package io.agent.platform.runtime;
 
-public record ChatResponse(String agentId, String userId, String sessionId, String text) {}
+import io.agent.platform.runtime.protocol.AgentTaskEnvelope;
+
+public record ChatResponse(
+        String agentId,
+        String userId,
+        String sessionId,
+        String text,
+        AgentTaskEnvelope task) {
+
+    public ChatResponse(String agentId, String userId, String sessionId, String text) {
+        this(agentId, userId, sessionId, text, null);
+    }
+}

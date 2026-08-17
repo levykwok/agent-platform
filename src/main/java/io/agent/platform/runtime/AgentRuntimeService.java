@@ -22,9 +22,11 @@ import io.agent.platform.control.WorkflowTransition;
 import io.agent.platform.control.WorkflowValueValidationResult;
 import io.agent.platform.control.WorkflowValueValidator;
 import io.agent.platform.runtime.protocol.TaskContext;
+import io.agent.platform.runtime.protocol.AgentTaskEnvelope;
 import io.agent.platform.runtime.protocol.TaskRequest;
 import io.agent.platform.runtime.protocol.TaskResult;
 import io.agent.platform.runtime.protocol.TaskStatus;
+import io.agent.platform.scheduled.ScheduledTaskCallContext;
 import io.agent.platform.web.PlatformCompatibilityState;
 import io.agent.platform.web.WorkflowAssetService;
 import io.agentscope.core.agent.RuntimeContext;
@@ -59,10 +61,16 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.HashSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.TimeoutException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -218,51 +226,43 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private Mono<ChatResponse> runSingle(AgentDefinition definition, ChatRequest request) {
         return runSingleTask(definition, request)
-                .map(result -> response(definition.agentId(), request, result.content()));
+                .map(
+                        execution ->
+                                response(
+                                        definition.agentId(),
+                                        request,
+                                        execution.message(),
+                                        execution.envelope()));
     }
 
-    private Mono<TaskResult> runSingleTask(AgentDefinition definition, ChatRequest request) {
+    private Mono<TaskExecution> runSingleTask(AgentDefinition definition, ChatRequest request) {
         RuntimeContext context = runtimeContext(request);
-        TaskRequest taskRequest =
-                new TaskRequest(
-                        request.taskContext().withTarget(definition.agentId()),
-                        Map.of("text", safe(request.message(), "")));
         return callAgent(definition, request, request.message(), context)
-                .map(
-                        msg ->
-                                new TaskResult(
-                                        taskRequest.context().taskId(),
-                                        TaskStatus.COMPLETED,
-                                        msg.getTextContent(),
-                                        Map.of(),
-                                        null,
-                                        Map.of()));
+                .map(execution -> execution);
     }
 
     private Mono<ChatResponse> runSupervisor(AgentDefinition definition, ChatRequest request) {
-        SubagentBinding binding = selectSubagent(definition, request.message());
-        if (binding == null) {
+        List<SubagentBinding> bindings = selectSubagents(definition, request.message());
+        if (bindings.isEmpty()) {
             return runSingle(definition, request);
         }
-        AgentDefinition target = definition(binding.targetAgentId());
-        return callAgent(
-                        target,
-                        request,
-                        subagentMessage(binding, request.message()),
-                        subagentContext(request, binding))
+        return runSubagents(definition, request, bindings)
                 .flatMap(
-                        subagentReply ->
-                                         callAgent(
-                                                 definition,
-                                                 request,
-                                                 supervisorSummaryMessage(
-                                                         definition,
-                                                         binding,
-                                                         target,
-                                                         request.message(),
-                                                         subagentReply),
-                                                 runtimeContext(request)))
-                .map(msg -> response(definition.agentId(), request, msg));
+                        replies ->
+                                callAgent(
+                                                definition,
+                                                request,
+                                                supervisorSummaryMessage(
+                                                        definition, request.message(), replies),
+                                                runtimeContext(request))
+                                        .map(
+                                                execution ->
+                                                        response(
+                                                                definition.agentId(),
+                                                                request,
+                                                                execution.message(),
+                                                                supervisorEnvelope(
+                                                                        execution.envelope(), replies))));
     }
 
     /** Executes the Agent-level ordered sequence. This is intentionally separate from the canvas graph. */
@@ -271,11 +271,23 @@ public class AgentRuntimeService implements AgentRuntime {
         if (steps.isEmpty()) {
             return Mono.error(new AgentRuntimeException("Workflow agent has no steps: " + definition.agentId()));
         }
+        Instant startedAt = Instant.now();
         return runWorkflowSteps(definition, request, steps, 0, request.message(), new java.util.HashSet<>())
-                .map(text -> response(definition.agentId(), request, text));
+                .map(
+                        execution ->
+                                response(
+                                        definition.agentId(),
+                                        request,
+                                        execution.text(),
+                                        completedEnvelope(
+                                                request,
+                                                definition.agentId(),
+                                                execution.text(),
+                                                startedAt,
+                                                Map.of("orchestration", "WORKFLOW", "steps", steps.size()))));
     }
 
-    private Mono<String> runWorkflowSteps(
+    private Mono<WorkflowStepExecution> runWorkflowSteps(
             AgentDefinition definition,
             ChatRequest request,
             List<WorkflowStep> steps,
@@ -283,22 +295,23 @@ public class AgentRuntimeService implements AgentRuntime {
             String input,
             java.util.Set<String> visited) {
         if (index >= steps.size()) {
-            return Mono.just(input);
+            return Mono.just(new WorkflowStepExecution(input, null));
         }
         WorkflowStep step = steps.get(index);
         if (!visited.add(step.stepId())) {
             return Mono.error(new AgentRuntimeException("Workflow cycle detected at step: " + step.stepId()));
         }
         return runWorkflowStep(step, request, input)
-                .flatMap(raw -> {
-                    WorkflowStepOutput output = WorkflowStepOutput.parse(raw);
+                .flatMap(
+                        execution -> {
+                    WorkflowStepOutput output = WorkflowStepOutput.parse(execution.text());
                     return runWorkflowSteps(
                             definition, request, steps, nextWorkflowIndex(steps, index, output.status()),
                             output.content(), visited);
                 });
     }
 
-    private Mono<String> runWorkflowStep(WorkflowStep step, ChatRequest request, String input) {
+    private Mono<WorkflowStepExecution> runWorkflowStep(WorkflowStep step, ChatRequest request, String input) {
         AgentDefinition target = definition(step.agentId());
         ChatRequest child =
                 new ChatRequest(
@@ -308,7 +321,19 @@ public class AgentRuntimeService implements AgentRuntime {
                         workflowStepMessage(step, input),
                         request.taskContext().child(request.taskContext().targetAgentId(), target.agentId(), step.stepId()),
                         request.images());
-        return withStepPolicy(step, input, executeDefinition(target, child).map(ChatResponse::text));
+        Mono<WorkflowStepExecution> guarded =
+                executeDefinition(target, child)
+                        .map(response -> new WorkflowStepExecution(response.text(), response.task()));
+        if (step.timeoutMs() != null) guarded = guarded.timeout(Duration.ofMillis(step.timeoutMs()));
+        if (step.maxRetries() > 0) {
+            guarded = guarded.retryWhen(Retry.fixedDelay(step.maxRetries(), Duration.ofMillis(100)));
+        }
+        return guarded.onErrorResume(
+                error ->
+                        switch (step.failurePolicy()) {
+                            case SKIP, USE_INPUT -> Mono.just(new WorkflowStepExecution(input, null));
+                            case FAIL_FAST -> Mono.error(error);
+                        });
     }
 
     static Mono<String> withStepPolicy(WorkflowStep step, String input, Mono<String> action) {
@@ -360,7 +385,7 @@ public class AgentRuntimeService implements AgentRuntime {
                 Flux.just(workflowEvent(step.agentId(), "workflow_step_start", "Start workflow step " + safe(step.stepId(), "step") + " -> " + step.agentId())),
                 workflowAgentSummaryEvents(step.agentId(), "start"),
                 runWorkflowStep(step, request, input).flatMapMany(raw -> {
-                    WorkflowStepOutput output = WorkflowStepOutput.parse(raw);
+                    WorkflowStepOutput output = WorkflowStepOutput.parse(raw.text());
                     return Flux.concat(
                             workflowAgentSummaryEvents(step.agentId(), "end"),
                             Flux.just(workflowEvent(step.agentId(), "workflow_step_end", "Finished workflow step " + safe(step.stepId(), "step") + " -> " + step.agentId())),
@@ -413,9 +438,23 @@ public class AgentRuntimeService implements AgentRuntime {
         String startNodeId = typedWorkflowStartNode(nodes, edges);
         WorkflowNode startNode = nodesById.get(startNodeId);
         Object initialData = workflowValueData(request.message(), startNode == null ? null : firstInputPort(startNode));
+        Instant startedAt = Instant.now();
         return runTypedWorkflowNode(workflow, request, nodesById, edges, startNodeId,
                         ContractValue.of("", initialData), new java.util.HashSet<>())
-                .map(value -> response("workflow:" + workflow.workflowId(), request, workflowValueText(value.data())));
+                .map(
+                        value -> {
+                            String text = workflowValueText(value.data());
+                            return response(
+                                    "workflow:" + workflow.workflowId(),
+                                    request,
+                                    text,
+                                    completedEnvelope(
+                                            request,
+                                            "workflow:" + workflow.workflowId(),
+                                            text,
+                                            startedAt,
+                                            Map.of("orchestration", "WORKFLOW", "workflow_id", workflow.workflowId())));
+                        });
     }
 
     private Mono<ContractValue> runTypedWorkflowNode(
@@ -429,6 +468,9 @@ public class AgentRuntimeService implements AgentRuntime {
         WorkflowNode node = nodesById.get(nodeId);
         if (node == null) return Mono.error(new AgentRuntimeException("Workflow node not found: " + nodeId));
         if (!visited.add(nodeId)) return Mono.error(new AgentRuntimeException("Workflow cycle detected at node: " + nodeId));
+        if (node.type() == WorkflowNodeType.PARALLEL) {
+            return runParallelWorkflowNode(workflow, request, nodesById, edges, node, input, visited);
+        }
         WorkflowPort inputPort = firstInputPort(node);
         if (inputPort != null) {
             WorkflowValueValidationResult validation = WORKFLOW_VALUE_VALIDATOR.validate(inputPort, input);
@@ -452,6 +494,183 @@ public class AgentRuntimeService implements AgentRuntime {
                     }
                     return runTypedWorkflowNode(workflow, request, nodesById, edges, next.to().nodeId(), mapped, visited);
                 });
+    }
+
+    /** Runs each branch of a PARALLEL node concurrently and supplies an ordered array to JOIN. */
+    private Mono<ContractValue> runParallelWorkflowNode(
+            WorkflowAsset workflow,
+            ChatRequest request,
+            Map<String, WorkflowNode> nodesById,
+            List<WorkflowEdge> edges,
+            WorkflowNode parallel,
+            ContractValue input,
+            Set<String> visited) {
+        WorkflowPort inputPort = firstInputPort(parallel);
+        if (inputPort != null) {
+            WorkflowValueValidationResult validation =
+                    WORKFLOW_VALUE_VALIDATOR.validate(inputPort, input);
+            if (!validation.valid()) {
+                return Mono.error(
+                        new AgentRuntimeException(
+                                "Workflow input validation failed at "
+                                        + parallel.nodeId()
+                                        + ": "
+                                        + String.join("; ", validation.errors())));
+            }
+        }
+        List<WorkflowEdge> branches =
+                outgoingWorkflowEdges(edges, parallel.nodeId()).stream()
+                        .filter(WorkflowEdge::data)
+                        .toList();
+        if (branches.isEmpty()) {
+            return Mono.error(new AgentRuntimeException("PARALLEL node has no branches: " + parallel.nodeId()));
+        }
+        List<Mono<BranchResult>> executions =
+                branches.stream()
+                        .map(
+                                edge ->
+                                        runWorkflowBranch(
+                                                workflow,
+                                                request,
+                                                nodesById,
+                                                edges,
+                                                parallel.nodeId(),
+                                                edge,
+                                                input,
+                                                new HashSet<>(visited)))
+                        .toList();
+        // mergeSequential subscribes to every branch eagerly (parallel execution) while keeping
+        // the declared edge order stable in the JOIN array.
+        return Flux.mergeSequential(executions)
+                .collectList()
+                .flatMap(
+                        results -> {
+                            if (results.isEmpty()) {
+                                return Mono.error(new AgentRuntimeException("PARALLEL node produced no branch result: " + parallel.nodeId()));
+                            }
+                            String joinNodeId = results.get(0).joinNodeId();
+                            if (results.stream().anyMatch(result -> !joinNodeId.equals(result.joinNodeId()))) {
+                                return Mono.error(new AgentRuntimeException("PARALLEL branches must converge on one JOIN node: " + parallel.nodeId()));
+                            }
+                            WorkflowNode join = nodesById.get(joinNodeId);
+                            if (join == null || join.type() != WorkflowNodeType.JOIN) {
+                                return Mono.error(new AgentRuntimeException("PARALLEL branches must end at JOIN: " + joinNodeId));
+                            }
+                            WorkflowPort joinPort = firstInputPort(join);
+                            List<Object> values = results.stream().map(result -> result.value().data()).toList();
+                            ContractValue joined =
+                                    new ContractValue(
+                                            joinPort == null ? "" : joinPort.contractRef(),
+                                            values,
+                                            Map.of("source_node", parallel.nodeId(), "parallel", true));
+                            Set<String> nextVisited = new HashSet<>(visited);
+                            return runTypedWorkflowNode(
+                                    workflow,
+                                    request,
+                                    nodesById,
+                                    edges,
+                                    joinNodeId,
+                                    joined,
+                                    nextVisited);
+                        });
+    }
+
+    private Mono<BranchResult> runWorkflowBranch(
+            WorkflowAsset workflow,
+            ChatRequest request,
+            Map<String, WorkflowNode> nodesById,
+            List<WorkflowEdge> edges,
+            String sourceNodeId,
+            WorkflowEdge firstEdge,
+            ContractValue input,
+            Set<String> visited) {
+        WorkflowNode source = nodesById.get(sourceNodeId);
+        WorkflowNode target = nodesById.get(firstEdge.to().nodeId());
+        if (target == null) {
+            return Mono.error(new AgentRuntimeException("Workflow edge target not found: " + firstEdge.to().nodeId()));
+        }
+        WorkflowPort sourcePort = findPort(source.outputPorts(), firstEdge.from().portId());
+        ContractValue sourceValue =
+                new ContractValue(
+                        sourcePort == null ? "" : sourcePort.contractRef(),
+                        input == null ? null : input.data(),
+                        Map.of("source_node", sourceNodeId));
+        WorkflowPort targetPort = findPort(target.inputPorts(), firstEdge.to().portId());
+        ContractValue mapped =
+                WORKFLOW_BINDING_RESOLVER.resolve(
+                        sourceValue,
+                        targetPort == null ? "" : targetPort.contractRef(),
+                        firstEdge.binding(),
+                        sourceNodeId);
+        return runWorkflowBranchNode(
+                workflow, request, nodesById, edges, target.nodeId(), mapped, visited);
+    }
+
+    private Mono<BranchResult> runWorkflowBranchNode(
+            WorkflowAsset workflow,
+            ChatRequest request,
+            Map<String, WorkflowNode> nodesById,
+            List<WorkflowEdge> edges,
+            String nodeId,
+            ContractValue input,
+            Set<String> visited) {
+        WorkflowNode node = nodesById.get(nodeId);
+        if (node == null) return Mono.error(new AgentRuntimeException("Workflow node not found: " + nodeId));
+        if (node.type() == WorkflowNodeType.JOIN) {
+            WorkflowPort inputPort = firstInputPort(node);
+            if (inputPort != null) {
+                WorkflowValueValidationResult validation =
+                        WORKFLOW_VALUE_VALIDATOR.validate(inputPort, input);
+                if (!validation.valid()) {
+                    return Mono.error(
+                            new AgentRuntimeException(
+                                    "Workflow JOIN validation failed at "
+                                            + nodeId
+                                            + ": "
+                                            + String.join("; ", validation.errors())));
+                }
+            }
+            return Mono.just(new BranchResult(nodeId, input));
+        }
+        if (!visited.add(nodeId)) return Mono.error(new AgentRuntimeException("Workflow cycle detected at node: " + nodeId));
+        WorkflowPort inputPort = firstInputPort(node);
+        if (inputPort != null) {
+            WorkflowValueValidationResult validation = WORKFLOW_VALUE_VALIDATOR.validate(inputPort, input);
+            if (!validation.valid()) return Mono.error(new AgentRuntimeException("Workflow input validation failed at " + nodeId + ": " + String.join("; ", validation.errors())));
+        }
+        return runWorkflowNode(node, request, workflowValueText(input == null ? null : input.data()))
+                .flatMap(
+                        rawOutput -> {
+                            WorkflowStepOutput parsed = WorkflowStepOutput.parse(rawOutput);
+                            List<WorkflowEdge> outgoing = outgoingWorkflowEdges(edges, nodeId);
+                            WorkflowEdge next = chooseTypedEdge(outgoing, parsed.content());
+                            if (next == null) {
+                                return Mono.error(new AgentRuntimeException("PARALLEL branch does not converge on JOIN: " + nodeId));
+                            }
+                            WorkflowNode target = nodesById.get(next.to().nodeId());
+                            if (target == null) return Mono.error(new AgentRuntimeException("Workflow edge target not found: " + next.to().nodeId()));
+                            WorkflowPort outputPort = findPort(node.outputPorts(), next.from().portId());
+                            ContractValue output =
+                                    new ContractValue(
+                                            outputPort == null ? "" : outputPort.contractRef(),
+                                            workflowValueData(parsed.content(), outputPort),
+                                            Map.of("source_node", nodeId));
+                            WorkflowPort targetPort = findPort(target.inputPorts(), next.to().portId());
+                            ContractValue mapped =
+                                    WORKFLOW_BINDING_RESOLVER.resolve(
+                                            output,
+                                            targetPort == null ? "" : targetPort.contractRef(),
+                                            next.binding(),
+                                            nodeId);
+                            return runWorkflowBranchNode(
+                                    workflow, request, nodesById, edges, target.nodeId(), mapped, visited);
+                        });
+    }
+
+    private static List<WorkflowEdge> outgoingWorkflowEdges(List<WorkflowEdge> edges, String nodeId) {
+        return edges.stream()
+                .filter(edge -> edge != null && edge.from() != null && nodeId.equals(edge.from().nodeId()))
+                .toList();
     }
 
     private WorkflowEdge chooseTypedEdge(List<WorkflowEdge> outgoing, String content) {
@@ -507,7 +726,7 @@ public class AgentRuntimeService implements AgentRuntime {
             WorkflowNode node, ChatRequest request, String input) {
         Mono<String> action =
                 switch (node.type()) {
-                    case INPUT, OUTPUT -> Mono.just(input);
+                    case INPUT, OUTPUT, JOIN -> Mono.just(input);
                     case AGENT_INVOKE, REACT_AGENT -> runReferencedAgentNode(node, request, input);
                     case SUBFLOW_INVOKE -> runReferencedWorkflowNode(node, request, input);
                     case LLM_CHAT -> runLlmNode(node, request, input);
@@ -687,8 +906,8 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private Flux<AgentEventEnvelope> streamSupervisor(
             AgentDefinition definition, ChatRequest request) {
-        SubagentBinding binding = selectSubagent(definition, request.message());
-        if (binding == null) {
+        List<SubagentBinding> bindings = selectSubagents(definition, request.message());
+        if (bindings.isEmpty()) {
             return Flux.concat(
                     Flux.just(supervisorEvent(definition)),
                     capabilityEvents(definition, request.tenantId(), request.userId()),
@@ -701,45 +920,48 @@ public class AgentRuntimeService implements AgentRuntime {
                             request.tenantId(),
                             request.userId()));
         }
-        AgentDefinition target = definition(binding.targetAgentId());
         return Flux.concat(
-                Flux.just(
-                        supervisorEvent(definition),
-                        supervisorSelectionEvent(definition, binding, target)),
-                capabilityEvents(target, request.tenantId(), request.userId()),
-                workflowAgentSummaryEvents(target.agentId(), "start"),
-                callAgent(
-                                target,
-                                request,
-                                subagentMessage(binding, request.message()),
-                                subagentContext(request, binding))
+                Flux.just(supervisorEvent(definition)),
+                Flux.fromIterable(bindings)
+                        .map(
+                                binding -> {
+                                    AgentDefinition target = definition(binding.targetAgentId());
+                                    return supervisorSelectionEvent(definition, binding, target);
+                                }),
+                runSubagents(definition, request, bindings)
                         .flatMapMany(
-                                subagentReply ->
-                                        Flux.concat(
-                                                workflowAgentSummaryEvents(target.agentId(), "end"),
-                                                Flux.just(
-                                                        subagentResultEvent(
-                                                                definition,
-                                                                binding,
-                                                                target,
-                                                                subagentReply)),
-                                                capabilityEvents(
-                                                        definition,
-                                                        request.tenantId(),
-                                                        request.userId()),
-                                                streamAgent(
-                                                        definition,
-                                                        supervisorSummaryMessage(
-                                                                definition,
-                                                                binding,
-                                                                target,
-                                                         request.message(),
-                                                         subagentReply),
-                                                         runtimeContext(request),
-                                                         request.taskContext(),
-                                                         request.images(),
-                                                         request.tenantId(),
-                                                         request.userId()))));
+                                replies -> {
+                                    Flux<AgentEventEnvelope> results =
+                                            Flux.fromIterable(replies)
+                                                    .flatMap(
+                                                            reply ->
+                                                                    Flux.concat(
+                                                                            workflowAgentSummaryEvents(
+                                                                                    reply.target().agentId(),
+                                                                                    "end"),
+                                                                            Flux.just(
+                                                                                    subagentResultEvent(
+                                                                                            definition,
+                                                                                            reply.binding(),
+                                                                                            reply.target(),
+                                                                                            reply.execution().message(),
+                                                                                            reply.execution().envelope()))));
+                                    return Flux.concat(
+                                            results,
+                                            capabilityEvents(
+                                                    definition,
+                                                    request.tenantId(),
+                                                    request.userId()),
+                                            streamAgent(
+                                                    definition,
+                                                    supervisorSummaryMessage(
+                                                            definition, request.message(), replies),
+                                                    runtimeContext(request),
+                                                    request.taskContext(),
+                                                    request.images(),
+                                                    request.tenantId(),
+                                                    request.userId()));
+                                }));
     }
 
     private Flux<AgentEventEnvelope> workflowAgentSummaryEvents(String agentId, String phase) {
@@ -784,17 +1006,16 @@ public class AgentRuntimeService implements AgentRuntime {
                         Map.of("agent_id", agentId, "workflow", true)));
     }
 
-    private SubagentBinding selectSubagent(AgentDefinition definition, String message) {
+    private List<SubagentBinding> selectSubagents(AgentDefinition definition, String message) {
         List<SubagentBinding> bindings = definition.orchestration().subagents();
         if (bindings.isEmpty()) {
-            return null;
+            return List.of();
         }
         if (bindings.size() == 1) {
-            return bindings.get(0);
+            return List.of(bindings.get(0));
         }
         String normalized = safe(message, "").toLowerCase();
-        SubagentBinding best = null;
-        int bestScore = 0;
+        List<ScoredSubagent> scored = new ArrayList<>();
         for (SubagentBinding binding : bindings) {
             AgentDefinition target = definition(binding.targetAgentId());
             int score =
@@ -803,12 +1024,17 @@ public class AgentRuntimeService implements AgentRuntime {
                             + matchScore(normalized, binding.description())
                             + matchScore(normalized, target.agentId())
                             + matchScore(normalized, target.name());
-            if (score > bestScore) {
-                bestScore = score;
-                best = binding;
-            }
+            scored.add(new ScoredSubagent(binding, score));
         }
-        return bestScore > 0 ? best : null;
+        List<SubagentBinding> matched =
+                scored.stream()
+                        .filter(item -> item.score() > 0)
+                        .sorted(Comparator.comparingInt(ScoredSubagent::score).reversed())
+                        .map(ScoredSubagent::binding)
+                        .toList();
+        // A supervisor with multiple bindings is an ensemble: when no lexical hint exists,
+        // ask every declared specialist instead of silently picking an arbitrary one.
+        return matched.isEmpty() ? bindings : matched;
     }
 
     private int matchScore(String normalizedMessage, String candidate) {
@@ -843,47 +1069,105 @@ public class AgentRuntimeService implements AgentRuntime {
         return message.toString();
     }
 
-    private String supervisorSummaryMessage(
+    private Mono<List<SubagentReply>> runSubagents(
             AgentDefinition supervisor,
-            SubagentBinding binding,
-            AgentDefinition target,
-            String userMessage,
-            Msg subagentReply) {
-        String text = subagentReply == null ? "" : safe(subagentReply.getTextContent(), "");
-        return """
-        You are the supervisor agent. A subagent has completed its part of the task.
-
-        User request:
-        %s
-
-        Subagent:
-        - binding_id: %s
-        - target_agent_id: %s
-        - role: %s
-        - description: %s
-
-        Subagent result:
-        %s
-
-        Produce the final answer for the user. Preserve useful details from the subagent, \
-        resolve contradictions if any, and do not mention internal orchestration unless it \
-        helps the user understand the result.
-        """
-                .formatted(
-                        safe(userMessage, ""),
-                        safe(binding.bindingId(), ""),
-                        safe(target.agentId(), supervisor.agentId()),
-                        safe(binding.role(), ""),
-                        safe(binding.description(), ""),
-                        text);
+            ChatRequest request,
+            List<SubagentBinding> bindings) {
+        List<Mono<SubagentReply>> calls =
+                bindings.stream()
+                        .map(
+                                binding -> {
+                                    AgentDefinition target = definition(binding.targetAgentId());
+                                    return callAgent(
+                                                    target,
+                                                    request,
+                                                    subagentMessage(binding, request.message()),
+                                                    subagentContext(request, binding))
+                                            .map(
+                                                    execution ->
+                                                            new SubagentReply(
+                                                                    binding, target, execution));
+                                })
+                        .toList();
+        return Flux.merge(calls).collectList();
     }
 
-    private Mono<Msg> callAgent(
+    private String supervisorSummaryMessage(
+            AgentDefinition supervisor, String userMessage, List<SubagentReply> replies) {
+        StringBuilder summary =
+                new StringBuilder(
+                        "You are the supervisor agent. Several specialists have completed their tasks.\n\n"
+                                + "User request:\n"
+                                + safe(userMessage, "")
+                                + "\n\n");
+        for (SubagentReply reply : replies) {
+            SubagentBinding binding = reply.binding();
+            AgentDefinition target = reply.target();
+            String text =
+                    reply.execution().message() == null
+                            ? ""
+                            : safe(reply.execution().message().getTextContent(), "");
+            summary.append("Subagent:\n");
+            summary.append("- binding_id: ").append(safe(binding.bindingId(), "")).append("\n");
+            summary.append("- target_agent_id: ")
+                    .append(safe(target.agentId(), supervisor.agentId()))
+                    .append("\n");
+            summary.append("- role: ").append(safe(binding.role(), "")).append("\n");
+            summary.append("- description: ")
+                    .append(safe(binding.description(), ""))
+                    .append("\n");
+            summary.append("- task_id: ")
+                    .append(reply.execution().envelope().taskId())
+                    .append("\n");
+            summary.append("- duration_ms: ")
+                    .append(reply.execution().envelope().durationMs())
+                    .append("\n");
+            summary.append("Subagent result:\n").append(text).append("\n\n");
+        }
+        summary.append(
+                "Produce the final answer for the user. Preserve useful details, resolve contradictions, "
+                        + "and do not mention internal orchestration unless it helps the user understand the result.");
+        return summary.toString();
+    }
+
+    private AgentTaskEnvelope supervisorEnvelope(
+            AgentTaskEnvelope supervisorTask, List<SubagentReply> replies) {
+        Map<String, Object> metadata = new LinkedHashMap<>(supervisorTask.metadata());
+        metadata.put("orchestration", "SUPERVISOR");
+        metadata.put("parallel", true);
+        metadata.put("child_call_count", replies.size());
+        metadata.put(
+                "child_tasks",
+                replies.stream()
+                        .map(
+                                reply ->
+                                        Map.of(
+                                                "task_id", reply.execution().envelope().taskId(),
+                                                "agent_id", reply.target().agentId(),
+                                                "duration_ms", reply.execution().envelope().durationMs()))
+                        .toList());
+        return new AgentTaskEnvelope(
+                supervisorTask.contractVersion(),
+                supervisorTask.request(),
+                supervisorTask.result(),
+                supervisorTask.startedAt(),
+                supervisorTask.finishedAt(),
+                metadata);
+    }
+
+    private Mono<TaskExecution> callAgent(
             AgentDefinition definition, String message, RuntimeContext context) {
-        return callAgent(definition, List.of(), message, context, "", "");
+        return callAgent(
+                definition,
+                List.of(),
+                message,
+                context,
+                "",
+                "",
+                TaskContext.root("", definition.agentId()));
     }
 
-    private Mono<Msg> callAgent(
+    private Mono<TaskExecution> callAgent(
             AgentDefinition definition,
             ChatRequest request,
             String message,
@@ -894,18 +1178,28 @@ public class AgentRuntimeService implements AgentRuntime {
                 message,
                 context,
                 request.tenantId(),
-                request.userId());
+                request.userId(),
+                request.taskContext().child(
+                        request.taskContext().sourceAgentId(), definition.agentId(),
+                        request.taskContext().stepId()));
     }
 
-    private Mono<Msg> callAgent(
+    private Mono<TaskExecution> callAgent(
             AgentDefinition definition,
             List<ChatImage> images,
             String message,
             RuntimeContext context,
             String tenantId,
-            String userId) {
+            String userId,
+            TaskContext taskContext) {
         String runId = UUID.randomUUID().toString();
-        return Mono.fromRunnable(
+        Instant startedAt = Instant.now();
+        TaskRequest taskRequest =
+                new TaskRequest(
+                        taskContext.withTarget(definition.agentId()),
+                        Map.of("text", safe(message, "")));
+        Mono<Msg> invocation =
+                Mono.fromRunnable(
                         () ->
                                 platformState.projectMemoriesToAgentWorkspace(
                                         definition, context.getUserId()))
@@ -919,15 +1213,81 @@ public class AgentRuntimeService implements AgentRuntime {
                                                         "Unable to create agent harness: "
                                                                 + definition.agentId()));
                                     }
-                                    Mono<Msg> result =
-                                            harness.call(userMessage(message, images), context);
+                                    ScheduledTaskCallContext.Scope scope =
+                                            ScheduledTaskCallContext.open(userId, tenantId);
+                                    Mono<Msg> result;
+                                    try {
+                                        result = harness.call(userMessage(message, images), context);
+                                    } catch (Throwable error) {
+                                        scope.close();
+                                        return Mono.error(error);
+                                    }
                                     return result == null
-                                            ? Mono.error(
-                                                    new AgentRuntimeException(
-                                                            "Agent harness returned no result: "
-                                                                    + definition.agentId()))
-                                            : result;
-                                }))
+                                            ? Mono.using(
+                                                    () -> scope,
+                                                    ignored ->
+                                                            Mono.error(
+                                                                    new AgentRuntimeException(
+                                                                            "Agent harness returned no result: "
+                                                                                    + definition.agentId())),
+                                                    ScheduledTaskCallContext.Scope::close)
+                                            : result.doFinally(signal -> scope.close());
+                                }));
+        Duration remaining = remaining(taskRequest.context().deadlineAt());
+        if (remaining != null) {
+            invocation = invocation.timeout(remaining);
+        }
+        return invocation
+                .map(
+                        msg -> {
+                            Instant finishedAt = Instant.now();
+                            TaskResult taskResult =
+                                    new TaskResult(
+                                            taskRequest.context().taskId(),
+                                            TaskStatus.COMPLETED,
+                                            msg.getTextContent(),
+                                            Map.of(),
+                                            null,
+                                            Map.of("duration_ms", Duration.between(startedAt, finishedAt).toMillis()));
+                            return new TaskExecution(
+                                    msg,
+                                    AgentTaskEnvelope.completed(
+                                            taskRequest,
+                                            taskResult,
+                                            startedAt,
+                                            finishedAt,
+                                            Map.of("agent_id", definition.agentId(), "tenant_id", safe(tenantId, ""), "user_id", safe(userId, ""))));
+                        })
+                .onErrorMap(
+                        error -> {
+                            if (error instanceof AgentTaskException) return error;
+                            Instant finishedAt = Instant.now();
+                            TaskStatus status = taskStatus(error);
+                            AgentTaskEnvelope task =
+                                    AgentTaskEnvelope.failed(
+                                            taskRequest,
+                                            status,
+                                            error,
+                                            startedAt,
+                                            finishedAt,
+                                            Map.of(
+                                                    "agent_id",
+                                                    definition.agentId(),
+                                                    "tenant_id",
+                                                    safe(tenantId, ""),
+                                                    "user_id",
+                                                    safe(userId, "")));
+                            return new AgentTaskException(
+                                    "Agent task "
+                                            + task.taskId()
+                                            + " failed for "
+                                            + definition.agentId()
+                                            + " ("
+                                            + status.name()
+                                            + ")",
+                                    task,
+                                    error);
+                        })
                 .doFinally(
                         signal ->
                                 platformState.importAgentWorkspaceMemories(
@@ -936,6 +1296,42 @@ public class AgentRuntimeService implements AgentRuntime {
                                         context.getSessionId(),
                                         runId))
                 .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private static Duration remaining(Instant deadlineAt) {
+        if (deadlineAt == null) return null;
+        long millis = Duration.between(Instant.now(), deadlineAt).toMillis();
+        return Duration.ofMillis(Math.max(1L, millis));
+    }
+
+    private static TaskStatus taskStatus(Throwable error) {
+        if (error instanceof TimeoutException) return TaskStatus.TIMEOUT;
+        if (error instanceof CancellationException) return TaskStatus.CANCELLED;
+        return TaskStatus.FAILED;
+    }
+
+    private AgentTaskEnvelope completedEnvelope(
+            ChatRequest request,
+            String targetAgentId,
+            String content,
+            Instant startedAt,
+            Map<String, Object> metadata) {
+        Instant finishedAt = Instant.now();
+        TaskRequest taskRequest =
+                new TaskRequest(
+                        request.taskContext().child(
+                                request.taskContext().sourceAgentId(), targetAgentId, "workflow"),
+                        Map.of("text", safe(content, "")));
+        TaskResult taskResult =
+                new TaskResult(
+                        taskRequest.context().taskId(),
+                        TaskStatus.COMPLETED,
+                        safe(content, ""),
+                        Map.of(),
+                        null,
+                        Map.of("duration_ms", Duration.between(startedAt, finishedAt).toMillis()));
+        return AgentTaskEnvelope.completed(
+                taskRequest, taskResult, startedAt, finishedAt, metadata);
     }
 
     private Flux<AgentEventEnvelope> streamAgent(
@@ -1088,8 +1484,19 @@ public class AgentRuntimeService implements AgentRuntime {
             AgentDefinition definition,
             SubagentBinding binding,
             AgentDefinition target,
-            Msg subagentReply) {
+            Msg subagentReply,
+            AgentTaskEnvelope task) {
         String text = subagentReply == null ? "" : safe(subagentReply.getTextContent(), "");
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("agent_id", definition.agentId());
+        payload.put("target_agent_id", target.agentId());
+        payload.put("binding_id", safe(binding.bindingId(), ""));
+        payload.put("result_preview", abbreviate(text, 500));
+        if (task != null) {
+            payload.put("task_id", task.taskId());
+            payload.put("duration_ms", task.durationMs());
+            payload.put("contract_version", task.contractVersion());
+        }
         return runtimeEvent(
                 definition.agentId(),
                 "supervisor_subagent_result",
@@ -1097,15 +1504,7 @@ public class AgentRuntimeService implements AgentRuntime {
                         + target.agentId()
                         + " completed"
                         + (text.isBlank() ? "" : ": " + abbreviate(text, 160)),
-                Map.of(
-                        "agent_id",
-                        definition.agentId(),
-                        "target_agent_id",
-                        target.agentId(),
-                        "binding_id",
-                        safe(binding.bindingId(), ""),
-                        "result_preview",
-                        abbreviate(text, 500)));
+                payload);
     }
 
     private AgentEventEnvelope routerEvent(AgentDefinition definition, RouteDecision decision) {
@@ -1180,6 +1579,17 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private record RouteDecision(AgentDefinition target, RouteRule rule) {}
 
+    private record TaskExecution(Msg message, AgentTaskEnvelope envelope) {}
+
+    private record ScoredSubagent(SubagentBinding binding, int score) {}
+
+    private record SubagentReply(
+            SubagentBinding binding, AgentDefinition target, TaskExecution execution) {}
+
+    private record BranchResult(String joinNodeId, ContractValue value) {}
+
+    private record WorkflowStepExecution(String text, AgentTaskEnvelope task) {}
+
     private AgentDefinition definition(String agentId) {
         AgentDefinition definition =
                 registry.findPublished(agentId)
@@ -1245,8 +1655,27 @@ public class AgentRuntimeService implements AgentRuntime {
         return response(agentId, request, msg == null ? "" : msg.getTextContent());
     }
 
+    private ChatResponse response(
+            String agentId, ChatRequest request, Msg msg, AgentTaskEnvelope task) {
+        return response(
+                agentId,
+                request,
+                msg == null ? "" : msg.getTextContent(),
+                task);
+    }
+
     private ChatResponse response(String agentId, ChatRequest request, String content) {
         return new ChatResponse(agentId, userKey(request), sessionKey(request), safe(content, ""));
+    }
+
+    private ChatResponse response(
+            String agentId, ChatRequest request, String content, AgentTaskEnvelope task) {
+        return new ChatResponse(
+                agentId,
+                userKey(request),
+                sessionKey(request),
+                safe(content, ""),
+                task);
     }
 
     private static UserMessage userMessage(String text, List<ChatImage> images) {

@@ -17,6 +17,13 @@ spring:
 server:
   port: 8080
 
+management:
+  health:
+    mail:
+      # SMTP is optional until outbound mail is configured; do not report the whole
+      # platform as unhealthy merely because the optional mail transport is absent.
+      enabled: ${AGENT_PLATFORM_MAIL_HEALTH_ENABLED:false}
+
 logging:
   level:
     io.modelcontextprotocol: WARN
@@ -74,6 +81,13 @@ agent:
       config: ${AGENT_PLATFORM_MCPS_CONFIG:file:${agent.platform.workspace}/mcps.yml}
     skills:
       config: ${AGENT_PLATFORM_SKILLS_CONFIG:file:${agent.platform.workspace}/skills.yml}
+    scheduled-tasks:
+      enabled: ${AGENT_PLATFORM_SCHEDULED_TASKS_ENABLED:true}
+      poll-ms: ${AGENT_PLATFORM_SCHEDULED_TASKS_POLL_MS:30000}
+      initial-delay-ms: ${AGENT_PLATFORM_SCHEDULED_TASKS_INITIAL_DELAY_MS:15000}
+      batch-size: ${AGENT_PLATFORM_SCHEDULED_TASKS_BATCH_SIZE:20}
+      lease-ms: ${AGENT_PLATFORM_SCHEDULED_TASKS_LEASE_MS:120000}
+      default-timezone: ${AGENT_PLATFORM_SCHEDULED_TASKS_TIMEZONE:}
     rag:
       # Qdrant is optional at runtime: when it is unavailable the platform keeps the
       # deterministic lexical retrieval path so document upload and chat stay usable.

@@ -1,1 +1,41 @@
-﻿tools: []
+tools:
+  - toolId: schedule_create
+    type: java
+    className: io.agent.platform.scheduled.ScheduledTaskTools
+    description: Create a recurring scheduled task for the current authenticated user.
+    enabled: true
+  - toolId: schedule_list
+    type: java
+    className: io.agent.platform.scheduled.ScheduledTaskTools
+    description: List scheduled tasks owned by the current authenticated user.
+    enabled: true
+  - toolId: schedule_get
+    type: java
+    className: io.agent.platform.scheduled.ScheduledTaskTools
+    description: Get a scheduled task owned by the current authenticated user.
+    enabled: true
+  - toolId: schedule_get_runs
+    type: java
+    className: io.agent.platform.scheduled.ScheduledTaskTools
+    description: List execution records for a scheduled task.
+    enabled: true
+  - toolId: schedule_pause
+    type: java
+    className: io.agent.platform.scheduled.ScheduledTaskTools
+    description: Pause a scheduled task.
+    enabled: true
+  - toolId: schedule_resume
+    type: java
+    className: io.agent.platform.scheduled.ScheduledTaskTools
+    description: Resume a paused scheduled task.
+    enabled: true
+  - toolId: schedule_delete
+    type: java
+    className: io.agent.platform.scheduled.ScheduledTaskTools
+    description: Delete a scheduled task.
+    enabled: true
+  - toolId: schedule_run_now
+    type: java
+    className: io.agent.platform.scheduled.ScheduledTaskTools
+    description: Run a scheduled task immediately.
+    enabled: true

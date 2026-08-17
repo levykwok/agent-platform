@@ -19,6 +19,7 @@ import io.agent.platform.web.PlatformUserCapabilityService;
 import io.agent.platform.web.WorkflowAssetService;
 import io.agent.platform.web.WorkflowToolRegistry;
 import io.agent.platform.tool.PythonScriptTool;
+import io.agent.platform.scheduled.ScheduledTaskTools;
 import io.agentscope.core.skill.repository.AgentSkillRepository;
 import io.agentscope.core.skill.repository.ClasspathSkillRepository;
 import io.agentscope.core.skill.repository.FileSystemSkillRepository;
@@ -55,6 +56,7 @@ public class AgentCapabilityAssembler {
     private final WorkflowToolRegistry workflowToolRegistry;
     private final ObjectProvider<AgentRuntime> runtimeProvider;
     private final PlatformUserCapabilityService userCapabilities;
+    private final ObjectProvider<ScheduledTaskTools> scheduledTaskToolsProvider;
 
     public AgentCapabilityAssembler(
             ToolRegistry toolRegistry,
@@ -65,7 +67,8 @@ public class AgentCapabilityAssembler {
             WorkflowAssetService workflowAssetService,
             WorkflowToolRegistry workflowToolRegistry,
             ObjectProvider<AgentRuntime> runtimeProvider,
-            PlatformUserCapabilityService userCapabilities) {
+            PlatformUserCapabilityService userCapabilities,
+            ObjectProvider<ScheduledTaskTools> scheduledTaskToolsProvider) {
         this.toolRegistry = toolRegistry;
         this.mcpRegistry = mcpRegistry;
         this.skillRegistry = skillRegistry;
@@ -75,6 +78,7 @@ public class AgentCapabilityAssembler {
         this.workflowToolRegistry = workflowToolRegistry;
         this.runtimeProvider = runtimeProvider;
         this.userCapabilities = userCapabilities;
+        this.scheduledTaskToolsProvider = scheduledTaskToolsProvider;
     }
 
     public void applyToolsAndMcps(Toolkit toolkit, AgentDefinition definition) {
@@ -185,6 +189,10 @@ public class AgentCapabilityAssembler {
             }
             if (spec.className() == null || spec.className().isBlank()) {
                 throw new IllegalStateException("Missing className for tool spec " + spec.toolId());
+            }
+            if (ScheduledTaskTools.class.getName().equals(spec.className())) {
+                toolkit.registration().tool(scheduledTaskToolsProvider.getObject()).apply();
+                continue;
             }
             if (!seen.add(spec.toolId())) {
                 log.warn("Duplicate toolRef {} ignored", spec.toolId());

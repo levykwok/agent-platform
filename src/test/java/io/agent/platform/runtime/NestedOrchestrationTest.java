@@ -4,11 +4,15 @@
 package io.agent.platform.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 
 import io.agent.platform.adapter.agentscope.AgentScopeHarnessFactory;
 import io.agent.platform.control.AgentDefinition;
@@ -16,6 +20,9 @@ import io.agent.platform.control.AgentDefinitionRegistry;
 import io.agent.platform.control.OrchestrationMode;
 import io.agent.platform.control.OrchestrationPolicy;
 import io.agent.platform.control.RouteRule;
+import io.agent.platform.control.SubagentBinding;
+import io.agent.platform.runtime.protocol.TaskContext;
+import io.agent.platform.runtime.protocol.TaskStatus;
 import io.agent.platform.control.WorkflowStep;
 import io.agent.platform.web.PlatformCompatibilityState;
 import io.agentscope.core.agent.RuntimeContext;
@@ -24,12 +31,14 @@ import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 class NestedOrchestrationTest {
 
@@ -111,6 +120,69 @@ class NestedOrchestrationTest {
         ChatResponse response = runtime.chat("outer-flow", request("go")).block();
 
         assertEquals("outer result", response.text());
+    }
+
+    @Test
+    void supervisorRunsAllSpecialistsAndReturnsTaskEnvelope() {
+        addSingle("researcher", "research result");
+        addSingle("writer", "writer result");
+        HarnessAgent supervisorAgent = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("supervisor final"))
+                .when(supervisorAgent)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("supervisor", supervisorAgent);
+        addDefinition(
+                "supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding("research", "researcher", "research", "", true, List.of()),
+                                new SubagentBinding("writing", "writer", "writing", "", true, List.of())),
+                        List.of(),
+                        List.of()));
+
+        ChatResponse response = runtime.chat("supervisor", request("combine the findings")).block();
+
+        assertEquals("supervisor final", response.text());
+        assertNotNull(response.task());
+        assertEquals("agent.task.v1", response.task().contractVersion());
+        assertEquals(2, response.task().metadata().get("child_call_count"));
+        ArgumentCaptor<UserMessage> captured = ArgumentCaptor.forClass(UserMessage.class);
+        verify(supervisorAgent).call(captured.capture(), any(RuntimeContext.class));
+        assertTrue(captured.getValue().getTextContent().contains("target_agent_id: researcher"));
+        assertTrue(captured.getValue().getTextContent().contains("target_agent_id: writer"));
+    }
+
+    @Test
+    void taskDeadlineBecomesStructuredTimeout() {
+        addDefinition("slow", OrchestrationPolicy.single());
+        HarnessAgent slow = mock(HarnessAgent.class);
+        doReturn(reactor.core.publisher.Mono.never())
+                .when(slow)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("slow", slow);
+        TaskContext root = TaskContext.root("caller", "slow");
+        TaskContext deadline =
+                new TaskContext(
+                        root.taskId(),
+                        root.parentTaskId(),
+                        root.rootTaskId(),
+                        root.sourceAgentId(),
+                        root.targetAgentId(),
+                        root.stepId(),
+                        Instant.now().plusMillis(20),
+                        root.metadata());
+
+        Throwable failure =
+                assertThrows(
+                        Throwable.class,
+                        () -> runtime.chat("slow", new ChatRequest("t", "u", "s", "wait", deadline)).block());
+        Throwable current = failure;
+        while (current.getCause() != null && !(current instanceof AgentTaskException)) {
+            current = current.getCause();
+        }
+        assertTrue(current instanceof AgentTaskException, current.toString());
+        assertEquals(TaskStatus.TIMEOUT, ((AgentTaskException) current).task().result().status());
     }
 
     private void addSingle(String id, String output) {

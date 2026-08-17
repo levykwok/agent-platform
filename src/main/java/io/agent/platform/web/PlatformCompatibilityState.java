@@ -2668,6 +2668,16 @@ public class PlatformCompatibilityState {
         workspaceSessionStore.appendMessage(agentId, sessionId, userId, role, content);
     }
 
+    public void appendSessionMessage(
+            String agentId,
+            String sessionId,
+            String userId,
+            String role,
+            String content,
+            Map<String, Object> metadata) {
+        workspaceSessionStore.appendMessage(agentId, sessionId, userId, role, content, metadata);
+    }
+
     public void deleteSession(String sessionId) {
         deleteSession(sessionId, "platform_knowledge_agent");
     }

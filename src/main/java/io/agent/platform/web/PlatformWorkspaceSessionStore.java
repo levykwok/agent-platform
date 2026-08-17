@@ -202,17 +202,28 @@ public class PlatformWorkspaceSessionStore {
 
     public void appendMessage(
             String agentId, String sessionId, String userId, String role, String content) {
+        appendMessage(agentId, sessionId, userId, role, content, Map.of());
+    }
+
+    public void appendMessage(
+            String agentId,
+            String sessionId,
+            String userId,
+            String role,
+            String content,
+            Map<String, Object> metadata) {
         if (sessionId == null || sessionId.isBlank()) {
             return;
         }
         String resolvedAgentId = string(agentId, DEFAULT_AGENT_ID);
         String resolvedUserId = string(userId, "platform_admin");
         String text = content == null ? "" : content;
+        Map<String, Object> resolvedMetadata = metadata == null ? Map.of() : metadata;
         if (!storage.isSqliteEnabled()) {
             RuntimeContext rc = runtimeContext(sessionId, resolvedUserId);
             workspaceManager.updateSessionIndex(
                     rc, resolvedAgentId, sessionId, text.isBlank() ? "新对话" : text);
-            String line = encodeMessageLine(role, text);
+            String line = encodeMessageLine(role, text, resolvedMetadata);
             if (line == null) {
                 return;
             }
@@ -221,7 +232,7 @@ public class PlatformWorkspaceSessionStore {
             return;
         }
         ensureSqliteReady();
-        upsertMessage(resolvedAgentId, sessionId, role, text, resolvedUserId);
+        upsertMessage(resolvedAgentId, sessionId, role, text, resolvedUserId, resolvedMetadata);
     }
 
     public boolean delete(String agentId, String sessionId) {
@@ -442,7 +453,7 @@ public class PlatformWorkspaceSessionStore {
 
     private List<Map<String, Object>> listMessagesFromSqlite(String agentId, String sessionId) {
         String query =
-                "SELECT role, content, created_at FROM "
+                "SELECT role, content, metadata, created_at FROM "
                         + messagesTable
                         + " WHERE agent_id = ? AND session_id = ? ORDER BY id ASC";
         List<Map<String, Object>> rows = new ArrayList<>();
@@ -458,6 +469,8 @@ public class PlatformWorkspaceSessionStore {
                                     rs.getString("role"),
                                     "content",
                                     rs.getString("content"),
+                                    "metadata",
+                                    parseMetadata(rs.getString("metadata")),
                                     "created_at",
                                     rs.getString("created_at")));
                 }
@@ -544,13 +557,18 @@ public class PlatformWorkspaceSessionStore {
     }
 
     private void upsertMessage(
-            String agentId, String sessionId, String role, String text, String userId) {
+            String agentId,
+            String sessionId,
+            String role,
+            String text,
+            String userId,
+            Map<String, Object> metadata) {
         String now = Instant.now().toString();
         String sql =
                 "INSERT INTO "
                         + messagesTable
-                        + " (agent_id, session_id, user_id, role, content, created_at) "
-                        + "VALUES (?, ?, ?, ?, ?, ?)";
+                        + " (agent_id, session_id, user_id, role, content, metadata, created_at) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?)";
         try (Connection connection = storage.connection();
                 PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, agentId);
@@ -558,7 +576,8 @@ public class PlatformWorkspaceSessionStore {
             statement.setString(3, userId);
             statement.setString(4, role);
             statement.setString(5, text);
-            statement.setString(6, now);
+            statement.setString(6, json(metadata));
+            statement.setString(7, now);
             statement.executeUpdate();
             upsertSession(agentId, sessionId, text.isBlank() ? "新对话" : text, userId, "platform");
             maybeEnsureContextExists(agentId, sessionId);
@@ -623,7 +642,7 @@ public class PlatformWorkspaceSessionStore {
         }
     }
 
-    private String encodeMessageLine(String role, String text) {
+    private String encodeMessageLine(String role, String text, Map<String, Object> metadata) {
         try {
             return mapper.writeValueAsString(
                             map(
@@ -631,11 +650,21 @@ public class PlatformWorkspaceSessionStore {
                                     role,
                                     "content",
                                     text,
+                                    "metadata",
+                                    metadata == null ? Map.of() : metadata,
                                     "created_at",
                                     Instant.now().toString()))
                     + "\n";
         } catch (JsonProcessingException e) {
             return null;
+        }
+    }
+
+    private String json(Map<String, Object> value) {
+        try {
+            return mapper.writeValueAsString(value == null ? Map.of() : value);
+        } catch (JsonProcessingException e) {
+            return "{}";
         }
     }
 
@@ -656,6 +685,8 @@ public class PlatformWorkspaceSessionStore {
                                 node.path("role").asText("assistant"),
                                 "content",
                                 node.path("content").asText(""),
+                                "metadata",
+                                parseMetadata(node.path("metadata").toString()),
                                 "created_at",
                                 node.path("created_at").asText("")));
             } catch (Exception ignored) {
@@ -663,6 +694,27 @@ public class PlatformWorkspaceSessionStore {
             }
         }
         return rows;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseMetadata(String value) {
+        if (value == null || value.isBlank() || "null".equals(value)) {
+            return Map.of();
+        }
+        try {
+            Object parsed = mapper.readValue(value, Map.class);
+            return parsed instanceof Map<?, ?> raw
+                    ? raw.entrySet().stream()
+                            .collect(
+                                    java.util.stream.Collectors.toMap(
+                                            entry -> String.valueOf(entry.getKey()),
+                                            Map.Entry::getValue,
+                                            (left, right) -> right,
+                                            LinkedHashMap::new))
+                    : Map.of();
+        } catch (Exception ignored) {
+            return Map.of();
+        }
     }
 
     private List<Map<String, Object>> logEntriesFromMessages(List<Map<String, Object>> messages) {
@@ -711,6 +763,14 @@ public class PlatformWorkspaceSessionStore {
             return mapper.readValue(text, Map.class);
         } catch (Exception ignored) {
             return text;
+        }
+    }
+
+    private String json(Object value) {
+        try {
+            return mapper.writeValueAsString(value == null ? Map.of() : value);
+        } catch (JsonProcessingException ignored) {
+            return "{}";
         }
     }
 
@@ -796,6 +856,7 @@ public class PlatformWorkspaceSessionStore {
                         + "    user_id TEXT,\n"
                         + "    role TEXT NOT NULL,\n"
                         + "    content TEXT NOT NULL,\n"
+                        + "    metadata TEXT NOT NULL DEFAULT '{}',\n"
                         + "    created_at TEXT NOT NULL,\n"
                         + "    FOREIGN KEY (agent_id, session_id)\n"
                         + "        REFERENCES "
@@ -824,6 +885,14 @@ public class PlatformWorkspaceSessionStore {
                 Statement statement = connection.createStatement()) {
             statement.execute(createSessions);
             statement.execute(createMessages);
+            try {
+                statement.execute(
+                        "ALTER TABLE "
+                                + messagesTable
+                                + " ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}' ");
+            } catch (SQLException ignored) {
+                // Existing databases already have the metadata column.
+            }
             statement.execute(createContext);
             statement.execute(createTasks);
         } catch (SQLException e) {
