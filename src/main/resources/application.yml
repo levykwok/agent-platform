@@ -88,6 +88,12 @@ agent:
       batch-size: ${AGENT_PLATFORM_SCHEDULED_TASKS_BATCH_SIZE:20}
       lease-ms: ${AGENT_PLATFORM_SCHEDULED_TASKS_LEASE_MS:120000}
       default-timezone: ${AGENT_PLATFORM_SCHEDULED_TASKS_TIMEZONE:}
+      webhook:
+        enabled: ${AGENT_PLATFORM_SCHEDULED_TASKS_WEBHOOK_ENABLED:true}
+        max-attempts: ${AGENT_PLATFORM_SCHEDULED_TASKS_WEBHOOK_MAX_ATTEMPTS:3}
+        retry-delay-ms: ${AGENT_PLATFORM_SCHEDULED_TASKS_WEBHOOK_RETRY_DELAY_MS:1000}
+        timeout-ms: ${AGENT_PLATFORM_SCHEDULED_TASKS_WEBHOOK_TIMEOUT_MS:10000}
+        allowed-hosts: ${AGENT_PLATFORM_SCHEDULED_TASKS_WEBHOOK_ALLOWED_HOSTS:}
     rag:
       # Qdrant is optional at runtime: when it is unavailable the platform keeps the
       # deterministic lexical retrieval path so document upload and chat stay usable.

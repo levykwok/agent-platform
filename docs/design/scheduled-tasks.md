@@ -30,10 +30,11 @@
 
 执行时会：
 
-1. 以 `role=user`、`metadata.source=scheduled_task` 把 prompt 写入绑定会话。
-2. 使用 `TaskContext` 标记 `source=scheduler`、任务 ID 和执行 ID，调用 `AgentRuntime.chat`。
-3. 以 `role=assistant`、相同 metadata 写入结果。
-4. 写入 `SUCCEEDED`/`FAILED` 执行记录，并创建站内通知。
+1. 把带有“这是平台定时任务自动触发、请直接执行”的运行上下文前缀和原始 prompt 组合后，作为 Agent 的实际输入。
+2. 以 `role=user`、`metadata.source=scheduled_task` 把同一份实际输入写入绑定会话。
+3. 使用 `TaskContext` 标记 `source=scheduler`、任务 ID 和执行 ID，调用 `AgentRuntime.chat`。
+4. 以 `role=assistant`、相同 metadata 写入结果，保证结果回到任务绑定的 session。
+5. 写入 `SUCCEEDED`/`FAILED` 执行记录，并创建站内通知。
 
 ## 配置
 
@@ -49,6 +50,12 @@ agent:
       batch-size: 20
       lease-ms: 120000
       default-timezone: Asia/Shanghai # 留空时使用 JVM 默认时区
+      webhook:
+        enabled: true
+        max-attempts: 3
+        retry-delay-ms: 1000
+        timeout-ms: 10000
+        allowed-hosts: industrial-ai.example.com
 ```
 
 Cron 使用 Spring `CronExpression`：支持标准 6 位（秒、分、时、日、月、周）格式；输入 5 位 Unix 格式时自动在秒位前补 `0`。任务按自身 `timezone` 计算下一次执行时间并以 UTC ISO-8601 存储。
@@ -86,6 +93,34 @@ file 模式将同样的数据写入 `workspace/cache/scheduled-tasks.json`，采
 
 创建/更新请求字段：`name`、`prompt`、`agent_id`、`session_id`、`cron`（或 `cron_expression`）、`timezone`、`status`。未传 `session_id` 时，平台为该任务创建一个绑定会话。SQLite 模式下传入已有会话必须属于当前用户和组织。
 
+Webhook 字段为可选：`webhook_url`、`webhook_secret`、`webhook_enabled`。不填写 `webhook_url` 时不会发生任何外部请求；编辑任务时不返回 Secret，Secret 留空表示保留原值。
+
+## Webhook 回调
+
+当任务配置了 Webhook 且全局开关开启时，Agent Run 结束后平台会向 `webhook_url` 发送 JSON：
+
+```json
+{
+  "event": "scheduled_agent_run.succeeded",
+  "delivery_id": "run_xxx:scheduled_agent_run.succeeded",
+  "task_id": "task_xxx",
+  "run_id": "run_xxx",
+  "agent_id": "researcher",
+  "session_id": "sess_xxx",
+  "task_name": "每日日报",
+  "status": "SUCCEEDED",
+  "result_text": "完整 Agent 结果",
+  "result_summary": "完整 Agent 结果的摘要",
+  "error": "",
+  "result_path": "/platform/live/qa?session_id=sess_xxx",
+  "created_at": "2026-08-18T01:00:00Z"
+}
+```
+
+失败事件为 `scheduled_agent_run.failed`。如果设置了 `webhook_secret`，请求会带 `X-Agent-Platform-Signature: sha256=<HMAC-SHA256(body)>`，同时带有 `X-Agent-Platform-Event`、`X-Agent-Platform-Delivery-Id` 和 `X-Agent-Platform-Timestamp` 请求头。接收方应使用 `delivery_id` 幂等处理。
+
+平台对网络错误、408、425、429 和 5xx 自动重试；4xx 不重试。Webhook 投递失败只记录到执行记录的 `webhook_status/webhook_message`，不会把已经成功的 Agent Run 改成失败。可通过 `allowed-hosts` 配置回调域名白名单，支持精确域名和 `*.example.com`。
+
 ## Agent Tools
 
 默认工具配置登记在 `src/main/resources/tools.yml`，绑定到 Agent 后可调用：
@@ -93,6 +128,7 @@ file 模式将同样的数据写入 `workspace/cache/scheduled-tasks.json`，采
 `schedule_create` / `schedule_list` / `schedule_get` / `schedule_get_runs` / `schedule_pause` / `schedule_resume` / `schedule_delete` / `schedule_run_now`
 
 工具由 `AgentCapabilityAssembler` 注册 `ScheduledTaskTools`。账号来自运行时上下文，不允许模型通过工具参数伪造用户身份；没有认证运行时上下文时工具会拒绝执行。
+`SUPERVISOR` 模式的对话 Agent 会自动获得上述 schedule 工具，因此用户可以直接在对话中说“每天上午九点生成设备日报”；不需要另外手工把 8 个工具逐一加入 Agent 配置。工具创建时也可以传入 `webhook_url`、`webhook_secret` 和 `webhook_enabled`。
 
 ## 前端约定
 

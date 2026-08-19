@@ -20,7 +20,10 @@ public class ScheduledTaskTools {
         this.service = service;
     }
 
-    @Tool(name = "schedule_create", description = "Create a recurring scheduled task for the current user.")
+    @Tool(
+            name = "schedule_create",
+            description =
+                    "Create a recurring scheduled task for the current user. The task result is written to the session. Optionally configure a Webhook URL for an external notification.")
     public Map<String, Object> create(
             @ToolParam(name = "name", description = "Human-readable task name") String name,
             @ToolParam(name = "prompt", description = "Prompt sent to the Agent") String prompt,
@@ -29,7 +32,13 @@ public class ScheduledTaskTools {
             @ToolParam(name = "session_id", description = "Optional existing session id", required = false)
                     String sessionId,
             @ToolParam(name = "timezone", description = "Optional IANA timezone", required = false)
-                    String timezone) {
+                    String timezone,
+            @ToolParam(name = "webhook_url", description = "Optional HTTPS callback URL for task completion notifications", required = false)
+                    String webhookUrl,
+            @ToolParam(name = "webhook_secret", description = "Optional HMAC signing secret for the Webhook", required = false)
+                    String webhookSecret,
+            @ToolParam(name = "webhook_enabled", description = "Whether the optional Webhook is enabled", required = false)
+                    Boolean webhookEnabled) {
         return service.create(
                 map(
                         "name", name,
@@ -37,7 +46,10 @@ public class ScheduledTaskTools {
                         "cron", cron,
                         "agent_id", agentId,
                         "session_id", sessionId,
-                        "timezone", timezone),
+                        "timezone", timezone,
+                        "webhook_url", webhookUrl,
+                        "webhook_secret", webhookSecret,
+                        "webhook_enabled", webhookEnabled),
                 userId(),
                 orgId());
     }

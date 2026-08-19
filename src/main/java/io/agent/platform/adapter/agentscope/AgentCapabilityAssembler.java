@@ -6,6 +6,7 @@ package io.agent.platform.adapter.agentscope;
 import io.agent.platform.control.AgentDefinition;
 import io.agent.platform.control.McpRegistry;
 import io.agent.platform.control.McpSpec;
+import io.agent.platform.control.OrchestrationMode;
 import io.agent.platform.control.PlatformStorageLayer;
 import io.agent.platform.control.SkillRegistry;
 import io.agent.platform.control.SkillSpec;
@@ -46,6 +47,16 @@ import org.springframework.stereotype.Component;
 public class AgentCapabilityAssembler {
 
     private static final Logger log = LoggerFactory.getLogger(AgentCapabilityAssembler.class);
+    private static final List<String> SUPERVISOR_SCHEDULE_TOOLS =
+            List.of(
+                    "schedule_create",
+                    "schedule_list",
+                    "schedule_get",
+                    "schedule_get_runs",
+                    "schedule_pause",
+                    "schedule_resume",
+                    "schedule_delete",
+                    "schedule_run_now");
 
     private final ToolRegistry toolRegistry;
     private final McpRegistry mcpRegistry;
@@ -88,10 +99,22 @@ public class AgentCapabilityAssembler {
     public void applyToolsAndMcps(
             Toolkit toolkit, AgentDefinition definition, String tenantId, String userId) {
         PlatformAuthService.Principal principal = principal(tenantId, userId);
-        List<String> toolRefs = safeRefs(definition.toolRefs());
+        List<String> toolRefs = conversationalToolRefs(definition);
         applyWorkflowTools(toolkit, definition, workflowToolRefs(toolRefs));
         applyTools(toolkit, javaToolRefs(toolRefs), principal);
         applyMcps(toolkit, definition.mcpRefs(), toolRefs, principal);
+    }
+
+    private List<String> conversationalToolRefs(AgentDefinition definition) {
+        List<String> refs = new ArrayList<>(safeRefs(definition.toolRefs()));
+        if (definition.orchestration().mode() == OrchestrationMode.SUPERVISOR) {
+            for (String scheduleTool : SUPERVISOR_SCHEDULE_TOOLS) {
+                if (!refs.contains(scheduleTool)) {
+                    refs.add(scheduleTool);
+                }
+            }
+        }
+        return List.copyOf(refs);
     }
 
     private void applyWorkflowTools(Toolkit toolkit, AgentDefinition definition, List<String> workflowRefs) {

@@ -40,6 +40,7 @@ public class ScheduledTaskService {
     private final AgentDefinitionRegistry agents;
     private final PlatformCompatibilityState state;
     private final PlatformStorageLayer storage;
+    private final ScheduledTaskWebhookService webhook;
     private final boolean enabled;
     private final int batchSize;
     private final long leaseMs;
@@ -51,6 +52,7 @@ public class ScheduledTaskService {
             AgentDefinitionRegistry agents,
             PlatformCompatibilityState state,
             PlatformStorageLayer storage,
+            ScheduledTaskWebhookService webhook,
             @Value("${agent.platform.scheduled-tasks.enabled:true}") boolean enabled,
             @Value("${agent.platform.scheduled-tasks.batch-size:20}") int batchSize,
             @Value("${agent.platform.scheduled-tasks.lease-ms:120000}") long leaseMs,
@@ -60,6 +62,7 @@ public class ScheduledTaskService {
         this.agents = agents;
         this.state = state;
         this.storage = storage;
+        this.webhook = webhook;
         this.enabled = enabled;
         this.batchSize = Math.max(1, Math.min(200, batchSize));
         this.leaseMs = Math.max(10_000L, leaseMs);
@@ -87,6 +90,8 @@ public class ScheduledTaskService {
         String cron = normalizeCron(first(payload, "cron", "cron_expression", "schedule"));
         validateCron(cron);
         ZoneId zone = resolveZone(first(payload, "timezone", "time_zone"));
+        String webhookUrl = first(payload, "webhook_url", "callback_url");
+        validateWebhookUrl(webhookUrl);
         String taskId = "task_" + UUID.randomUUID().toString().replace("-", "");
         String sessionId = first(payload, "session_id", "sessionId");
         if (sessionId.isBlank()) {
@@ -117,6 +122,9 @@ public class ScheduledTaskService {
                         "next_run_at", nextRun(cron, zone, Instant.now()),
                         "last_run_at", "",
                         "lease_until", "",
+                        "webhook_url", webhookUrl,
+                        "webhook_secret", first(payload, "webhook_secret", "callback_secret"),
+                        "webhook_enabled", webhookEnabledValue(payload, true),
                         "created_at", now,
                         "updated_at", now);
         store.createTask(task);
@@ -148,6 +156,17 @@ public class ScheduledTaskService {
         String timezone = first(payload, "timezone", "time_zone");
         if (!cron.isBlank()) task.put("cron_expression", normalizeCron(cron));
         if (!timezone.isBlank()) task.put("timezone", resolveZone(timezone).getId());
+        if (payload.containsKey("webhook_url") || payload.containsKey("callback_url")) {
+            String webhookUrl = first(payload, "webhook_url", "callback_url");
+            validateWebhookUrl(webhookUrl);
+            task.put("webhook_url", webhookUrl);
+        }
+        if (payload.containsKey("webhook_secret") || payload.containsKey("callback_secret")) {
+            task.put("webhook_secret", first(payload, "webhook_secret", "callback_secret"));
+        }
+        if (payload.containsKey("webhook_enabled") || payload.containsKey("callback_enabled")) {
+            task.put("webhook_enabled", webhookEnabledValue(payload, true));
+        }
         validateCron(string(task.get("cron_expression")));
         String status = requestedStatus(payload, "");
         if (!status.isBlank()) task.put("status", status);
@@ -232,6 +251,8 @@ public class ScheduledTaskService {
                 map(
                         "run_id", runId,
                         "task_id", task.get("task_id"),
+                        "agent_id", task.get("agent_id"),
+                        "session_id", task.get("session_id"),
                         "org_id", task.get("org_id"),
                         "user_id", task.get("user_id"),
                         "scheduled_at", scheduledAt == null ? "" : scheduledAt.toString(),
@@ -251,8 +272,9 @@ public class ScheduledTaskService {
                             "source", "scheduled_task",
                             "scheduled_task_id", task.get("task_id"),
                             "scheduled_task_run_id", runId);
+            String agentPrompt = scheduledPrompt(task, runId, scheduledAt);
             state.appendSessionMessage(
-                    agentId, sessionId, userId, "user", string(task.get("prompt")), metadata);
+                    agentId, sessionId, userId, "user", agentPrompt, metadata);
             TaskContext context =
                     TaskContext.root("scheduler", agentId)
                             .withMetadata("source", "scheduled_task")
@@ -265,7 +287,7 @@ public class ScheduledTaskService {
                                             orgId,
                                             userId,
                                             sessionId,
-                                            string(task.get("prompt")),
+                                            agentPrompt,
                                             context))
                             .block();
             String text = response == null ? "" : nonBlank(response.text(), "");
@@ -277,6 +299,7 @@ public class ScheduledTaskService {
                     "scheduled_task.succeeded",
                     "定时任务已完成",
                     string(task.get("name")) + " 执行成功");
+            deliverWebhook(task, run, "SUCCEEDED", text, "");
         } catch (Throwable error) {
             String message = nonBlank(error.getMessage(), "定时任务执行失败");
             finishRun(run, "FAILED", "", message);
@@ -286,6 +309,7 @@ public class ScheduledTaskService {
                     "scheduled_task.failed",
                     "定时任务执行失败",
                     string(task.get("name")) + "：" + message);
+            deliverWebhook(task, run, "FAILED", "", message);
         } finally {
             task.put("lease_until", "");
             task.put("last_run_at", Instant.now().toString());
@@ -295,6 +319,30 @@ public class ScheduledTaskService {
             store.updateTask(task);
         }
         return run;
+    }
+
+    private String scheduledPrompt(
+            Map<String, Object> task, String runId, Instant scheduledAt) {
+        return """
+                [平台运行上下文]
+                当前请求是由平台的定时任务自动触发的，不是用户此刻手动发送的消息。
+                请直接执行任务内容；不要询问用户是否现在执行，也不要因为没有实时用户对话而跳过任务。
+                如果任务需要外部信息，请按 Agent 已绑定的工具和权限完成；输出最终结果即可。
+
+                定时任务名称：%s
+                定时任务 ID：%s
+                本次执行 ID：%s
+                计划执行时间：%s
+
+                [任务内容]
+                %s
+                """
+                .formatted(
+                        string(task.get("name")),
+                        string(task.get("task_id")),
+                        runId,
+                        scheduledAt == null ? "立即执行" : scheduledAt,
+                        string(task.get("prompt")));
     }
 
     private void advanceSchedule(Map<String, Object> task) {
@@ -330,6 +378,37 @@ public class ScheduledTaskService {
                         "created_at", Instant.now().toString()));
     }
 
+    private void deliverWebhook(
+            Map<String, Object> task,
+            Map<String, Object> run,
+            String status,
+            String resultText,
+            String errorMessage) {
+        try {
+            ScheduledTaskWebhookService.DeliveryResult delivery =
+                    webhook.deliver(task, run, status, resultText, errorMessage);
+            run.put("webhook_status", delivery.status());
+            run.put("webhook_attempts", delivery.attempts());
+            run.put("webhook_http_status", delivery.httpStatus());
+            run.put("webhook_message", delivery.message());
+            store.updateRun(run);
+            if ("FAILED".equals(delivery.status())) {
+                log.warn(
+                        "Webhook delivery failed for scheduled task {} run {}: {}",
+                        task.get("task_id"),
+                        run.get("run_id"),
+                        delivery.message());
+            }
+        } catch (Throwable error) {
+            // A callback outage must never turn a successful Agent run into a failed run.
+            log.warn(
+                    "Webhook delivery isolated for scheduled task {} run {}: {}",
+                    task.get("task_id"),
+                    run.get("run_id"),
+                    error.getMessage());
+        }
+    }
+
     private Map<String, Object> setStatus(
             String taskId, String status, String userId, String orgId) {
         Map<String, Object> task = requireTask(taskId, userId, orgId);
@@ -357,6 +436,13 @@ public class ScheduledTaskService {
     private Map<String, Object> publicTask(Map<String, Object> task) {
         Map<String, Object> row = new LinkedHashMap<>(task);
         row.put("enabled", "ACTIVE".equals(row.get("status")));
+        row.put("webhook_configured", !string(row.get("webhook_url")).isBlank());
+        row.put(
+                "webhook_enabled",
+                task.containsKey("webhook_enabled")
+                        ? webhookEnabledValue(task, true)
+                        : !string(task.get("webhook_url")).isBlank());
+        row.remove("webhook_secret");
         row.remove("lease_until");
         return row;
     }
@@ -394,6 +480,14 @@ public class ScheduledTaskService {
         }
     }
 
+    private void validateWebhookUrl(String value) {
+        try {
+            webhook.validateUrl(value);
+        } catch (IllegalArgumentException error) {
+            throw badRequest(error.getMessage());
+        }
+    }
+
     private static String requestedStatus(Map<String, Object> payload, String fallback) {
         String status = first(payload, "status");
         if (status.isBlank() && payload != null && payload.containsKey("enabled")) {
@@ -407,6 +501,14 @@ public class ScheduledTaskService {
             case "PAUSED", "DISABLED", "0", "INACTIVE" -> "PAUSED";
             default -> throw badRequest("status 只能是 ACTIVE 或 PAUSED");
         };
+    }
+
+    private static boolean webhookEnabledValue(Map<String, Object> payload, boolean fallback) {
+        if (payload == null) return fallback;
+        Object value = payload.containsKey("webhook_enabled")
+                ? payload.get("webhook_enabled")
+                : payload.get("callback_enabled");
+        return value == null ? fallback : Boolean.parseBoolean(String.valueOf(value));
     }
 
     private static Instant parseInstant(Object value) {
