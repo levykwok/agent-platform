@@ -4,6 +4,8 @@
 package io.agent.platform.runtime;
 
 import io.agent.platform.control.WorkflowAsset;
+import java.util.List;
+import java.util.Map;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -17,4 +19,9 @@ public interface AgentRuntime {
     Flux<AgentEventEnvelope> workflowStream(WorkflowAsset workflow, ChatRequest request);
 
     void evict(String agentId);
+
+    default List<Map<String, Object>> runtimeToolManifest(
+            String agentId, String tenantId, String userId) {
+        return List.of();
+    }
 }

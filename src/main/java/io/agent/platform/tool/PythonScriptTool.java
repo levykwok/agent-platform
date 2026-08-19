@@ -23,7 +23,8 @@ public final class PythonScriptTool extends ToolBase {
     private final String toolId;
     private final Path scriptPath;
     private final Duration timeout;
-    private final String pythonCommand;
+    private final String dockerCommand;
+    private final String sandboxImage;
 
     public PythonScriptTool(
             String toolId,
@@ -31,7 +32,8 @@ public final class PythonScriptTool extends ToolBase {
             Map<String, Object> parameterSchema,
             Path scriptPath,
             Duration timeout,
-            String pythonCommand) {
+            String dockerCommand,
+            String sandboxImage) {
         super(
                 ToolBase.builder()
                         .name(toolId)
@@ -46,8 +48,12 @@ public final class PythonScriptTool extends ToolBase {
                 timeout == null || timeout.isNegative() || timeout.isZero()
                         ? Duration.ofSeconds(5)
                         : timeout;
-        this.pythonCommand =
-                pythonCommand == null || pythonCommand.isBlank() ? "python" : pythonCommand;
+        this.dockerCommand =
+                dockerCommand == null || dockerCommand.isBlank() ? "docker" : dockerCommand;
+        this.sandboxImage =
+                sandboxImage == null || sandboxImage.isBlank()
+                        ? "python:3.12-slim"
+                        : sandboxImage;
     }
 
     @Override
@@ -57,7 +63,9 @@ public final class PythonScriptTool extends ToolBase {
     }
 
     private ToolResultBlock invoke(Map<String, Object> args) throws Exception {
-        ExecutionResult execution = execute(pythonCommand, scriptPath, toolId, args, timeout);
+        ExecutionResult execution =
+                executeSandboxed(
+                        dockerCommand, sandboxImage, scriptPath, toolId, args, timeout);
         if (execution.timedOut()) {
             return ToolResultBlock.error(
                     "Python tool timed out after " + timeout.toMillis() + "ms");
@@ -91,15 +99,42 @@ public final class PythonScriptTool extends ToolBase {
         }
     }
 
-    public static ExecutionResult execute(
-            String pythonCommand,
+    public static ExecutionResult executeSandboxed(
+            String dockerCommand,
+            String sandboxImage,
             Path scriptPath,
             String toolId,
             Map<String, Object> args,
             Duration timeout)
             throws Exception {
-        ProcessBuilder builder = new ProcessBuilder(pythonCommand, scriptPath.toString());
-        builder.directory(scriptPath.getParent().toFile());
+        Path normalizedScript = scriptPath.toAbsolutePath().normalize();
+        if (!java.nio.file.Files.isRegularFile(normalizedScript)) {
+            throw new IllegalArgumentException("Python tool script not found: " + normalizedScript);
+        }
+        String mount = normalizedScript.getParent() + ":/tool:ro";
+        ProcessBuilder builder =
+                new ProcessBuilder(
+                        dockerCommand == null || dockerCommand.isBlank() ? "docker" : dockerCommand,
+                        "run",
+                        "--rm",
+                        "--network",
+                        "none",
+                        "--read-only",
+                        "--tmpfs",
+                        "/tmp:rw,noexec,nosuid,size=16m",
+                        "--cap-drop=ALL",
+                        "--security-opt=no-new-privileges",
+                        "--pids-limit=64",
+                        "--memory=512m",
+                        "--cpus=1",
+                        "-i",
+                        "-v",
+                        mount,
+                        sandboxImage == null || sandboxImage.isBlank()
+                                ? "python:3.12-slim"
+                                : sandboxImage,
+                        "python",
+                        "/tool/" + normalizedScript.getFileName());
         Process process = builder.start();
         Map<String, Object> request = new LinkedHashMap<>();
         request.put("args", args == null ? Map.of() : args);

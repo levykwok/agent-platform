@@ -2,7 +2,9 @@
 
 > 审查日期：2026-08-19  
 > 审查范围：AgentScope Harness 运行时、平台工具装配、MCP/Skill、Agent 编排、工具目录与启停链路  
-> 文档状态：审查结论，尚未包含修复实现
+> 文档状态：审查基线 + 已完成整改记录（2026-08-19）
+
+> 说明：第 2～8 节保留的是整改前基线，用于解释风险来源；当前实现状态、验证结果和剩余边界以第 10 节为准。
 
 ## 1. 结论摘要
 
@@ -316,3 +318,41 @@ toolRefs: []
 - ReAct 轮数、总工具调用数、子 Agent 数量和总耗时均有硬上限；
 - Playwright 能验证工具目录、Agent 工具选择、停用生效、Single Agent 禁止创建子 Agent等完整链路。
 
+## 10. 整改实现与验证结果
+
+### 10.1 已完成实现
+
+1. 新增统一的 `RuntimeToolGovernance`，全局与 Agent 级策略持久化到 SQLite 表 `platform_runtime_tool_policies`；文件持久化模式有 JSON fallback。
+2. 工具目录启停和 Agent 策略会进入真实 Toolkit 装配，并通过策略版本使运行时缓存失效；浏览器提交的可空字段不会再造成 500。
+3. 新增 `/platform/frontend/tools/agents/{agentId}/runtime-manifest`，Agent 管理页展示模型实际可见的 schema、来源、风险、自动注入、联网、副作用和子 Agent 能力。
+4. Harness 默认关闭文件、Shell、memory/session、动态子 Agent 和通用子 Agent 工具；显式拦截 `wait_async_results` 等后台能力，移除 `PermissionMode.BYPASS`。
+5. 本地 filesystem 仅固定到 Agent workspace，不再使用 `${user.dir}`；文件和 Shell 能力默认关闭，Shell 仅允许在显式启用 Docker sandbox 时出现。
+6. Python 工具不再在宿主机直接执行。只有 Docker sandbox 开启时才运行，并使用 `--network none`、只读根文件系统、只读脚本挂载、`cap-drop=ALL`、`no-new-privileges`、PID/内存/CPU 限制。
+7. 平台显式设置默认执行预算：ReAct 最大 6 轮、最多 12 次工具调用、总超时 120 秒；子 Agent 默认最多 4 个、并发 2、单次超时 90 秒。配置值均有边界限制。
+8. 平台自身负责 `SINGLE`、`ROUTER`、`WORKFLOW`、`SUPERVISOR` 编排，Harness 不再自行创建子 Agent。子 Agent `toolRefs: []` 明确表示无工具，不再继承父工具；管理页支持逐子 Agent 多选允许工具。
+9. Supervisor 的 8 个 schedule 方法改为注册 `ScheduledTaskTools` 一次，再逐 schema 应用策略，修复把方法名误当 Tool Asset ID 导致 Main runtime-manifest 500 的问题。
+10. MCP schema 别名拒绝策略同时遵守全局和 Agent scope；一个 Agent 的停用策略不会误伤另一个 Agent。
+11. `capability_loaded` 事件增加最终运行时 Tool Manifest、轮次、工具调用、总超时、子 Agent 数量和并发预算，工具调用只记录状态和拒绝原因，不记录原始参数与输出。
+
+### 10.2 自动化验证
+
+| 验证项 | 结果 |
+|---|---|
+| Java 全量测试 | 67 个测试全部通过（最后新增的 scope 隔离用例包含在内） |
+| 前端类型检查与生产构建 | `vue-tsc --noEmit --skipLibCheck` 与 `vite build` 通过 |
+| Main Supervisor 运行时清单 | HTTP 200，仅包含 8 个 `schedule_*` schema |
+| Writer Single 清单 | 0 个工具，不包含文件、Shell、memory、session、subagent、task 工具 |
+| Researcher 清单 | 显式 Web 工具可见；策略停用后目标 schema 从最终清单消失 |
+| 策略持久化 | 工具停用写入 SQLite，后端重启后仍保持；重新启用立即使缓存失效 |
+| Python 未启用沙箱 | 返回 `ok=false`、`stage=sandbox`，不会执行宿主机 Python |
+| Supervisor 子 Agent 编辑 | Playwright 验证“允许工具（空 = 无）”多选控件存在，未保存测试数据 |
+| 浏览器控制台 | 最终独立 Playwright 会话 0 errors |
+
+Playwright 证据保存在 `output/playwright/tool-governance-main-runtime-manifest.png` 和 `output/playwright/tool-governance-supervisor-editor.png`（`output/` 默认不进入 Git）。
+
+### 10.3 仍需作为部署边界管理的风险
+
+- `web_fetch` 以及演示 MCP 的 URL 工具仍具备外部网络能力。生产环境应通过出口代理、DNS/IP allowlist 和云元数据地址阻断做网络层防护；在此之前可用运行时策略全局停用。
+- MCP Server 是独立受信进程或远程服务，其进程权限、环境变量和网络范围不由 Agent Toolkit 沙箱自动覆盖，需要按部署环境单独收口。
+- MCP 服务不可用时，实际清单会按当次成功注册的 schema 变化；页面展示的是本次真实可用集合，而不是静态目录承诺。
+- 前端生产构建仍有单 chunk 大于 500 kB 的性能警告，不影响本次工具治理正确性。

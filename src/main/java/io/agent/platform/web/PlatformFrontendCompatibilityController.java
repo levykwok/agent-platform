@@ -6,6 +6,7 @@ package io.agent.platform.web;
 import io.agent.platform.control.EmbeddingModelRegistry;
 import io.agent.platform.control.PlatformArtifactStore;
 import io.agent.platform.control.PlatformStorageLayer;
+import io.agent.platform.control.RuntimeToolGovernance;
 import io.agent.platform.control.ToolRegistry;
 import io.agent.platform.control.ToolSpec;
 import io.agent.platform.runtime.AgentEventEnvelope;
@@ -27,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.env.Environment;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -73,6 +75,8 @@ public class PlatformFrontendCompatibilityController {
     private final AgentAssetService agentAssetService;
     private final PlatformAssetAccessService assetAccess;
     private final PlatformUserCapabilityService userCapabilities;
+    private final RuntimeToolGovernance toolGovernance;
+    private final Environment environment;
     private final WebClient webClient = WebClient.builder().build();
 
     public PlatformFrontendCompatibilityController(
@@ -90,7 +94,9 @@ public class PlatformFrontendCompatibilityController {
             PlatformAuthService auth,
             AgentAssetService agentAssetService,
             PlatformAssetAccessService assetAccess,
-            PlatformUserCapabilityService userCapabilities) {
+            PlatformUserCapabilityService userCapabilities,
+            RuntimeToolGovernance toolGovernance,
+            Environment environment) {
         this.state = state;
         this.artifactStore = artifactStore;
         this.runtime = runtime;
@@ -106,6 +112,8 @@ public class PlatformFrontendCompatibilityController {
         this.agentAssetService = agentAssetService;
         this.assetAccess = assetAccess;
         this.userCapabilities = userCapabilities;
+        this.toolGovernance = toolGovernance;
+        this.environment = environment;
     }
 
     private PlatformAuthService.Principal principal(ServerHttpRequest request) {
@@ -729,6 +737,10 @@ public class PlatformFrontendCompatibilityController {
                 .map(tool -> userCapabilities.enrichToolRow(tool, current))
                 .forEach(rows::add);
         workflowToolRegistry.rows().forEach(rows::add);
+        rows.replaceAll(
+                row ->
+                        toolGovernance.enrichGlobal(
+                                string(row.getOrDefault("tool_id", row.get("name")), ""), row));
         return map("items", rows, "tools", rows);
     }
 
@@ -738,7 +750,9 @@ public class PlatformFrontendCompatibilityController {
             @RequestBody Map<String, Object> payload,
             ServerHttpRequest request) {
         auth.requireAdmin(requirePrincipal(request));
-        Map<String, Object> binding = state.saveToolBinding(toolId, payload);
+        Map<String, Object> binding = toolGovernance.saveGlobal(toolId, payload);
+        state.appendAuditEvent("tool.binding.saved", toolId, binding);
+        state.agents().forEach(row -> runtime.evict(String.valueOf(row.get("agent_id"))));
         return map("ok", true, "tool_id", toolId, "binding", binding);
     }
 
@@ -749,7 +763,30 @@ public class PlatformFrontendCompatibilityController {
             @RequestBody Map<String, Object> payload,
             ServerHttpRequest request) {
         auth.requireAdmin(requirePrincipal(request));
-        return map("ok", true, "agent_id", agentId, "tool_id", toolId, "policy", payload);
+        Map<String, Object> policy = toolGovernance.saveAgent(agentId, toolId, payload);
+        runtime.evict(agentId);
+        state.appendAuditEvent("tool.agent_policy.saved", agentId + ":" + toolId, policy);
+        return map("ok", true, "agent_id", agentId, "tool_id", toolId, "policy", policy);
+    }
+
+    @GetMapping("/tools/agents/{agentId}/runtime-manifest")
+    public Map<String, Object> runtimeToolManifest(
+            @PathVariable("agentId") String agentId, ServerHttpRequest request) {
+        PlatformAuthService.Principal current = requirePrincipal(request);
+        agentAssetService.requireReadable(agentId, current);
+        List<Map<String, Object>> tools =
+                runtime.runtimeToolManifest(agentId, current.orgId(), current.userId());
+        return map(
+                "agent_id",
+                agentId,
+                "policy_version",
+                toolGovernance.version(),
+                "tool_count",
+                tools.size(),
+                "items",
+                tools,
+                "tools",
+                tools);
     }
 
     @PostMapping({"/tools/http", "/tools/db-query", "/tools/sandbox-script"})
@@ -947,6 +984,15 @@ public class PlatformFrontendCompatibilityController {
     public Map<String, Object> validatePythonTool(
             @RequestBody Map<String, Object> payload, ServerHttpRequest request) {
         auth.requireAdmin(requirePrincipal(request));
+        if (!sandboxEnabled()) {
+            return map(
+                    "ok",
+                    false,
+                    "stage",
+                    "sandbox",
+                    "error",
+                    "Python execution is disabled until the Docker sandbox is enabled.");
+        }
         Instant started = Instant.now();
         String toolId =
                 string(payload.getOrDefault("tool_id", payload.get("name")), "draft").strip();
@@ -961,21 +1007,11 @@ public class PlatformFrontendCompatibilityController {
         try {
             Files.createDirectories(dir);
             Files.writeString(scriptPath, script);
-            Map<String, Object> compile = pythonCompile(scriptPath);
-            if (!Boolean.TRUE.equals(compile.get("ok"))) {
-                return map(
-                        "ok",
-                        false,
-                        "stage",
-                        "syntax",
-                        "syntax",
-                        compile,
-                        "latency_ms",
-                        Duration.between(started, Instant.now()).toMillis());
-            }
+            Map<String, Object> compile = map("ok", true, "executor", "docker_sandbox");
             PythonScriptTool.ExecutionResult execution =
-                    PythonScriptTool.execute(
-                            pythonCommand(),
+                    PythonScriptTool.executeSandboxed(
+                            sandboxDockerCommand(),
+                            sandboxImage(),
                             scriptPath,
                             toolId,
                             args,
@@ -1066,11 +1102,23 @@ public class PlatformFrontendCompatibilityController {
                     "error",
                     "Only MCP and Python tools can be tested by this endpoint.");
         }
+        if (!sandboxEnabled()) {
+            return map(
+                    "ok",
+                    false,
+                    "tool_id",
+                    toolId,
+                    "stage",
+                    "sandbox",
+                    "error",
+                    "Python execution is disabled until the Docker sandbox is enabled.");
+        }
         try {
             Path scriptPath = resolveWorkspacePath(spec.scriptPath());
             PythonScriptTool.ExecutionResult execution =
-                    PythonScriptTool.execute(
-                            pythonCommand(),
+                    PythonScriptTool.executeSandboxed(
+                            sandboxDockerCommand(),
+                            sandboxImage(),
                             scriptPath,
                             toolId,
                             objectMap(payload == null ? null : payload.get("arguments")),
@@ -3022,42 +3070,20 @@ public class PlatformFrontendCompatibilityController {
         return text.isBlank() ? "tool" : text;
     }
 
-    private String pythonCommand() {
-        String value = System.getenv("AGENT_PLATFORM_PYTHON");
-        return value == null || value.isBlank() ? "python" : value;
+    private boolean sandboxEnabled() {
+        return environment.getProperty("agent.platform.sandbox.enabled", Boolean.class, false);
+    }
+
+    private String sandboxDockerCommand() {
+        return environment.getProperty("agent.platform.sandbox.docker-command", "docker");
+    }
+
+    private String sandboxImage() {
+        return environment.getProperty("agent.platform.sandbox.image", "python:3.12-slim");
     }
 
     private Path resolveWorkspacePath(String value) {
         return storage.resolveRelativeToWorkspace(value == null ? "" : value);
-    }
-
-    private Map<String, Object> pythonCompile(Path scriptPath) throws Exception {
-        Process process =
-                new ProcessBuilder(pythonCommand(), "-m", "py_compile", scriptPath.toString())
-                        .directory(scriptPath.getParent().toFile())
-                        .start();
-        boolean finished = process.waitFor(5000, java.util.concurrent.TimeUnit.MILLISECONDS);
-        if (!finished) {
-            process.destroyForcibly();
-            return map("ok", false, "timed_out", true, "error", "py_compile timed out.");
-        }
-        String stdout =
-                process.inputReader()
-                        .lines()
-                        .reduce("", (left, right) -> left.isBlank() ? right : left + "\n" + right);
-        String stderr =
-                process.errorReader()
-                        .lines()
-                        .reduce("", (left, right) -> left.isBlank() ? right : left + "\n" + right);
-        return map(
-                "ok",
-                process.exitValue() == 0,
-                "exit_code",
-                process.exitValue(),
-                "stdout",
-                stdout,
-                "stderr",
-                stderr);
     }
 
     private Map<String, Object> pythonExecutionResponse(

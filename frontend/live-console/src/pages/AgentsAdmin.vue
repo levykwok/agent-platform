@@ -30,6 +30,7 @@ const toolSourceFilter = ref('')
 const modelChoices = ref<JsonMap>({ fixed_slots: [], aliases: [] })
 const selectedId = ref('')
 const spec = ref<JsonMap | null>(null)
+const runtimeManifest = ref<JsonMap[]>([])
 const output = ref<JsonMap | null>(null)
 const domainFilter = ref(currentDomain(''))
 const keyword = ref('')
@@ -224,8 +225,12 @@ async function selectAgent(id: string) {
   step.value = 0
   output.value = null
   try {
-    const d = await api(`/platform/frontend/agents/${encodeURIComponent(id)}/spec`)
+    const [d, manifest] = await Promise.all([
+      api(`/platform/frontend/agents/${encodeURIComponent(id)}/spec`),
+      api(`/platform/frontend/tools/agents/${encodeURIComponent(id)}/runtime-manifest`).catch(() => ({ items: [] } as JsonMap)),
+    ])
     spec.value = d
+    runtimeManifest.value = (manifest.items || manifest.tools || []) as JsonMap[]
     const cfg = (d.config_json || {}) as JsonMap
     const a = agents.value.find((x) => x.agent_id === id) || {}
     const orchestration = (cfg.orchestration || {}) as JsonMap
@@ -271,6 +276,7 @@ async function selectAgent(id: string) {
         role: s.role || '',
         description: s.description || '',
         exposeToUser: s.exposeToUser ?? s.expose_to_user ?? true,
+        toolRefs: [...(((s.toolRefs || s.tool_refs) as string[]) || [])],
       })),
       model_policy: { ...((cfg.model_policy as JsonMap) || {}) },
     })
@@ -278,6 +284,7 @@ async function selectAgent(id: string) {
     await prepareQuickSession()
   } catch {
     spec.value = null
+    runtimeManifest.value = []
   }
 }
 
@@ -346,7 +353,7 @@ function addWorkflowTransition(step: JsonMap) {
 function removeWorkflowTransition(step: JsonMap, index: number) {
   ;((step.transitions || []) as JsonMap[]).splice(index, 1)
 }
-function addSubagent() { form.subagents.push({ bindingId: `subagent_${form.subagents.length + 1}`, targetAgentId: '', role: '', description: '', exposeToUser: true }) }
+function addSubagent() { form.subagents.push({ bindingId: `subagent_${form.subagents.length + 1}`, targetAgentId: '', role: '', description: '', exposeToUser: true, toolRefs: [] }) }
 function removeSubagent(i: number) { form.subagents.splice(i, 1) }
 function toggleModelPolicy(key: string) {
   if (key in form.model_policy) delete form.model_policy[key]
@@ -509,7 +516,7 @@ async function saveAgent() {
   }
   if (mode === 'SUPERVISOR') {
     const subagents = form.subagents
-      .map((s) => ({ bindingId: String(s.bindingId || '').trim(), targetAgentId: String(s.targetAgentId || '').trim(), role: String(s.role || '').trim(), description: String(s.description || '').trim(), exposeToUser: s.exposeToUser !== false, toolRefs: [] }))
+      .map((s) => ({ bindingId: String(s.bindingId || '').trim(), targetAgentId: String(s.targetAgentId || '').trim(), role: String(s.role || '').trim(), description: String(s.description || '').trim(), exposeToUser: s.exposeToUser !== false, toolRefs: [...(((s.toolRefs as string[]) || []))] }))
       .filter((s) => s.bindingId && s.targetAgentId)
   if (!subagents.length) { notifyError('SUPERVISOR 至少需要一个子代理'); step.value = 1; return }
     orchestration.subagents = subagents
@@ -687,6 +694,25 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
       </div>
     </section>
 
+    <section v-if="selected" class="panel runtime-tools" data-testid="runtime-tool-manifest">
+      <div class="section-title">运行时实际工具</div>
+      <p class="pick-hint">这里展示模型本次真正能看到的 Tool Schema；AgentScope 自动工具也会标明来源。当前 {{ runtimeManifest.length }} 个。</p>
+      <div v-if="runtimeManifest.length" class="runtime-tool-grid">
+        <article v-for="t in runtimeManifest" :key="String(t.tool_id || t.name)" class="runtime-tool-item">
+          <div><strong>{{ t.name || t.tool_id }}</strong><span class="risk" :class="String(t.risk || 'low')">{{ t.risk || 'low' }}</span></div>
+          <p>{{ t.description || '无描述' }}</p>
+          <div class="tags">
+            <span class="tag">{{ t.source || 'configured' }}</span>
+            <span v-if="t.auto_injected" class="tag">自动注入</span>
+            <span v-if="t.side_effects" class="tag danger">有副作用</span>
+            <span v-if="t.network" class="tag danger">联网</span>
+            <span v-if="t.subagent" class="tag danger">子 Agent</span>
+          </div>
+        </article>
+      </div>
+      <div v-else class="ov-empty">当前模型没有可调用工具。</div>
+    </section>
+
     <section class="try-panel">
       <div class="try-panel-head">
         <div>
@@ -797,7 +823,7 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         <div v-else-if="form.orchestration_mode === 'SUPERVISOR'">
 <div class="actions"><button class="btn btn-ghost btn-sm" @click="addSubagent">添加子代理</button></div>
           <table>
-<thead><tr><th>绑定名</th><th>目标代理</th><th>说明</th><th>暴露</th><th></th></tr></thead>
+<thead><tr><th>绑定名</th><th>目标代理</th><th>说明</th><th>允许工具（空 = 无）</th><th>暴露</th><th></th></tr></thead>
             <tbody>
               <tr v-for="(s,i) in form.subagents" :key="'sub'+i">
                 <td><input v-model="s.bindingId" placeholder="researcher"/></td>
@@ -808,10 +834,15 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
                   </select>
                 </td>
                 <td><input v-model="s.description" placeholder="这个子代理负责什么"/></td>
+                <td>
+                  <select v-model="s.toolRefs" multiple class="subagent-tool-select" title="按住 Ctrl / Command 多选；不选表示子 Agent 无工具">
+                    <option v-for="t in platformTools" :key="toolKey(t)" :value="toolKey(t)">{{ t.display_name || t.name || t.tool_id }}</option>
+                  </select>
+                </td>
         <td><select v-model="s.exposeToUser"><option :value="true">是</option><option :value="false">否</option></select></td>
                 <td><button class="btn small danger" @click="removeSubagent(i)">删除</button></td>
               </tr>
-<tr v-if="!form.subagents.length"><td colspan="5" class="empty">暂无子代理，保存 SUPERVISOR 前至少添加一个。</td></tr>
+<tr v-if="!form.subagents.length"><td colspan="6" class="empty">暂无子代理，保存 SUPERVISOR 前至少添加一个。</td></tr>
             </tbody>
           </table>
         </div>
@@ -952,6 +983,14 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
 </template>
 
 <style scoped>
+.runtime-tool-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
+.runtime-tool-item { border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; background: #fff; }
+.runtime-tool-item > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.runtime-tool-item p { margin: 7px 0; color: var(--muted); font-size: 12px; }
+.runtime-tool-item .risk { font-size: 10px; border-radius: 99px; padding: 2px 7px; background: #f1f5f9; color: #475569; }
+.runtime-tool-item .risk.high, .runtime-tool-item .risk.medium_high { background: #fee2e2; color: #b91c1c; }
+.runtime-tool-item .tag.danger { background: #fff1f2; color: #be123c; }
+.subagent-tool-select { min-width: 190px; min-height: 78px; }
 .tool-pick { padding: 4px 2px; }
 .workflow-branch-cell { min-width: 360px; vertical-align: top; }
 .workflow-branch-row { display: grid; grid-template-columns: minmax(100px, 1fr) 18px minmax(120px, 1fr) auto auto; gap: 6px; align-items: center; margin-top: 6px; }

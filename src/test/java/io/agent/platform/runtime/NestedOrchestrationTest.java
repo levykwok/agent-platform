@@ -13,6 +13,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.atLeastOnce;
 
 import io.agent.platform.adapter.agentscope.AgentScopeHarnessFactory;
 import io.agent.platform.control.AgentDefinition;
@@ -151,6 +152,62 @@ class NestedOrchestrationTest {
         verify(supervisorAgent).call(captured.capture(), any(RuntimeContext.class));
         assertTrue(captured.getValue().getTextContent().contains("target_agent_id: researcher"));
         assertTrue(captured.getValue().getTextContent().contains("target_agent_id: writer"));
+    }
+
+    @Test
+    void emptySubagentToolRefsInheritNoTargetTools() {
+        definitions.put(
+                "tool-child",
+                new AgentDefinition(
+                        "tool-child",
+                        "v1",
+                        "tool-child",
+                        "",
+                        Map.of(),
+                        "",
+                        true,
+                        Path.of("target", "nested-workflow", "tool-child"),
+                        List.of("dangerous_tool"),
+                        List.of("demo-mcp"),
+                        List.of(),
+                        OrchestrationPolicy.single()));
+        HarnessAgent child = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("child result"))
+                .when(child)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("tool-child", child);
+        HarnessAgent supervisor = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("final"))
+                .when(supervisor)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("tool-supervisor", supervisor);
+        addDefinition(
+                "tool-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding(
+                                        "child",
+                                        "tool-child",
+                                        "child",
+                                        "",
+                                        true,
+                                        List.of())),
+                        List.of(),
+                        List.of()));
+
+        runtime.chat("tool-supervisor", request("run child")).block();
+
+        ArgumentCaptor<AgentDefinition> definitionsUsed =
+                ArgumentCaptor.forClass(AgentDefinition.class);
+        verify(factory, atLeastOnce()).create(definitionsUsed.capture());
+        AgentDefinition scopedChild =
+                definitionsUsed.getAllValues().stream()
+                        .filter(item -> item.agentId().equals("tool-child"))
+                        .findFirst()
+                        .orElseThrow();
+        assertTrue(scopedChild.toolRefs().isEmpty());
+        assertTrue(scopedChild.mcpRefs().isEmpty());
     }
 
     @Test

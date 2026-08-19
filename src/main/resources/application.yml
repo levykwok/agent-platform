@@ -56,11 +56,12 @@ agent:
         url: ${AGENT_PLATFORM_SQLITE_URL:jdbc:sqlite:${agent.platform.workspace}/platform-platform.db}
         config-table: ${AGENT_PLATFORM_SQLITE_CONFIG_TABLE:platform_config}
         session-table-prefix: ${AGENT_PLATFORM_SQLITE_SESSION_TABLE_PREFIX:platform_}
-    sandbox:
+      sandbox:
       # Enable only on hosts where Docker is running. When enabled, Harness runs Skill scripts
       # in an isolated container and automatically exposes its `execute` tool to the Agent.
-      enabled: ${AGENT_PLATFORM_SANDBOX_ENABLED:false}
-      image: ${AGENT_PLATFORM_SANDBOX_IMAGE:python:3.12-slim}
+        enabled: ${AGENT_PLATFORM_SANDBOX_ENABLED:false}
+        docker-command: ${AGENT_PLATFORM_DOCKER_COMMAND:docker}
+        image: ${AGENT_PLATFORM_SANDBOX_IMAGE:python:3.12-slim}
       memory-size-bytes: ${AGENT_PLATFORM_SANDBOX_MEMORY_SIZE_BYTES:536870912}
       cpu-count: ${AGENT_PLATFORM_SANDBOX_CPU_COUNT:1}
     mcp:

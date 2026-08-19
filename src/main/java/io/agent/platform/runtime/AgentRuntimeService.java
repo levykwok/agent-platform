@@ -4,11 +4,14 @@
 package io.agent.platform.runtime;
 
 import io.agent.platform.adapter.agentscope.AgentScopeHarnessFactory;
+import io.agent.platform.adapter.agentscope.AgentExecutionPolicy;
 import io.agent.platform.control.AgentDefinition;
 import io.agent.platform.control.AgentDefinitionRegistry;
 import io.agent.platform.control.ContractValue;
 import io.agent.platform.control.OrchestrationMode;
+import io.agent.platform.control.OrchestrationPolicy;
 import io.agent.platform.control.RouteRule;
+import io.agent.platform.control.RuntimeToolGovernance;
 import io.agent.platform.control.SubagentBinding;
 import io.agent.platform.control.WorkflowAsset;
 import io.agent.platform.control.WorkflowBindingResolver;
@@ -71,6 +74,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -93,15 +97,33 @@ public class AgentRuntimeService implements AgentRuntime {
     private final PlatformCompatibilityState platformState;
     private final WorkflowAssetService workflowAssetService;
     private final boolean tenantAwareHarnessFactory;
+    private final RuntimeToolGovernance toolGovernance;
     private final Map<String, HarnessAgent> agentCache = new ConcurrentHashMap<>();
+    private final AtomicLong cachedToolPolicyVersion = new AtomicLong(Long.MIN_VALUE);
 
     @Autowired
     public AgentRuntimeService(
             AgentDefinitionRegistry registry,
             AgentScopeHarnessFactory harnessFactory,
             PlatformCompatibilityState platformState,
+            WorkflowAssetService workflowAssetService,
+            RuntimeToolGovernance toolGovernance) {
+        this(
+                registry,
+                harnessFactory,
+                platformState,
+                workflowAssetService,
+                toolGovernance,
+                true);
+    }
+
+    /** Compatibility constructor for focused tests. */
+    public AgentRuntimeService(
+            AgentDefinitionRegistry registry,
+            AgentScopeHarnessFactory harnessFactory,
+            PlatformCompatibilityState platformState,
             WorkflowAssetService workflowAssetService) {
-        this(registry, harnessFactory, platformState, workflowAssetService, true);
+        this(registry, harnessFactory, platformState, workflowAssetService, null, true);
     }
 
     private AgentRuntimeService(
@@ -109,11 +131,13 @@ public class AgentRuntimeService implements AgentRuntime {
             AgentScopeHarnessFactory harnessFactory,
             PlatformCompatibilityState platformState,
             WorkflowAssetService workflowAssetService,
+            RuntimeToolGovernance toolGovernance,
             boolean tenantAwareHarnessFactory) {
         this.registry = registry;
         this.harnessFactory = harnessFactory;
         this.platformState = platformState;
         this.workflowAssetService = workflowAssetService;
+        this.toolGovernance = toolGovernance;
         this.tenantAwareHarnessFactory = tenantAwareHarnessFactory;
     }
 
@@ -122,7 +146,7 @@ public class AgentRuntimeService implements AgentRuntime {
             AgentDefinitionRegistry registry,
             AgentScopeHarnessFactory harnessFactory,
             PlatformCompatibilityState platformState) {
-        this(registry, harnessFactory, platformState, null, false);
+        this(registry, harnessFactory, platformState, null, null, false);
     }
 
     @Override
@@ -222,6 +246,21 @@ public class AgentRuntimeService implements AgentRuntime {
     public void evict(String agentId) {
         String prefix = agentId + ":";
         agentCache.keySet().removeIf(key -> key.startsWith(prefix));
+        if (toolGovernance != null) {
+            toolGovernance.clearManifests(agentId);
+        }
+    }
+
+    @Override
+    public List<Map<String, Object>> runtimeToolManifest(
+            String agentId, String tenantId, String userId) {
+        AgentDefinition definition = definition(agentId);
+        agent(definition, tenantId, userId);
+        return toolGovernance == null
+                ? definition.toolRefs().stream()
+                        .map(ref -> Map.<String, Object>of("tool_id", ref, "source", "configured"))
+                        .toList()
+                : toolGovernance.manifest(agentId, tenantId, userId);
     }
 
     private Mono<ChatResponse> runSingle(AgentDefinition definition, ChatRequest request) {
@@ -1008,7 +1047,8 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private List<SubagentBinding> selectSubagents(AgentDefinition definition, String message) {
         List<SubagentBinding> bindings = definition.orchestration().subagents();
-        if (bindings.isEmpty()) {
+        int budget = AgentExecutionPolicy.from(definition).maxSubagents();
+        if (bindings.isEmpty() || budget == 0) {
             return List.of();
         }
         if (bindings.size() == 1) {
@@ -1034,7 +1074,10 @@ public class AgentRuntimeService implements AgentRuntime {
                         .toList();
         // A supervisor with multiple bindings is an ensemble: when no lexical hint exists,
         // ask every declared specialist instead of silently picking an arbitrary one.
-        return matched.isEmpty() ? bindings : matched;
+        List<SubagentBinding> selected = matched.isEmpty() ? bindings : matched;
+        return selected.stream()
+                .limit(budget)
+                .toList();
     }
 
     private int matchScore(String normalizedMessage, String candidate) {
@@ -1073,23 +1116,60 @@ public class AgentRuntimeService implements AgentRuntime {
             AgentDefinition supervisor,
             ChatRequest request,
             List<SubagentBinding> bindings) {
-        List<Mono<SubagentReply>> calls =
-                bindings.stream()
-                        .map(
-                                binding -> {
-                                    AgentDefinition target = definition(binding.targetAgentId());
-                                    return callAgent(
-                                                    target,
-                                                    request,
-                                                    subagentMessage(binding, request.message()),
-                                                    subagentContext(request, binding))
-                                            .map(
-                                                    execution ->
-                                                            new SubagentReply(
-                                                                    binding, target, execution));
-                                })
-                        .toList();
-        return Flux.merge(calls).collectList();
+        AgentExecutionPolicy policy = AgentExecutionPolicy.from(supervisor);
+        return Flux.fromIterable(bindings)
+                .flatMap(
+                        binding -> {
+                            AgentDefinition target =
+                                    scopedSubagentDefinition(
+                                            definition(binding.targetAgentId()), binding);
+                            return callAgent(
+                                            target,
+                                            request,
+                                            subagentMessage(binding, request.message()),
+                                            subagentContext(request, binding))
+                                    .timeout(Duration.ofMillis(policy.subagentTimeoutMs()))
+                                    .map(
+                                            execution ->
+                                                    new SubagentReply(
+                                                            binding, target, execution));
+                        },
+                        policy.maxSubagentConcurrency())
+                .collectList();
+    }
+
+    /** A child receives only binding-declared tools; an empty list intentionally means none. */
+    private AgentDefinition scopedSubagentDefinition(
+            AgentDefinition target, SubagentBinding binding) {
+        Set<String> targetTools = new java.util.LinkedHashSet<>(target.toolRefs());
+        List<String> allowed =
+                binding.toolRefs().stream().filter(targetTools::contains).distinct().toList();
+        Set<String> allowedMcpIds =
+                allowed.stream()
+                        .filter(ref -> ref.startsWith("mcp:"))
+                        .map(ref -> ref.split(":", 3))
+                        .filter(parts -> parts.length == 3)
+                        .map(parts -> parts[1])
+                        .collect(java.util.stream.Collectors.toSet());
+        List<String> mcps =
+                target.mcpRefs().stream().filter(allowedMcpIds::contains).toList();
+        String scopedVersion =
+                target.version()
+                        + "-binding-"
+                        + Integer.toHexString((binding.bindingId() + allowed).hashCode());
+        return new AgentDefinition(
+                target.agentId(),
+                scopedVersion,
+                target.name(),
+                target.model(),
+                target.modelPolicy(),
+                target.systemPrompt(),
+                target.enabled(),
+                target.workspace(),
+                allowed,
+                mcps,
+                target.skillRefs(),
+                OrchestrationPolicy.single());
     }
 
     private String supervisorSummaryMessage(
@@ -1371,6 +1451,9 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private Flux<AgentEventEnvelope> capabilityEvents(
             AgentDefinition definition, String tenantId, String userId) {
+        List<Map<String, Object>> runtimeManifest =
+                runtimeToolManifest(definition.agentId(), tenantId, userId);
+        AgentExecutionPolicy runtimePolicy = AgentExecutionPolicy.from(definition);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("agent_id", definition.agentId());
         payload.put("mode", definition.orchestration().mode().name());
@@ -1379,7 +1462,13 @@ public class AgentRuntimeService implements AgentRuntime {
         payload.put("tool_refs", definition.toolRefs());
         payload.put("mcp_refs", definition.mcpRefs());
         payload.put("skill_refs", definition.skillRefs());
-        payload.put("tool_count", definition.toolRefs().size());
+        payload.put("tool_count", runtimeManifest.size());
+        payload.put("runtime_tool_manifest", runtimeManifest);
+        payload.put("max_iters", runtimePolicy.maxIters());
+        payload.put("tool_call_budget", runtimePolicy.maxToolCalls());
+        payload.put("runtime_timeout_ms", runtimePolicy.timeoutMs());
+        payload.put("subagent_budget", runtimePolicy.maxSubagents());
+        payload.put("subagent_concurrency", runtimePolicy.maxSubagentConcurrency());
         payload.put("mcp_count", definition.mcpRefs().size());
         payload.put("skill_count", definition.skillRefs().size());
         long memoryCount = platformState.activeMemoryCount("platform");
@@ -1402,7 +1491,7 @@ public class AgentRuntimeService implements AgentRuntime {
                 "Loaded capabilities for "
                         + definition.agentId()
                         + ": tools="
-                        + definition.toolRefs().size()
+                        + runtimeManifest.size()
                         + ", mcps="
                         + definition.mcpRefs().size()
                         + ", skills="
@@ -1603,6 +1692,14 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private HarnessAgent agent(
             AgentDefinition definition, String tenantId, String userId) {
+        long policyVersion = toolGovernance == null ? 0 : toolGovernance.version();
+        long cachedVersion = cachedToolPolicyVersion.get();
+        if (cachedVersion != policyVersion
+                && cachedToolPolicyVersion.compareAndSet(cachedVersion, policyVersion)) {
+            // A global policy change can affect every Agent. Drop superseded instances instead
+            // of retaining one cache generation per toggle indefinitely.
+            agentCache.clear();
+        }
         String key =
                 definition.agentId()
                         + ":"
@@ -1611,6 +1708,7 @@ public class AgentRuntimeService implements AgentRuntime {
                         + safe(tenantId, "platform")
                         + ":"
                         + safe(userId, "anonymous");
+        key += ":policy-" + policyVersion;
         return agentCache.computeIfAbsent(
                 key,
                 ignored ->

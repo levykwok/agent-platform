@@ -8,6 +8,7 @@ import io.agent.platform.control.McpRegistry;
 import io.agent.platform.control.McpSpec;
 import io.agent.platform.control.OrchestrationMode;
 import io.agent.platform.control.PlatformStorageLayer;
+import io.agent.platform.control.RuntimeToolGovernance;
 import io.agent.platform.control.SkillRegistry;
 import io.agent.platform.control.SkillSpec;
 import io.agent.platform.control.ToolRegistry;
@@ -68,6 +69,7 @@ public class AgentCapabilityAssembler {
     private final ObjectProvider<AgentRuntime> runtimeProvider;
     private final PlatformUserCapabilityService userCapabilities;
     private final ObjectProvider<ScheduledTaskTools> scheduledTaskToolsProvider;
+    private final RuntimeToolGovernance toolGovernance;
 
     public AgentCapabilityAssembler(
             ToolRegistry toolRegistry,
@@ -79,7 +81,8 @@ public class AgentCapabilityAssembler {
             WorkflowToolRegistry workflowToolRegistry,
             ObjectProvider<AgentRuntime> runtimeProvider,
             PlatformUserCapabilityService userCapabilities,
-            ObjectProvider<ScheduledTaskTools> scheduledTaskToolsProvider) {
+            ObjectProvider<ScheduledTaskTools> scheduledTaskToolsProvider,
+            RuntimeToolGovernance toolGovernance) {
         this.toolRegistry = toolRegistry;
         this.mcpRegistry = mcpRegistry;
         this.skillRegistry = skillRegistry;
@@ -90,6 +93,7 @@ public class AgentCapabilityAssembler {
         this.runtimeProvider = runtimeProvider;
         this.userCapabilities = userCapabilities;
         this.scheduledTaskToolsProvider = scheduledTaskToolsProvider;
+        this.toolGovernance = toolGovernance;
     }
 
     public void applyToolsAndMcps(Toolkit toolkit, AgentDefinition definition) {
@@ -100,21 +104,26 @@ public class AgentCapabilityAssembler {
             Toolkit toolkit, AgentDefinition definition, String tenantId, String userId) {
         PlatformAuthService.Principal principal = principal(tenantId, userId);
         List<String> toolRefs = conversationalToolRefs(definition);
+        applySupervisorScheduleTools(toolkit, definition);
         applyWorkflowTools(toolkit, definition, workflowToolRefs(toolRefs));
-        applyTools(toolkit, javaToolRefs(toolRefs), principal);
-        applyMcps(toolkit, definition.mcpRefs(), toolRefs, principal);
+        applyTools(toolkit, definition, javaToolRefs(toolRefs), principal);
+        applyMcps(toolkit, definition, definition.mcpRefs(), toolRefs, principal);
     }
 
     private List<String> conversationalToolRefs(AgentDefinition definition) {
-        List<String> refs = new ArrayList<>(safeRefs(definition.toolRefs()));
-        if (definition.orchestration().mode() == OrchestrationMode.SUPERVISOR) {
-            for (String scheduleTool : SUPERVISOR_SCHEDULE_TOOLS) {
-                if (!refs.contains(scheduleTool)) {
-                    refs.add(scheduleTool);
-                }
-            }
+        return List.copyOf(safeRefs(definition.toolRefs()));
+    }
+
+    private void applySupervisorScheduleTools(Toolkit toolkit, AgentDefinition definition) {
+        if (definition.orchestration().mode() != OrchestrationMode.SUPERVISOR) {
+            return;
         }
-        return List.copyOf(refs);
+        boolean anyAllowed =
+                SUPERVISOR_SCHEDULE_TOOLS.stream()
+                        .anyMatch(toolId -> toolGovernance.isAllowed(definition.agentId(), toolId, true));
+        if (anyAllowed) {
+            toolkit.registration().tool(scheduledTaskToolsProvider.getObject()).apply();
+        }
     }
 
     private void applyWorkflowTools(Toolkit toolkit, AgentDefinition definition, List<String> workflowRefs) {
@@ -124,6 +133,9 @@ public class AgentCapabilityAssembler {
         AgentRuntime runtime = runtimeProvider.getObject();
         for (String ref : workflowRefs) {
             String toolId = ref.trim();
+            if (!toolGovernance.isAllowed(definition.agentId(), toolId, true)) {
+                continue;
+            }
             var registration = workflowToolRegistry.requireForAgent(toolId, definition.agentId());
             var workflow = workflowAssetService.requirePublished(registration.workflowId());
             toolkit.registration()
@@ -169,9 +181,16 @@ public class AgentCapabilityAssembler {
     }
 
     private void applyTools(
-            Toolkit toolkit, List<String> toolRefs, PlatformAuthService.Principal principal) {
+            Toolkit toolkit,
+            AgentDefinition definition,
+            List<String> toolRefs,
+            PlatformAuthService.Principal principal) {
         Set<String> seen = new HashSet<>();
         for (String toolRef : safeRefs(toolRefs)) {
+            if (!toolGovernance.isAllowed(definition.agentId(), toolRef, true)) {
+                log.info("Runtime policy disabled tool {} for {}", toolRef, definition.agentId());
+                continue;
+            }
             if (principal != null) {
                 var personal = userCapabilities.findTool(toolRef, principal);
                 if (personal.isPresent()) {
@@ -202,8 +221,11 @@ public class AgentCapabilityAssembler {
             if (!spec.enabled()) {
                 continue;
             }
+            if (!toolGovernance.isAllowed(definition.agentId(), spec.toolId(), true)) {
+                continue;
+            }
             if ("python".equalsIgnoreCase(spec.type())) {
-                registerPythonTool(toolkit, spec);
+                registerPythonTool(toolkit, definition, spec);
                 continue;
             }
             if (!"java".equalsIgnoreCase(spec.type())) {
@@ -238,7 +260,15 @@ public class AgentCapabilityAssembler {
         }
     }
 
-    private void registerPythonTool(Toolkit toolkit, ToolSpec spec) {
+    private void registerPythonTool(
+            Toolkit toolkit, AgentDefinition definition, ToolSpec spec) {
+        if (!environment.getProperty("agent.platform.sandbox.enabled", Boolean.class, false)) {
+            log.warn(
+                    "Python tool {} is blocked for {} because the Docker sandbox is disabled",
+                    spec.toolId(),
+                    definition.agentId());
+            return;
+        }
         Path scriptPath = resolveToolPath(spec.scriptPath());
         PythonScriptTool tool =
                 new PythonScriptTool(
@@ -247,19 +277,25 @@ public class AgentCapabilityAssembler {
                         spec.parameterSchema(),
                         scriptPath,
                         Duration.ofMillis(spec.timeoutMs()),
-                        environment.getProperty("AGENT_PLATFORM_PYTHON", "python"));
+                        environment.getProperty("agent.platform.sandbox.docker-command", "docker"),
+                        environment.getProperty(
+                                "agent.platform.sandbox.image", "python:3.12-slim"));
         toolkit.registration().agentTool(tool).apply();
         log.info("Registered Python script tool {} from {}", spec.toolId(), scriptPath);
     }
 
     private void applyMcps(
             Toolkit toolkit,
+            AgentDefinition definition,
             List<String> mcpRefs,
             List<String> toolRefs,
             PlatformAuthService.Principal principal) {
         Map<String, McpServerConfig> configs = new LinkedHashMap<>();
         Map<String, List<String>> agentToolFilters = mcpToolRefs(toolRefs);
         for (String mcpRef : safeRefs(mcpRefs)) {
+            if (!toolGovernance.isAllowed(definition.agentId(), mcpRef, true)) {
+                continue;
+            }
             McpSpec spec =
                     principal == null
                             ? null

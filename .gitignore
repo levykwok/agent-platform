@@ -23,6 +23,8 @@ frontend/live-console/*.log
 frontend/live-console/dist/
 frontend/live-console/dist-check*/
 .playwright-cli/
+.tmp-governance-e2e/
+.tmp-schedule-test-logs/
 docs/_build/
 docs/_static/
 docs/*.egg-info/

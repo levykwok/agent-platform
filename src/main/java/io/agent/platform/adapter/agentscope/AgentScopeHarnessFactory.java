@@ -4,9 +4,8 @@
 package io.agent.platform.adapter.agentscope;
 
 import io.agent.platform.control.AgentDefinition;
-import io.agent.platform.control.AgentDefinitionRegistry;
 import io.agent.platform.control.PlatformStorageLayer;
-import io.agent.platform.control.SubagentBinding;
+import io.agent.platform.control.RuntimeToolGovernance;
 import io.agent.platform.web.PlatformCompatibilityState;
 import io.agentscope.core.permission.PermissionContextState;
 import io.agentscope.core.permission.PermissionMode;
@@ -18,12 +17,17 @@ import io.agentscope.harness.agent.IsolationScope;
 import io.agentscope.harness.agent.memory.MemoryConfig;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.sandbox.impl.docker.DockerFilesystemSpec;
-import io.agentscope.harness.agent.subagent.SubagentDeclaration;
+import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
@@ -62,23 +66,23 @@ public class AgentScopeHarnessFactory {
             Do not duplicate memories already covered there.
             """;
 
-    private final AgentDefinitionRegistry registry;
     private final AgentCapabilityAssembler capabilityAssembler;
     private final PlatformCompatibilityState platformState;
     private final PlatformStorageLayer storage;
+    private final RuntimeToolGovernance toolGovernance;
     private final Environment environment;
     private static final String DEFAULT_AGENT_ID = "unknown_agent";
 
     public AgentScopeHarnessFactory(
-            AgentDefinitionRegistry registry,
             AgentCapabilityAssembler capabilityAssembler,
             PlatformCompatibilityState platformState,
             PlatformStorageLayer storage,
+            RuntimeToolGovernance toolGovernance,
             Environment environment) {
-        this.registry = registry;
         this.capabilityAssembler = capabilityAssembler;
         this.platformState = platformState;
         this.storage = storage;
+        this.toolGovernance = toolGovernance;
         this.environment = environment;
     }
 
@@ -90,8 +94,14 @@ public class AgentScopeHarnessFactory {
         ensureWorkspace(definition);
         Toolkit toolkit = new Toolkit();
         capabilityAssembler.applyToolsAndMcps(toolkit, definition, tenantId, userId);
+        // MCP clients are registered synchronously, but their model-facing schemas are
+        // materialized through getToolSchemas(). Snapshot schemas (not only the name index) so
+        // configured MCP tools are not mislabeled later as Harness auto-injected built-ins.
+        Set<String> configuredToolNames = new LinkedHashSet<>();
+        toolkit.getToolSchemas().forEach(schema -> configuredToolNames.add(schema.getName()));
         List<AgentSkillRepository> skillRepositories =
                 capabilityAssembler.buildSkillRepositories(definition, tenantId, userId);
+        AgentExecutionPolicy policy = AgentExecutionPolicy.from(definition);
         HarnessAgent.Builder builder =
                 HarnessAgent.builder()
                         .name(definition.name())
@@ -100,6 +110,8 @@ public class AgentScopeHarnessFactory {
                         .workspace(definition.workspace())
                         .stateStore(stateStore(definition))
                         .toolkit(toolkit)
+                        .maxIters(policy.maxIters())
+                        .asyncToolTimeout(Duration.ofMillis(Math.min(policy.timeoutMs(), 60_000L)))
                         .skillRepositories(skillRepositories)
                         .memory(
                                 MemoryConfig.builder()
@@ -112,20 +124,51 @@ public class AgentScopeHarnessFactory {
                                         platformState,
                                         safe(definition.agentId(), DEFAULT_AGENT_ID),
                                         definition.model()))
+                        .middleware(
+                                new RuntimeGuardMiddleware(
+                                        platformState,
+                                        safe(definition.agentId(), DEFAULT_AGENT_ID),
+                                        policy.maxToolCalls(),
+                                        Duration.ofMillis(policy.timeoutMs())))
+                        // Platform orchestration owns Supervisor/Router/Workflow execution. Never
+                        // expose Harness' implicit general-purpose child agent or task tools.
+                        .disableSubagents()
+                        .disableDynamicSubagents()
                         .permissionContext(
                                 PermissionContextState.builder()
-                                        .mode(PermissionMode.BYPASS)
+                                        .mode(PermissionMode.DONT_ASK)
                                         .build());
-        if (skillSandboxEnabled()) {
+        if (!policy.memoryTools()) {
+            builder.disableMemoryTools();
+        }
+        boolean filesystemAllowed = policy.fileRead() || policy.fileWrite();
+        if (!filesystemAllowed) {
+            builder.disableFilesystemTools();
+        }
+        boolean sandboxedShell = policy.shell() && skillSandboxEnabled();
+        if (!sandboxedShell) {
+            builder.disableShellTool();
+        }
+        if (skillSandboxEnabled() && (filesystemAllowed || policy.shell())) {
             // Harness registers its built-in `execute` tool only for a sandbox-backed filesystem.
             // This keeps Skill scripts out of the platform host process and projects the Skill
             // files into the isolated /workspace path before every agent call.
             builder.filesystem(skillSandbox());
+        } else {
+            // Even when all file tools are hidden, pin Harness' context filesystem to this
+            // agent's workspace. This prevents the library fallback to ${user.dir}.
+            builder.filesystem(
+                    new LocalFilesystemSpec()
+                            .project(definition.workspace())
+                            .projectWritable(false)
+                            .inheritEnv(false)
+                            .isolationScope(IsolationScope.USER));
         }
-        for (SubagentBinding binding : definition.orchestration().subagents()) {
-            builder.subagent(toSubagentDeclaration(binding));
-        }
-        return builder.build();
+        HarnessAgent agent = builder.build();
+        enforceFinalToolkit(agent.getToolkit(), definition, policy);
+        recordManifest(
+                agent.getToolkit(), definition, tenantId, userId, configuredToolNames, policy);
+        return agent;
     }
 
     private boolean skillSandboxEnabled() {
@@ -219,23 +262,104 @@ public class AgentScopeHarnessFactory {
         return normalized.isBlank() ? fallback : normalized;
     }
 
-    private SubagentDeclaration toSubagentDeclaration(SubagentBinding binding) {
-        AgentDefinition target =
-                registry.findPublished(binding.targetAgentId())
-                        .orElseThrow(
-                                () ->
-                                        new IllegalStateException(
-                                                "Subagent target not found: "
-                                                        + binding.targetAgentId()));
-        ensureWorkspace(target);
-        return SubagentDeclaration.builder()
-                .name(binding.bindingId())
-                .description(binding.description())
-                .workspace(target.workspace())
-                .model(resolveModel(target))
-                .exposeToUser(binding.exposeToUser())
-                .tools(binding.toolRefs())
-                .build();
+    private void enforceFinalToolkit(
+            Toolkit toolkit, AgentDefinition definition, AgentExecutionPolicy policy) {
+        Set<String> names = Set.copyOf(toolkit.getToolNames());
+        for (String name : names) {
+            boolean forbiddenBuiltin =
+                    isSubagentTool(name)
+                            || isTaskTool(name)
+                            || (!policy.memoryTools() && isMemoryTool(name))
+                            || (!policy.fileRead() && isFileReadTool(name))
+                            || (!policy.fileWrite() && isFileWriteTool(name))
+                            || (!(policy.shell() && skillSandboxEnabled()) && "execute".equals(name));
+            if (forbiddenBuiltin
+                    || !toolGovernance.isAllowed(definition.agentId(), name, true)) {
+                toolkit.removeTool(name);
+            }
+        }
+    }
+
+    private void recordManifest(
+            Toolkit toolkit,
+            AgentDefinition definition,
+            String tenantId,
+            String userId,
+            Set<String> configuredToolNames,
+            AgentExecutionPolicy policy) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        toolkit.getToolSchemas().forEach(
+                schema -> {
+                    String name = schema.getName();
+                    boolean configured = configuredToolNames.contains(name);
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("tool_id", name);
+                    row.put("name", name);
+                    row.put("description", safe(schema.getDescription(), name));
+                    row.put("parameter_schema", schema.getParameters());
+                    row.put("source", configured ? "configured" : builtinSource(name));
+                    row.put("auto_injected", !configured);
+                    row.put("risk", risk(name));
+                    row.put("side_effects", isFileWriteTool(name) || "execute".equals(name));
+                    row.put("network", looksNetworked(name));
+                    row.put("subagent", isSubagentTool(name));
+                    row.put("runtime_enabled", true);
+                    rows.add(row);
+                });
+        rows.sort(
+                java.util.Comparator.comparing(
+                        row -> String.valueOf(row.getOrDefault("tool_id", ""))));
+        toolGovernance.recordManifest(definition.agentId(), tenantId, userId, rows);
+    }
+
+    private static boolean isFileReadTool(String name) {
+        return Set.of("read_file", "grep_files", "glob_files", "list_files").contains(name);
+    }
+
+    private static boolean isFileWriteTool(String name) {
+        return Set.of("write_file", "edit_file").contains(name);
+    }
+
+    private static boolean isMemoryTool(String name) {
+        return name != null && (name.startsWith("memory_") || name.startsWith("session_"));
+    }
+
+    private static boolean isSubagentTool(String name) {
+        return name != null
+                && (name.startsWith("agent_")
+                        || name.startsWith("task_")
+                        || "agent_generate".equals(name));
+    }
+
+    private static boolean isTaskTool(String name) {
+        return "wait_async_results".equals(name);
+    }
+
+    private static String builtinSource(String name) {
+        if (isFileReadTool(name) || isFileWriteTool(name)) return "agentscope_filesystem";
+        if ("execute".equals(name)) return "agentscope_shell";
+        if (isMemoryTool(name)) return "agentscope_memory";
+        if (isSubagentTool(name)) return "agentscope_subagent";
+        if (isTaskTool(name)) return "agentscope_async_task";
+        if (name != null && name.contains("skill")) return "agentscope_skill";
+        return "agentscope_builtin";
+    }
+
+    private static String risk(String name) {
+        if ("execute".equals(name) || isSubagentTool(name) || isTaskTool(name)) return "high";
+        if (isFileWriteTool(name) || looksNetworked(name)) return "medium_high";
+        if (isFileReadTool(name) || isMemoryTool(name)) return "medium";
+        return "low";
+    }
+
+    private static boolean looksNetworked(String name) {
+        if (name == null) return false;
+        String normalized = name.toLowerCase();
+        return normalized.contains("http")
+                || normalized.contains("fetch")
+                || normalized.contains("web")
+                || normalized.contains("search")
+                || normalized.contains("url");
     }
 
     private void ensureWorkspace(AgentDefinition definition) {
