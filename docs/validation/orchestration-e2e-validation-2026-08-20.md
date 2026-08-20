@@ -62,14 +62,26 @@ The validation used the real browser UI at `http://localhost:5173`.
 - SUPERVISOR showed two child selections, two child results, supervisor synthesis model events, and `run.succeeded`.
 - The browser console reported zero errors after the authenticated validation flow.
 
+The browser-triggered Quick Run measurements were:
+
+| Mode | Run | UI duration | Result marker |
+|---|---|---:|---|
+| SINGLE | `run_946ec823d6214ccd8544551016e85483` | 5,664 ms | `E2E_ANALYSIS_OK` |
+| WORKFLOW | `run_42fb71b2922f4035af2e471239a9fbb9` | 11,235 ms | `E2E_FORMAT_OK` |
+| ROUTER -> WORKFLOW | `run_4eae3d3d825e4da7a150f83ad6d514c9` | 24,748 ms | `E2E_FORMAT_OK` |
+| SUPERVISOR | `run_3e20cbd8afa64e65bae1ac17692ad275` | 11,771 ms | `E2E_SUPERVISOR_OK` |
+
+All four Quick Run requests returned HTTP 200 through the Vite development server. The run-detail APIs for the four streaming validation runs also returned HTTP 200, and Playwright verified the mode-specific trace events in the rendered page.
+
 Local visual evidence is written to:
 
 - `output/playwright/orchestration-e2e-router-trace.png`
 - `output/playwright/orchestration-e2e-supervisor-trace.png`
+- `output/playwright/orchestration-runs.png`
 
 ## Findings
 
 1. The four orchestration modes are functional and independently demonstrable. ROUTER delegates to both a single agent and a workflow by configuration; the validated serial route entered the workflow.
 2. The apparent orchestration delay is predominantly model latency. Routing and child selection are sub-second in these samples. The ROUTER terminal-event gap is the one material runtime overhead requiring follow-up measurements.
 3. The Vite development proxy returned an empty HTTP 500 for PowerShell/.NET SSE clients during diagnostics, while direct backend SSE calls succeeded. Normal browser Quick Run requests through Vite succeeded. The automation therefore defaults to port 8080.
-4. The Supervisor detail page exposes eight built-in schedule tools even though this test definition declares no tools. No schedule tool was invoked in these runs, but the automatic tool exposure should remain part of tool-governance review.
+4. The Supervisor detail page exposes eight built-in schedule tools even though this test definition declares no tools. This is the available runtime manifest, not evidence of execution: no tool-call event occurred in these runs. The automatic exposure should remain part of tool-governance review.

@@ -39,6 +39,7 @@ const navItems = [
   { key: 'external-test', href: '/platform/live/external-test', icon: 'qa', label: '外部接入测试', section: '核心能力', native: true },
   { key: 'memory', href: '/platform/live/memory', icon: 'memory', label: '记忆管理', section: '核心能力', native: true },
   { key: 'scheduled', href: '/platform/live/scheduled', icon: 'memory', label: '定时任务', section: '核心能力', native: true },
+  { key: 'runs', href: '/platform/live/runs', icon: 'memory', label: '运行观测', section: '运维', native: true },
   { key: 'docs', href: '/platform/live/docs', icon: 'docs', label: '使用文档', section: '帮助', native: true },
 ]
 
