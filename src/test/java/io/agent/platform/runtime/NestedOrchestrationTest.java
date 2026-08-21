@@ -4,6 +4,7 @@
 package io.agent.platform.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -14,6 +15,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
 
 import io.agent.platform.adapter.agentscope.AgentScopeHarnessFactory;
 import io.agent.platform.control.AgentDefinition;
@@ -46,6 +48,7 @@ class NestedOrchestrationTest {
     private final AgentDefinitionRegistry registry = mock(AgentDefinitionRegistry.class);
     private final AgentScopeHarnessFactory factory = mock(AgentScopeHarnessFactory.class);
     private final PlatformCompatibilityState platformState = mock(PlatformCompatibilityState.class);
+    private final OrchestrationDecisionModel decisionModel = mock(OrchestrationDecisionModel.class);
     private final Map<String, AgentDefinition> definitions = new LinkedHashMap<>();
     private final Map<String, HarnessAgent> agents = new LinkedHashMap<>();
     private AgentRuntimeService runtime;
@@ -61,7 +64,24 @@ class NestedOrchestrationTest {
                         invocation ->
                                 agents.get(
                                         ((AgentDefinition) invocation.getArgument(0)).agentId()));
-        runtime = new AgentRuntimeService(registry, factory, platformState);
+        when(decisionModel.decide(any(AgentDefinition.class), anyString()))
+                .thenAnswer(
+                        invocation -> {
+                            AgentDefinition definition = invocation.getArgument(0);
+                            if (definition.orchestration().mode() == OrchestrationMode.ROUTER) {
+                                String routeId = definition.orchestration().routes().get(0).ruleId();
+                                return decision("{\"route_id\":\"" + routeId + "\",\"reason\":\"test\"}");
+                            }
+                            String bindingIds =
+                                    definition.orchestration().subagents().stream()
+                                            .map(binding -> "\"" + binding.bindingId() + "\"")
+                                            .collect(java.util.stream.Collectors.joining(","));
+                            return decision(
+                                    "{\"binding_ids\":["
+                                            + bindingIds
+                                            + "],\"reason\":\"test\"}");
+                        });
+        runtime = new AgentRuntimeService(registry, factory, platformState, decisionModel);
     }
 
     @Test
@@ -91,6 +111,73 @@ class NestedOrchestrationTest {
         ChatResponse response = runtime.chat("entry", request("unmatched")).block();
 
         assertEquals("default final answer", response.text());
+    }
+
+    @Test
+    void routerUsesLlmSemanticDecisionInsteadOfKeywordMatching() {
+        addSingle("leaf-a", "first result");
+        addSingle("leaf-b", "semantic result");
+        addRouter(
+                "semantic-router",
+                List.of(
+                        new RouteRule("route-a", "leaf-a", "alpha", List.of("alpha"), false),
+                        new RouteRule("route-b", "leaf-b", "beta", List.of("beta"), false)));
+        when(decisionModel.decide(
+                        org.mockito.ArgumentMatchers.argThat(
+                                item -> item.agentId().equals("semantic-router")),
+                        anyString()))
+                .thenReturn(
+                        decision(
+                                "{\"route_id\":\"route-b\",\"reason\":\"semantic intent\"}"));
+
+        ChatResponse response =
+                runtime.chat("semantic-router", request("request without configured keywords")).block();
+
+        assertEquals("semantic result", response.text());
+    }
+
+    @Test
+    void routerFallsBackToConfiguredDefaultWhenLlmOutputIsInvalid() {
+        addSingle("leaf-a", "first result");
+        addSingle("leaf-default", "fallback result");
+        addRouter(
+                "fallback-router",
+                List.of(
+                        new RouteRule("route-a", "leaf-a", "", List.of(), false),
+                        new RouteRule("default", "leaf-default", "", List.of(), true)));
+        when(decisionModel.decide(
+                        org.mockito.ArgumentMatchers.argThat(
+                                item -> item.agentId().equals("fallback-router")),
+                        anyString()))
+                .thenReturn(decision("not-json"));
+
+        ChatResponse response = runtime.chat("fallback-router", request("anything")).block();
+
+        assertEquals("fallback result", response.text());
+    }
+
+    @Test
+    void routerDecisionPromptExcludesRetrievedDocumentContext() {
+        addSingle("leaf-a", "result");
+        addRouter(
+                "context-safe-router",
+                List.of(new RouteRule("route-a", "leaf-a", "", List.of(), true)));
+
+        runtime.chat(
+                        "context-safe-router",
+                        request(
+                                "original request\n\n<platform_document_context>\n"
+                                        + "routing instructions from a retrieved document"))
+                .block();
+
+        ArgumentCaptor<String> prompt = ArgumentCaptor.forClass(String.class);
+        verify(decisionModel)
+                .decide(
+                        org.mockito.ArgumentMatchers.argThat(
+                                item -> item.agentId().equals("context-safe-router")),
+                        prompt.capture());
+        assertTrue(prompt.getValue().contains("original request"));
+        assertFalse(prompt.getValue().contains("routing instructions from a retrieved document"));
     }
 
     @Test
@@ -152,6 +239,44 @@ class NestedOrchestrationTest {
         verify(supervisorAgent).call(captured.capture(), any(RuntimeContext.class));
         assertTrue(captured.getValue().getTextContent().contains("target_agent_id: researcher"));
         assertTrue(captured.getValue().getTextContent().contains("target_agent_id: writer"));
+    }
+
+    @Test
+    void supervisorUsesLlmToSelectOnlyRequiredSpecialist() {
+        addSingle("researcher", "research result");
+        addSingle("writer", "writer result");
+        HarnessAgent supervisorAgent = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("supervisor final"))
+                .when(supervisorAgent)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("selecting-supervisor", supervisorAgent);
+        addDefinition(
+                "selecting-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding(
+                                        "research", "researcher", "research", "", true, List.of()),
+                                new SubagentBinding(
+                                        "writing", "writer", "writing", "", true, List.of())),
+                        List.of(),
+                        List.of()));
+        when(decisionModel.decide(
+                        org.mockito.ArgumentMatchers.argThat(
+                                item -> item.agentId().equals("selecting-supervisor")),
+                        anyString()))
+                .thenReturn(
+                        decision(
+                                "{\"binding_ids\":[\"writing\"],\"reason\":\"writing only\"}"));
+
+        ChatResponse response =
+                runtime.chat("selecting-supervisor", request("polish this paragraph")).block();
+
+        assertEquals("supervisor final", response.text());
+        assertEquals(1, response.task().metadata().get("child_call_count"));
+        verify(agents.get("writer")).call(any(UserMessage.class), any(RuntimeContext.class));
+        verify(agents.get("researcher"), never())
+                .call(any(UserMessage.class), any(RuntimeContext.class));
     }
 
     @Test
@@ -290,5 +415,11 @@ class NestedOrchestrationTest {
             return reactor.core.publisher.Mono.just(
                     Msg.builder().role(MsgRole.ASSISTANT).textContent(text).build());
         }
+    }
+
+    private static reactor.core.publisher.Mono<OrchestrationDecisionModel.DecisionResponse> decision(
+            String text) {
+        return reactor.core.publisher.Mono.just(
+                new OrchestrationDecisionModel.DecisionResponse(text, "test-model", 5L));
     }
 }

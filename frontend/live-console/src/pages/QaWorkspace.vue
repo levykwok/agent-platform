@@ -683,8 +683,8 @@ function isUsefulActivity(raw: ActivityItem | JsonMap) {
   if (
     type === 'capability_loaded'
     || type.startsWith('workflow_')
-    || type === 'router_decision'
-    || type === 'supervisor_start'
+    || type.startsWith('router_decision')
+    || type.startsWith('supervisor_')
     || type === 'single_agent_start'
     || type.startsWith('tool_')
     || type.startsWith('skill_')

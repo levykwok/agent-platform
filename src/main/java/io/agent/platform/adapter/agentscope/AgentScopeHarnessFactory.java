@@ -106,7 +106,7 @@ public class AgentScopeHarnessFactory {
                 HarnessAgent.builder()
                         .name(definition.name())
                         .sysPrompt(definition.systemPrompt())
-                        .model(resolveModel(definition))
+                        .model(resolveChatModel(definition))
                         .workspace(definition.workspace())
                         .stateStore(stateStore(definition))
                         .toolkit(toolkit)
@@ -207,7 +207,7 @@ public class AgentScopeHarnessFactory {
         return new JsonFileAgentStateStore(root);
     }
 
-    private String resolveModel(AgentDefinition definition) {
+    public String resolveChatModel(AgentDefinition definition) {
         String policyModel = resolveModelPolicy(definition.modelPolicy());
         if (!policyModel.isBlank()) {
             return policyModel;
@@ -222,6 +222,21 @@ public class AgentScopeHarnessFactory {
                     "No chat model configured. Bind the qa model slot or set an agent model.");
         }
         return defaultModel;
+    }
+
+    /** Resolves an optional orchestration-specific model before falling back to the Agent model. */
+    public String resolveOrchestrationModel(AgentDefinition definition) {
+        Map<String, Object> policy = definition.modelPolicy();
+        if (policy != null && !policy.isEmpty()) {
+            String mode = definition.orchestration().mode().name().toLowerCase();
+            for (String key : List.of(mode + "_decision", "orchestration", "routing")) {
+                String value = String.valueOf(policy.getOrDefault(key, "")).trim();
+                if (!value.isBlank()) {
+                    return value;
+                }
+            }
+        }
+        return resolveChatModel(definition);
     }
 
     public String resolveVisionModel(AgentDefinition definition) {

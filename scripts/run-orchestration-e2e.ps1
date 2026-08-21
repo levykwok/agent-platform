@@ -196,7 +196,7 @@ try {
     $cases = @(
         @{ label = 'single'; agent = 'orchestration-e2e-single-analysis'; query = 'Run the single-agent orchestration acceptance test.' },
         @{ label = 'workflow'; agent = 'orchestration-e2e-workflow'; query = 'Run the two-step workflow orchestration acceptance test.' },
-        @{ label = 'router'; agent = 'orchestration-e2e-router'; query = 'Run serial validation and confirm the Router entered the two-step workflow.' },
+        @{ label = 'router'; agent = 'orchestration-e2e-router'; query = 'First inspect the acceptance request carefully, then transform that analysis into the required concise output.' },
         @{ label = 'supervisor'; agent = 'orchestration-e2e-supervisor'; query = 'Run the combined orchestration acceptance test and summarize every declared child result.' }
     )
 
@@ -206,6 +206,18 @@ try {
         Write-Host "Running $($case.label): $($case.agent)" -ForegroundColor Cyan
         $results += Invoke-StreamingRun -Label $case.label -AgentId $case.agent -Query $case.query
         Write-Host "Completed $($case.label) in $($results[-1].total_ms) ms" -ForegroundColor Green
+    }
+
+    $requiredLlmDecisions = @{
+        router = 'router_decision'
+        supervisor = 'supervisor_decision'
+    }
+    foreach ($label in $requiredLlmDecisions.Keys) {
+        $result = @($results | Where-Object { $_.label -eq $label } | Select-Object -First 1)
+        $decision = @($result.persisted_events | Where-Object { $_.event_type -eq $requiredLlmDecisions[$label] } | Select-Object -Last 1)
+        if ($decision.Count -eq 0 -or [string]$decision[0].payload.decision_source -ne 'llm') {
+            throw "$label did not persist a successful LLM orchestration decision."
+        }
     }
     $finishedAt = [DateTimeOffset]::UtcNow
 

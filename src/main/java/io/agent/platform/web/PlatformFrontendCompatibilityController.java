@@ -2706,8 +2706,8 @@ public class PlatformFrontendCompatibilityController {
         String type = string(event.type(), "").toLowerCase().replace('.', '_');
         if (type.equals("capability_loaded")
                 || type.startsWith("workflow_")
-                || type.equals("router_decision")
-                || type.equals("supervisor_start")
+                || type.startsWith("router_decision")
+                || type.startsWith("supervisor_")
                 || type.equals("single_agent_start")
                 || type.startsWith("tool_")
                 || type.startsWith("skill_")) {
@@ -2732,8 +2732,11 @@ public class PlatformFrontendCompatibilityController {
             case "workflow_step_end" -> "Workflow 步骤完成";
             case "workflow_final_step" -> "Workflow 最终步骤";
             case "capability_loaded" -> "能力挂载";
+            case "router_decision_start" -> "Router LLM 决策开始";
             case "router_decision" -> "Router 路由决策";
             case "supervisor_start" -> "Supervisor 启动";
+            case "supervisor_decision_start" -> "Supervisor LLM 决策开始";
+            case "supervisor_decision" -> "Supervisor 专家决策";
             case "single_agent_start" -> "Agent 启动";
             case "agent_start" -> "Agent 开始";
             case "model_call_start" -> "模型调用开始";
@@ -2757,9 +2760,13 @@ public class PlatformFrontendCompatibilityController {
 
     private static String activityStatus(AgentEventEnvelope event) {
         String type = string(event.type(), "").toLowerCase().replace('.', '_');
+        if (type.equals("router_decision_start")
+                || type.equals("supervisor_decision_start")) {
+            return "running";
+        }
         if (type.startsWith("workflow_")
-                || type.equals("router_decision")
-                || type.equals("supervisor_start")
+                || type.startsWith("router_decision")
+                || type.startsWith("supervisor_")
                 || type.equals("single_agent_start")
                 || type.equals("capability_loaded")
                 || type.equals("agent_result")) {

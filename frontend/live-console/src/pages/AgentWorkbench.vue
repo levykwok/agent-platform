@@ -278,7 +278,7 @@ function usefulEvent(ev: JsonMap) {
     return keys.length > 0 || !!asString(ev.summary)
   }
   if (type.startsWith('tool_') || type.startsWith('skill_')) return true
-  if (type === 'capability_loaded' || type.startsWith('workflow_') || type === 'router_decision' || type === 'single_agent_start') return true
+  if (type === 'capability_loaded' || type.startsWith('workflow_') || type.startsWith('router_decision') || type.startsWith('supervisor_') || type === 'single_agent_start') return true
   const keys = Object.keys(payload).filter((key) => !['agent_id', 'reply_id', 'runtime'].includes(key))
   if (keys.length) return true
   const summary = asString(ev.summary)

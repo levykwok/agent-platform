@@ -1,5 +1,7 @@
 # Orchestration E2E Validation — 2026-08-20
 
+> Historical baseline: these timings predate the LLM-based Router and Supervisor decision stage added on 2026-08-21. See `docs/design/llm-router-supervisor.md` for the current architecture and validation.
+
 ## Scope
 
 This validation uses a dedicated, reproducible agent set. It does not modify the existing researcher/writer examples.
