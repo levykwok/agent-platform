@@ -226,14 +226,19 @@ public class AgentRunsCompatibilityController {
     private static String activityTitle(AgentEventEnvelope event) {
         String type = string(event.type(), "agent_event").toLowerCase();
         type = type.replace('.', '_');
-        boolean agentWorkflow =
+        boolean legacyAgentWorkflow =
                 event.payload() != null
                         && Boolean.TRUE.equals(event.payload().get("agent_workflow"));
         return switch (type) {
-            case "workflow_start" -> agentWorkflow ? "串行链路（WORKFLOW）开始" : "Workflow 开始";
-            case "workflow_step_start" -> agentWorkflow ? "串行链路步骤开始" : "Workflow 步骤开始";
-            case "workflow_step_end" -> agentWorkflow ? "串行链路步骤完成" : "Workflow 步骤完成";
-            case "workflow_final_step" -> agentWorkflow ? "串行链路最终步骤" : "Workflow 最终步骤";
+            case "pipeline_start" -> "Pipeline 开始";
+            case "pipeline_step_start" -> "Pipeline 步骤开始";
+            case "pipeline_step_end" -> "Pipeline 步骤完成";
+            case "pipeline_final_step" -> "Pipeline 最终步骤";
+            case "pipeline_step_fallback" -> "Pipeline 步骤降级";
+            case "workflow_start" -> legacyAgentWorkflow ? "Pipeline 开始" : "Workflow 开始";
+            case "workflow_step_start" -> legacyAgentWorkflow ? "Pipeline 步骤开始" : "Workflow 步骤开始";
+            case "workflow_step_end" -> legacyAgentWorkflow ? "Pipeline 步骤完成" : "Workflow 步骤完成";
+            case "workflow_final_step" -> legacyAgentWorkflow ? "Pipeline 最终步骤" : "Workflow 最终步骤";
             case "capability_loaded" -> "能力挂载";
             case "router_decision_start" -> "Router LLM 决策开始";
             case "router_decision" -> "Router 路由决策";

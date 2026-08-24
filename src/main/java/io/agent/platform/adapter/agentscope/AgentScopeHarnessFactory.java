@@ -234,7 +234,15 @@ public class AgentScopeHarnessFactory {
         Map<String, Object> policy = definition.modelPolicy();
         String mode = definition.orchestration().mode().name().toLowerCase();
         if (policy != null && !policy.isEmpty()) {
-            for (String key : List.of(mode + "_decision", "orchestration", "routing")) {
+            List<String> keys =
+                    definition.orchestration().mode() == OrchestrationMode.PIPELINE
+                            ? List.of(
+                                    "pipeline_decision",
+                                    "workflow_decision",
+                                    "orchestration",
+                                    "routing")
+                            : List.of(mode + "_decision", "orchestration", "routing");
+            for (String key : keys) {
                 String value = String.valueOf(policy.getOrDefault(key, "")).trim();
                 if (!value.isBlank()) {
                     return value;

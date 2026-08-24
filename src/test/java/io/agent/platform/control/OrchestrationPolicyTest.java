@@ -63,4 +63,15 @@ class OrchestrationPolicyTest {
         assertTrue(restored.supervisorParallelEnabled());
         assertEquals(4, restored.maxSupervisorParallelism());
     }
+
+    @Test
+    void legacyWorkflowModeLoadsAsPipelineAndWritesCanonicalName() throws Exception {
+        OrchestrationPolicy policy =
+                objectMapper.readValue(
+                        "{\"mode\":\"WORKFLOW\",\"workflow\":[]}",
+                        OrchestrationPolicy.class);
+
+        assertEquals(OrchestrationMode.PIPELINE, policy.mode());
+        assertTrue(objectMapper.writeValueAsString(policy).contains("\"mode\":\"PIPELINE\""));
+    }
 }

@@ -514,7 +514,7 @@ public class PlatformCompatibilityState {
 
     private OrchestrationMode mode(String value) {
         try {
-            return OrchestrationMode.valueOf(value.toUpperCase());
+            return OrchestrationMode.fromWireValue(value);
         } catch (RuntimeException e) {
             return OrchestrationMode.SINGLE;
         }

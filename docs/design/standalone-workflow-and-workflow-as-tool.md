@@ -9,9 +9,9 @@ Agent 自身仍然有完整的 Agent 间编排：
 - `SINGLE`：运行当前 Agent；
 - `ROUTER`：在 Agent 之间路由；
 - `SUPERVISOR`：由当前 Agent 委派子 Agent。
-- `WORKFLOW`：按显式步骤顺序调用 Agent，并可根据步骤状态跳转。
+- `PIPELINE`：按显式步骤顺序调用 Agent，并可根据步骤状态跳转。
 
-独立 Workflow 由编排中心创建、编辑、校验、发布和运行。它可以通过 `agent.invoke` 节点调用已发布 Agent，但它的节点、端口和边不进入 AgentDefinition；Agent 的 `WORKFLOW` 步骤也不转换成画布节点。
+独立 Workflow 由编排中心创建、编辑、校验、发布和运行。它可以通过 `agent.invoke` 节点调用已发布 Agent，但它的节点、端口和边不进入 AgentDefinition；Agent 的 `PIPELINE` 步骤也不转换成画布节点。
 
 反向调用采用 `Workflow as Tool`：已发布 Workflow 先注册成一个有版本、有 Schema、有权限边界的工具，Agent 的工具配置只引用注册后的工具 ID。
 
@@ -24,7 +24,7 @@ WorkflowAsset
               └─ Agent.toolRefs[]
 
 Agent
-  ├─ orchestration.mode=WORKFLOW → Agent WorkflowStep[]
+  ├─ orchestration.mode=PIPELINE → Agent WorkflowStep[]
   └─ toolRefs[] → WorkflowToolRegistration
 
 Workflow
@@ -162,14 +162,14 @@ Workflow 节点调用 Agent 是 `agent.invoke` 的正向依赖；Agent 调 Workf
 
 ## 7. Agent 配置边界
 
-Agent 管理页的“编排”显示 `SINGLE`、`ROUTER`、`SUPERVISOR`、`WORKFLOW`。其中 `WORKFLOW` 只编辑 Agent 目标和步骤顺序；独立 Workflow 画布不在该页面编辑。
+Agent 管理页的“编排”显示 `SINGLE`、`ROUTER`、`SUPERVISOR`、`PIPELINE`。其中 `PIPELINE` 只编辑 Agent 目标和步骤顺序；`WORKFLOW` 专指独立 Workflow 画布资产，不在该页面编辑。
 
-Agent 的 `WORKFLOW` 配置示例：
+Agent 的 `PIPELINE` 配置示例：
 
 ```json
 {
   "orchestration": {
-    "mode": "WORKFLOW",
+    "mode": "PIPELINE",
     "workflow": [
       {"stepId": "research", "agentId": "research-agent", "instruction": "先调研"},
       {"stepId": "write", "agentId": "writer-agent", "instruction": "再整理输出"}

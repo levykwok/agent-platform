@@ -211,7 +211,7 @@ Supervisor / 子 Agent：
 ```java
 switch (definition.orchestration().mode()) {
     case ROUTER -> runSingle(route(definition, request), request);
-    case WORKFLOW -> runWorkflow(definition, request);
+    case PIPELINE -> runPipeline(definition, request);
     case SINGLE, SUPERVISOR -> runSingle(definition, request);
 }
 ```

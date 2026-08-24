@@ -108,8 +108,9 @@ class AgentRuntimeWorkflowPolicyTest {
                         .block();
 
         assertEquals("previous", event.delta());
-        assertEquals("workflow_step_fallback", event.type());
+        assertEquals("pipeline_step_fallback", event.type());
         assertEquals(true, event.payload().get("fallback"));
+        assertEquals(true, event.payload().get("agent_pipeline"));
     }
 
     @Test

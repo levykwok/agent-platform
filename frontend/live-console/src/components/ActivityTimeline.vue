@@ -121,7 +121,7 @@ function isExpanded(item: ActivityItem) {
 
 function title(item: ActivityItem) {
   let base = niceType(item.type || item.title)
-  if (item.detail?.agent_workflow === true) base = base.replace('Workflow', '串行链路（WORKFLOW）').replace('步骤', '串行步骤')
+  if (item.detail?.agent_workflow === true) base = base.replace('Workflow', 'Pipeline').replace('步骤', 'Pipeline 步骤')
   const agent = agentName(item)
   const rawTitle = String(item.title || '').trim()
   const displayTitle = !rawTitle || rawTitle.toLowerCase() === 'activity' ? base : rawTitle

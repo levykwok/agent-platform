@@ -26,9 +26,9 @@ Route fields:
 
 The Router makes one stateless, tool-free LLM decision and must return one configured `route_id`. Returned IDs are checked against the route whitelist. If the call times out, fails, or returns invalid output, the first configured default route is used; when no default exists, the first declared route is used. Keyword matching is not the primary runtime path.
 
-### 串行链路（WORKFLOW）
+### PIPELINE
 
-Runs an Agent-owned sequence of steps. This mode is stored under `AgentDefinition.orchestration.workflow`; it is not the standalone `WorkflowAsset` canvas, does not create a Workflow asset/version, and does not reuse canvas nodes or edges. Each step receives the previous step output as input, optionally prefixed by the step `instruction`.
+Runs an Agent-owned fixed sequence of steps. Its canonical mode is `PIPELINE`; the step array remains stored under `AgentDefinition.orchestration.workflow` for data compatibility. It is not the standalone `WorkflowAsset` canvas, does not create a Workflow asset/version, and does not reuse canvas nodes or edges. Each step receives the previous step output as input, optionally prefixed by the step `instruction`. Persisted Agent configurations using the former mode name `WORKFLOW` are loaded as `PIPELINE` and are written back with the canonical name.
 
 Step-level execution policy is optional and backward-compatible:
 
@@ -44,7 +44,7 @@ workflow:
 
 - `timeoutMs`: maximum execution time for the step, including streamed final steps.
 - `maxRetries`: retry count after a timeout or execution failure.
-- `FAIL_FAST`: stop the workflow and return the error.
+- `FAIL_FAST`: stop the Pipeline and return the error.
 - `SKIP`: mark the step as fallback and continue with the previous input.
 - `USE_INPUT`: same fallback data behavior, making the intent explicit for future typed mappings.
 
@@ -105,7 +105,7 @@ Legacy plain text remains accepted and is normalized to `status=succeeded`, `dat
 
 ## Root task budget
 
-The root task ID is propagated through Router targets, serial-chain steps, Supervisor children, and nested Agents. The following `model_policy.runtime` limits are shared by the complete tree:
+The root task ID is propagated through Router targets, Pipeline steps, Supervisor children, and nested Agents. The following `model_policy.runtime` limits are shared by the complete tree:
 
 - `root_timeout_ms` (default `180000`)
 - `root_max_agent_calls` (default `20`)
@@ -124,7 +124,7 @@ At run creation the persisted run freezes `agent_version`, the configured model,
 
 Router and Supervisor control calls should use a small, low-latency model with reasoning disabled. The runtime resolves models in this order:
 
-1. Agent `router_decision` / `supervisor_decision` model policy.
+1. Agent `router_decision` / `supervisor_decision` / `pipeline_decision` model policy. The former `workflow_decision` key remains readable for compatibility.
 2. Agent `orchestration` model policy.
 3. Legacy Agent `routing` model policy.
 4. Platform `router_decision` / `supervisor_decision` slot.
@@ -146,4 +146,4 @@ Server-level MCP filters and agent-level MCP filters are intersected when both a
 
 ## Boundary with standalone Workflow
 
-The independent Workflow center continues to use `WorkflowAsset`, graph nodes/edges, typed ports, publishing, and versions. None of those graph semantics are implied by Agent `orchestration.mode=WORKFLOW`; the UI names the latter “串行链路（WORKFLOW）” to keep the asset boundary explicit.
+The independent Workflow center continues to use `WorkflowAsset`, graph nodes/edges, typed ports, publishing, and versions. Agent `orchestration.mode=PIPELINE` is only a fixed Agent-to-Agent sequence. The name `WORKFLOW` is reserved for the independent canvas asset.

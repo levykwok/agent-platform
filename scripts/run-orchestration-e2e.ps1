@@ -195,7 +195,7 @@ function Invoke-StreamingRun {
 try {
     $cases = @(
         @{ label = 'single'; agent = 'orchestration-e2e-single-analysis'; query = 'Run the single-agent orchestration acceptance test.' },
-        @{ label = 'workflow'; agent = 'orchestration-e2e-workflow'; query = 'Run the two-step workflow orchestration acceptance test.' },
+        @{ label = 'pipeline'; agent = 'orchestration-e2e-workflow'; query = 'Run the two-step Pipeline orchestration acceptance test.' },
         @{ label = 'router'; agent = 'orchestration-e2e-router'; query = 'First inspect the acceptance request carefully, then transform that analysis into the required concise output.' },
         @{ label = 'supervisor'; agent = 'orchestration-e2e-supervisor'; query = 'Run the combined orchestration acceptance test and summarize every declared child result.' }
     )
@@ -229,10 +229,10 @@ try {
             throw "$($result.label) did not persist root orchestration budget usage."
         }
     }
-    $workflowResult = @($results | Where-Object { $_.label -eq 'workflow' } | Select-Object -First 1)
-    $agentWorkflowEvent = @($workflowResult.persisted_events | Where-Object { $_.payload.agent_workflow -eq $true } | Select-Object -First 1)
-    if ($agentWorkflowEvent.Count -eq 0) {
-        throw 'Agent WORKFLOW events were not marked as the Agent-owned serial chain.'
+    $pipelineResult = @($results | Where-Object { $_.label -eq 'pipeline' } | Select-Object -First 1)
+    $agentPipelineEvent = @($pipelineResult.persisted_events | Where-Object { $_.payload.agent_pipeline -eq $true } | Select-Object -First 1)
+    if ($agentPipelineEvent.Count -eq 0) {
+        throw 'Agent PIPELINE events were not marked as the Agent-owned pipeline.'
     }
     $supervisorResult = @($results | Where-Object { $_.label -eq 'supervisor' } | Select-Object -First 1)
     $supervisorSteps = @($supervisorResult.persisted_events | Where-Object { $_.event_type -eq 'supervisor_step_start' })

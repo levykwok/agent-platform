@@ -38,7 +38,7 @@ flowchart TD
 - REVISE：每步后返回 `FINISH` 或 `NEXT`，可以沿用或改变原计划。
 - SUMMARY：入口 Supervisor 汇总所有子 Agent 结果。
 - 预算：`maxSupervisorSteps` 默认 5，上限 10；触顶强制 SUMMARY。
-- 边界：WORKFLOW 是配置写死的链路；SUPERVISOR 是 LLM 动态 plan/revise。
+- 边界：PIPELINE 是配置写死的链路；SUPERVISOR 是 LLM 动态 plan/revise；WORKFLOW 专指独立画布资产。
 
 ## 当前实现
 

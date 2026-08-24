@@ -62,7 +62,7 @@ class WorkflowNodeTest {
     void agentPolicyKeepsItsOwnOrderedWorkflowSteps() {
         OrchestrationPolicy policy =
                 new OrchestrationPolicy(
-                        OrchestrationMode.WORKFLOW,
+                        OrchestrationMode.PIPELINE,
                         List.of(),
                         List.of(),
                         List.of(new WorkflowStep("write", "writer", "Write")));

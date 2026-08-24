@@ -218,7 +218,7 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
             switch (orchestration.mode()) {
                 case ROUTER -> validateRouter(definition, loaded);
                 case SUPERVISOR, SINGLE -> validateSupervisor(definition, loaded);
-                case WORKFLOW -> validateWorkflow(definition, loaded);
+                case PIPELINE -> validatePipeline(definition, loaded);
             }
         }
         OrchestrationCycleValidator.validate(loaded);
@@ -276,28 +276,28 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
         }
     }
 
-    private void validateWorkflow(
+    private void validatePipeline(
             AgentDefinition definition, Map<String, AgentDefinition> loaded) {
         List<WorkflowStep> steps = definition.orchestration().workflow();
         if (steps.isEmpty()) {
             throw new IllegalStateException(
-                    "WORKFLOW agent requires at least one step: " + definition.agentId());
+                    "PIPELINE agent requires at least one step: " + definition.agentId());
         }
         Set<String> stepIds = new java.util.LinkedHashSet<>();
         for (WorkflowStep step : steps) {
             if (step.stepId() == null || step.stepId().isBlank() || !stepIds.add(step.stepId())) {
                 throw new IllegalStateException(
-                        "Workflow step id must be unique and non-blank for " + definition.agentId());
+                        "Pipeline step id must be unique and non-blank for " + definition.agentId());
             }
             if (step.agentId() == null || step.agentId().isBlank() || !loaded.containsKey(step.agentId())) {
                 throw new IllegalStateException(
-                        "Workflow step target not found for " + definition.agentId() + ": " + step.agentId());
+                        "Pipeline step target not found for " + definition.agentId() + ": " + step.agentId());
             }
             if (step.timeoutMs() != null && step.timeoutMs() <= 0) {
-                throw new IllegalStateException("Workflow step timeout must be positive: " + step.stepId());
+                throw new IllegalStateException("Pipeline step timeout must be positive: " + step.stepId());
             }
             if (step.maxRetries() != null && step.maxRetries() < 0) {
-                throw new IllegalStateException("Workflow step maxRetries cannot be negative: " + step.stepId());
+                throw new IllegalStateException("Pipeline step maxRetries cannot be negative: " + step.stepId());
             }
         }
         for (int index = 0; index < steps.size(); index++) {
@@ -305,14 +305,14 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
             for (WorkflowTransition transition : step.transitions()) {
                 if (!stepIds.contains(transition.nextStepId())) {
                     throw new IllegalStateException(
-                            "Workflow transition target not found: " + transition.nextStepId());
+                            "Pipeline transition target not found: " + transition.nextStepId());
                 }
                 if (steps.indexOf(step) >= steps.stream()
                         .map(WorkflowStep::stepId)
                         .toList()
                         .indexOf(transition.nextStepId())) {
                     throw new IllegalStateException(
-                            "Workflow transition must point forward: " + step.stepId());
+                            "Pipeline transition must point forward: " + step.stepId());
                 }
             }
         }

@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-本协议用于同一平台内部的 Agent、Router、串行链路（Agent WORKFLOW）和 Supervisor 之间传递任务，不直接绑定 HTTP、SSE、A2A 或其他网络协议。独立 Workflow 画布使用自己的图运行协议，不属于本文的 Agent 内部编排。
+本协议用于同一平台内部的 Agent、Router、Pipeline 和 Supervisor 之间传递任务，不直接绑定 HTTP、SSE、A2A 或其他网络协议。独立 Workflow 画布使用自己的图运行协议，不属于本文的 Agent 内部编排。
 
 当前目标：
 
@@ -117,7 +117,7 @@ REJECTED   权限或策略拒绝
 
 ```json
 {
-  "code": "WORKFLOW_STEP_TIMEOUT",
+  "code": "PIPELINE_STEP_TIMEOUT",
   "message": "research step exceeded deadline",
   "retryable": true,
   "details": {}
@@ -161,7 +161,7 @@ TASK_FAILED
 TASK_CANCELLED
 ```
 
-## 6. 串行链路（Agent WORKFLOW）分支协议
+## 6. Agent PIPELINE 分支协议
 
 Agent 输出不直接决定任意目标步骤，只输出状态和内容：
 

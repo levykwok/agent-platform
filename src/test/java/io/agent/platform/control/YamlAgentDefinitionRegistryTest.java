@@ -39,7 +39,7 @@ class YamlAgentDefinitionRegistryTest {
                                 new WorkflowTransition("", "writer", true)));
         OrchestrationPolicy workflow =
                 new OrchestrationPolicy(
-                        OrchestrationMode.WORKFLOW,
+                        OrchestrationMode.PIPELINE,
                         List.of(),
                         List.of(),
                         List.of(

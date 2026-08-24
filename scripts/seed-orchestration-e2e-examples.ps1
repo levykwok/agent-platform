@@ -112,14 +112,14 @@ $definitions = @(
     },
     @{
         id = 'orchestration-e2e-workflow'
-        name = 'Orchestration E2E - Agent Serial Chain (WORKFLOW)'
-        description = 'Two-step Agent-owned serial chain; this is not a standalone Workflow canvas asset.'
+        name = 'Orchestration E2E - Agent Pipeline'
+        description = 'Two-step Agent-owned Pipeline; this is not a standalone Workflow canvas asset.'
         spec = New-AgentSpec `
-            -Name 'Orchestration E2E - Agent Serial Chain (WORKFLOW)' `
-            -Description 'Two-step Agent-owned serial chain; this is not a standalone Workflow canvas asset.' `
-            -Role 'Run the declared two-step serial orchestration without calling tools.' `
+            -Name 'Orchestration E2E - Agent Pipeline' `
+            -Description 'Two-step Agent-owned Pipeline; this is not a standalone Workflow canvas asset.' `
+            -Role 'Run the declared two-step Pipeline without calling tools.' `
             -Orchestration @{
-                mode = 'WORKFLOW'
+                mode = 'PIPELINE'
                 subagents = @()
                 routes = @()
                 workflow = @(

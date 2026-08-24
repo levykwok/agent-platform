@@ -663,7 +663,7 @@ class NestedOrchestrationTest {
     private void addWorkflow(String id, List<WorkflowStep> steps) {
         addDefinition(
                 id,
-                new OrchestrationPolicy(OrchestrationMode.WORKFLOW, List.of(), List.of(), steps));
+                new OrchestrationPolicy(OrchestrationMode.PIPELINE, List.of(), List.of(), steps));
     }
 
     private void addRouter(String id, List<RouteRule> routes) {

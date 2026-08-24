@@ -22,7 +22,7 @@ class OrchestrationCycleValidatorTest {
                         definition(
                                 "flow-a",
                                 new OrchestrationPolicy(
-                                        OrchestrationMode.WORKFLOW,
+                                        OrchestrationMode.PIPELINE,
                                         List.of(),
                                         List.of(),
                                         List.of(
@@ -31,7 +31,7 @@ class OrchestrationCycleValidatorTest {
                         definition(
                                 "flow-b",
                                 new OrchestrationPolicy(
-                                        OrchestrationMode.WORKFLOW,
+                                        OrchestrationMode.PIPELINE,
                                         List.of(),
                                         List.of(),
                                         List.of(
@@ -53,7 +53,7 @@ class OrchestrationCycleValidatorTest {
                         definition(
                                 "flow-a",
                                 new OrchestrationPolicy(
-                                        OrchestrationMode.WORKFLOW,
+                                        OrchestrationMode.PIPELINE,
                                         List.of(),
                                         List.of(),
                                         List.of(
@@ -62,7 +62,7 @@ class OrchestrationCycleValidatorTest {
                         definition(
                                 "flow-b",
                                 new OrchestrationPolicy(
-                                        OrchestrationMode.WORKFLOW,
+                                        OrchestrationMode.PIPELINE,
                                         List.of(),
                                         List.of(),
                                         List.of(
