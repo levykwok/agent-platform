@@ -210,7 +210,7 @@ try {
 
     $requiredLlmDecisions = @{
         router = 'router_decision'
-        supervisor = 'supervisor_decision'
+        supervisor = 'supervisor_plan'
     }
     foreach ($label in $requiredLlmDecisions.Keys) {
         $result = @($results | Where-Object { $_.label -eq $label } | Select-Object -First 1)
@@ -218,6 +218,39 @@ try {
         if ($decision.Count -eq 0 -or [string]$decision[0].payload.decision_source -ne 'llm') {
             throw "$label did not persist a successful LLM orchestration decision."
         }
+    }
+    foreach ($result in $results) {
+        if ([string]::IsNullOrWhiteSpace([string]$result.persisted_run.agent_version) `
+            -or $null -eq $result.persisted_run.config_snapshot) {
+            throw "$($result.label) did not persist the Agent version/config snapshot."
+        }
+        $budgetEvent = @($result.persisted_events | Where-Object { $_.event_type -eq 'orchestration_budget' } | Select-Object -Last 1)
+        if ($budgetEvent.Count -eq 0 -or $null -eq $budgetEvent[0].payload.budget.agent_calls) {
+            throw "$($result.label) did not persist root orchestration budget usage."
+        }
+    }
+    $workflowResult = @($results | Where-Object { $_.label -eq 'workflow' } | Select-Object -First 1)
+    $agentWorkflowEvent = @($workflowResult.persisted_events | Where-Object { $_.payload.agent_workflow -eq $true } | Select-Object -First 1)
+    if ($agentWorkflowEvent.Count -eq 0) {
+        throw 'Agent WORKFLOW events were not marked as the Agent-owned serial chain.'
+    }
+    $supervisorResult = @($results | Where-Object { $_.label -eq 'supervisor' } | Select-Object -First 1)
+    $supervisorSteps = @($supervisorResult.persisted_events | Where-Object { $_.event_type -eq 'supervisor_step_start' })
+    $supervisorRevisions = @($supervisorResult.persisted_events | Where-Object { $_.event_type -eq 'supervisor_revise' })
+    if ($supervisorSteps.Count -lt 2 -or $supervisorRevisions.Count -lt 1) {
+        throw 'Supervisor did not execute and revise a multi-step LLM plan.'
+    }
+    $supervisorPlan = @($supervisorResult.persisted_events | Where-Object { $_.event_type -eq 'supervisor_plan' } | Select-Object -Last 1)
+    if ($supervisorPlan.Count -eq 0 -or $supervisorPlan[0].payload.parallel_enabled -ne $true) {
+        throw 'Supervisor demo did not persist its optional parallel-group policy.'
+    }
+    $businessResults = @($supervisorResult.persisted_events | Where-Object { $_.event_type -eq 'supervisor_subagent_result' })
+    if (@($businessResults | Where-Object { $null -eq $_.payload.business_result.status -or $null -eq $_.payload.business_result.data }).Count -gt 0) {
+        throw 'Supervisor child events did not persist the unified business-result contract.'
+    }
+    $metrics = Get-Json -Path '/platform/frontend/agents/orchestration/metrics'
+    if ($null -eq $metrics.metrics.supervisor_fallbacks -or $null -eq $metrics.metrics.run_p95_ms) {
+        throw 'Orchestration quality metrics endpoint did not return the required aggregates.'
     }
     $finishedAt = [DateTimeOffset]::UtcNow
 

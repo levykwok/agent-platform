@@ -7,6 +7,7 @@ import io.agent.platform.runtime.AgentEventEnvelope;
 import io.agent.platform.runtime.AgentRuntime;
 import io.agent.platform.runtime.ChatImage;
 import io.agent.platform.runtime.ChatRequest;
+import io.agent.platform.runtime.protocol.TaskContext;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -118,7 +119,8 @@ public class AgentRunsCompatibilityController {
                                                 userId,
                                                 sessionId,
                                                 runtimeQuery,
-                                                null,
+                                                TaskContext.root(
+                                                        runId, agentId, agentId, null),
                                                 images))
                                 .map(
                                         event -> {
@@ -224,11 +226,14 @@ public class AgentRunsCompatibilityController {
     private static String activityTitle(AgentEventEnvelope event) {
         String type = string(event.type(), "agent_event").toLowerCase();
         type = type.replace('.', '_');
+        boolean agentWorkflow =
+                event.payload() != null
+                        && Boolean.TRUE.equals(event.payload().get("agent_workflow"));
         return switch (type) {
-            case "workflow_start" -> "Workflow 开始";
-            case "workflow_step_start" -> "Workflow 步骤开始";
-            case "workflow_step_end" -> "Workflow 步骤完成";
-            case "workflow_final_step" -> "Workflow 最终步骤";
+            case "workflow_start" -> agentWorkflow ? "串行链路（WORKFLOW）开始" : "Workflow 开始";
+            case "workflow_step_start" -> agentWorkflow ? "串行链路步骤开始" : "Workflow 步骤开始";
+            case "workflow_step_end" -> agentWorkflow ? "串行链路步骤完成" : "Workflow 步骤完成";
+            case "workflow_final_step" -> agentWorkflow ? "串行链路最终步骤" : "Workflow 最终步骤";
             case "capability_loaded" -> "能力挂载";
             case "router_decision_start" -> "Router LLM 决策开始";
             case "router_decision" -> "Router 路由决策";

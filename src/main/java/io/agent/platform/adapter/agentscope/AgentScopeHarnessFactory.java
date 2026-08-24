@@ -6,6 +6,7 @@ package io.agent.platform.adapter.agentscope;
 import io.agent.platform.control.AgentDefinition;
 import io.agent.platform.control.PlatformStorageLayer;
 import io.agent.platform.control.RuntimeToolGovernance;
+import io.agent.platform.runtime.RootTaskBudgetManager;
 import io.agent.platform.web.PlatformCompatibilityState;
 import io.agentscope.core.permission.PermissionContextState;
 import io.agentscope.core.permission.PermissionMode;
@@ -71,6 +72,7 @@ public class AgentScopeHarnessFactory {
     private final PlatformStorageLayer storage;
     private final RuntimeToolGovernance toolGovernance;
     private final Environment environment;
+    private final RootTaskBudgetManager rootTaskBudgetManager;
     private static final String DEFAULT_AGENT_ID = "unknown_agent";
 
     public AgentScopeHarnessFactory(
@@ -78,12 +80,14 @@ public class AgentScopeHarnessFactory {
             PlatformCompatibilityState platformState,
             PlatformStorageLayer storage,
             RuntimeToolGovernance toolGovernance,
-            Environment environment) {
+            Environment environment,
+            RootTaskBudgetManager rootTaskBudgetManager) {
         this.capabilityAssembler = capabilityAssembler;
         this.platformState = platformState;
         this.storage = storage;
         this.toolGovernance = toolGovernance;
         this.environment = environment;
+        this.rootTaskBudgetManager = rootTaskBudgetManager;
     }
 
     public HarnessAgent create(AgentDefinition definition) {
@@ -123,7 +127,8 @@ public class AgentScopeHarnessFactory {
                                 new LlmCallAuditMiddleware(
                                         platformState,
                                         safe(definition.agentId(), DEFAULT_AGENT_ID),
-                                        definition.model()))
+                                        definition.model(),
+                                        rootTaskBudgetManager))
                         .middleware(
                                 new RuntimeGuardMiddleware(
                                         platformState,
@@ -227,8 +232,8 @@ public class AgentScopeHarnessFactory {
     /** Resolves an optional orchestration-specific model before falling back to the Agent model. */
     public String resolveOrchestrationModel(AgentDefinition definition) {
         Map<String, Object> policy = definition.modelPolicy();
+        String mode = definition.orchestration().mode().name().toLowerCase();
         if (policy != null && !policy.isEmpty()) {
-            String mode = definition.orchestration().mode().name().toLowerCase();
             for (String key : List.of(mode + "_decision", "orchestration", "routing")) {
                 String value = String.valueOf(policy.getOrDefault(key, "")).trim();
                 if (!value.isBlank()) {
@@ -236,7 +241,10 @@ public class AgentScopeHarnessFactory {
                 }
             }
         }
-        return resolveChatModel(definition);
+        String platformModel = platformState.defaultOrchestrationModelId(mode);
+        return platformModel == null || platformModel.isBlank()
+                ? resolveChatModel(definition)
+                : platformModel;
     }
 
     public String resolveVisionModel(AgentDefinition definition) {

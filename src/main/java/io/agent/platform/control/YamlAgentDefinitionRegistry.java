@@ -146,7 +146,8 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                                 resolve(s.role()),
                                                 resolve(s.description()),
                                                 s.exposeToUser(),
-                                                s.toolRefs()))
+                                                s.toolRefs(),
+                                                s.outputSchema()))
                         .toList();
         List<RouteRule> routes =
                 policy.routes().stream()
@@ -179,7 +180,14 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                                                                 transition.defaultTransition()))
                                                         .toList()))
                         .toList();
-        return new OrchestrationPolicy(policy.mode(), subagents, routes, workflow);
+        return new OrchestrationPolicy(
+                policy.mode(),
+                subagents,
+                routes,
+                workflow,
+                policy.maxSupervisorSteps(),
+                policy.supervisorParallelEnabled(),
+                policy.maxSupervisorParallelism());
     }
 
     private String safe(String value, String fallback) {

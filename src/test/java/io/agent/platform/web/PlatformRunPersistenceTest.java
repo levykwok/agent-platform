@@ -10,6 +10,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.agent.platform.control.AgentDefinitionRegistry;
+import io.agent.platform.control.AgentDefinition;
+import io.agent.platform.control.OrchestrationPolicy;
 import io.agent.platform.control.McpRegistry;
 import io.agent.platform.control.ModelConfigRegistry;
 import io.agent.platform.control.ModelProviderRegistry;
@@ -19,12 +21,69 @@ import io.agent.platform.control.ToolRegistry;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class PlatformRunPersistenceTest {
 
     @TempDir Path tempDir;
+
+    @Test
+    void runFreezesAgentVersionAndFullConfigurationSnapshot() throws Exception {
+        PlatformStorageLayer storage = storage(tempDir);
+        AgentDefinition definition =
+                new AgentDefinition(
+                        "snapshot-agent",
+                        "v7",
+                        "Snapshot Agent",
+                        "model-a",
+                        Map.of("qa", "model-a"),
+                        "system",
+                        true,
+                        tempDir.resolve("agent"),
+                        List.of("tool-a"),
+                        List.of("mcp-a"),
+                        List.of("skill-a"),
+                        OrchestrationPolicy.single());
+        PlatformCompatibilityState state = newState(storage, definition);
+
+        var run = state.createRun("snapshot-agent", "test", "user-1");
+
+        assertEquals("v7", run.get("agent_version"));
+        assertEquals("model-a", run.get("model_snapshot"));
+        assertEquals(Map.of("qa", "model-a"), run.get("model_policy_snapshot"));
+        assertTrue(((Map<?, ?>) run.get("config_snapshot")).containsKey("orchestration"));
+    }
+
+    @Test
+    void orchestrationMetricsUseLabelsAndPersistedDecisionEvents() throws Exception {
+        PlatformCompatibilityState state = newState(storage(tempDir));
+        var run = state.createRun("metrics-agent", "test", "user-1");
+        String runId = String.valueOf(run.get("run_id"));
+        state.appendRunEvent(
+                runId,
+                "router_decision",
+                Map.of("decision_source", "llm", "duration_ms", 10));
+        state.appendRunEvent(
+                runId,
+                "supervisor_plan",
+                Map.of("decision_source", "fallback", "duration_ms", 20));
+        state.appendRunEvent(
+                runId,
+                "supervisor_revise",
+                Map.of("decision_source", "llm", "duration_ms", 30));
+        state.appendRunEvent(runId, "supervisor_subagent_result", Map.of());
+        state.appendRunEvent(runId, "supervisor_subagent_result", Map.of());
+        state.recordOrchestrationEvaluation(runId, "router", true, "correct route");
+
+        Map<String, Object> metrics = state.orchestrationMetrics("metrics-agent", "user-1");
+
+        assertEquals(1.0D, metrics.get("router_accuracy"));
+        assertEquals(0.5D, metrics.get("supervisor_fallback_rate"));
+        assertEquals(2.0D, metrics.get("supervisor_average_agent_calls"));
+        assertEquals(30L, metrics.get("decision_p95_ms"));
+    }
 
     @Test
     void runEventsStepsAndWaitingSurviveStateReload() throws Exception {
@@ -91,6 +150,32 @@ class PlatformRunPersistenceTest {
         assertFalse(sessions.ownedBy("missing", "org-a", "user-a"));
     }
 
+    @Test
+    void orchestrationModelSlotsUseModeSpecificThenSharedThenQaFallback() throws Exception {
+        PlatformCompatibilityState state = newState(storage(tempDir));
+
+        assertTrue(
+                state.slots().stream()
+                        .map(row -> String.valueOf(row.get("slot_key")))
+                        .toList()
+                        .containsAll(
+                                List.of(
+                                        "orchestration",
+                                        "router_decision",
+                                        "supervisor_decision")));
+
+        state.bindSlot("qa", java.util.Map.of("model_id", "qa-model"));
+        assertEquals("qa-model", state.defaultOrchestrationModelId("SUPERVISOR"));
+
+        state.bindSlot("orchestration", java.util.Map.of("model_id", "fast-shared"));
+        assertEquals("fast-shared", state.defaultOrchestrationModelId("ROUTER"));
+        assertEquals("fast-shared", state.defaultOrchestrationModelId("SUPERVISOR"));
+
+        state.bindSlot("supervisor_decision", java.util.Map.of("model_id", "fast-supervisor"));
+        assertEquals("fast-supervisor", state.defaultOrchestrationModelId("supervisor"));
+        assertEquals("fast-shared", state.defaultOrchestrationModelId("router"));
+    }
+
     private static PlatformStorageLayer storage(Path workspace) {
         return new PlatformStorageLayer(
                 workspace.toString(),
@@ -103,6 +188,11 @@ class PlatformRunPersistenceTest {
 
     private static PlatformCompatibilityState newState(PlatformStorageLayer storage)
             throws Exception {
+        return newState(storage, null);
+    }
+
+    private static PlatformCompatibilityState newState(
+            PlatformStorageLayer storage, AgentDefinition definition) throws Exception {
         AgentDefinitionRegistry agents = mock(AgentDefinitionRegistry.class);
         ToolRegistry tools = mock(ToolRegistry.class);
         McpRegistry mcps = mock(McpRegistry.class);
@@ -112,7 +202,14 @@ class PlatformRunPersistenceTest {
         PlatformWorkspaceSessionStore sessions = mock(PlatformWorkspaceSessionStore.class);
         McpToolDiscoveryService discovery = mock(McpToolDiscoveryService.class);
         SkillSandboxSmokeTestService smoke = mock(SkillSandboxSmokeTestService.class);
-        when(agents.allPublished()).thenReturn(List.of());
+        when(agents.allPublished()).thenReturn(definition == null ? List.of() : List.of(definition));
+        when(agents.findPublished(org.mockito.ArgumentMatchers.anyString()))
+                .thenAnswer(
+                        invocation ->
+                                definition != null
+                                                && definition.agentId().equals(invocation.getArgument(0))
+                                        ? java.util.Optional.of(definition)
+                                        : java.util.Optional.empty());
         when(tools.all()).thenReturn(List.of());
         when(mcps.all()).thenReturn(List.of());
         when(skills.all()).thenReturn(List.of());

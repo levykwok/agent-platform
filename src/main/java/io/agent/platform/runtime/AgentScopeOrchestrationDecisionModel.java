@@ -9,9 +9,11 @@ import io.agent.platform.control.AgentDefinition;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.UserMessage;
+import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.ModelRegistry;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
@@ -19,7 +21,9 @@ import reactor.core.publisher.Mono;
 @Component
 public final class AgentScopeOrchestrationDecisionModel implements OrchestrationDecisionModel {
 
-    private static final long MAX_DECISION_TIMEOUT_MS = 45_000L;
+    private static final long MAX_DECISION_TIMEOUT_MS = 30_000L;
+    private static final GenerateOptions DECISION_OPTIONS =
+            GenerateOptions.builder().temperature(0.0).maxTokens(512).build();
 
     private final AgentScopeHarnessFactory harnessFactory;
 
@@ -35,10 +39,21 @@ public final class AgentScopeOrchestrationDecisionModel implements Orchestration
                         AgentExecutionPolicy.from(definition).timeoutMs(),
                         MAX_DECISION_TIMEOUT_MS);
         long started = System.nanoTime();
+        AtomicLong inputTokens = new AtomicLong();
+        AtomicLong outputTokens = new AtomicLong();
         UserMessage message =
                 new UserMessage(List.of(TextBlock.builder().text(prompt == null ? "" : prompt).build()));
         return ModelRegistry.resolve(modelId)
-                .stream(List.of(message), List.of(), null)
+                .stream(List.of(message), List.of(), DECISION_OPTIONS)
+                .doOnNext(
+                        response -> {
+                            if (response.getUsage() != null) {
+                                inputTokens.accumulateAndGet(
+                                        response.getUsage().getInputTokens(), Math::max);
+                                outputTokens.accumulateAndGet(
+                                        response.getUsage().getOutputTokens(), Math::max);
+                            }
+                        })
                 .flatMapIterable(
                         response ->
                                 response.getContent() == null
@@ -49,7 +64,14 @@ public final class AgentScopeOrchestrationDecisionModel implements Orchestration
                 .map(TextBlock::getText)
                 .collect(java.util.stream.Collectors.joining())
                 .timeout(Duration.ofMillis(timeoutMs))
-                .map(text -> new DecisionResponse(text, modelId, elapsedMs(started)));
+                .map(
+                        text ->
+                                new DecisionResponse(
+                                        text,
+                                        modelId,
+                                        elapsedMs(started),
+                                        inputTokens.get(),
+                                        outputTokens.get()));
     }
 
     private static long elapsedMs(long started) {

@@ -16,6 +16,7 @@ import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 
 import io.agent.platform.adapter.agentscope.AgentScopeHarnessFactory;
 import io.agent.platform.control.AgentDefinition;
@@ -34,11 +35,13 @@ import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.harness.agent.HarnessAgent;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -280,6 +283,133 @@ class NestedOrchestrationTest {
     }
 
     @Test
+    void supervisorPlansMultipleCallsAndRevisesAfterEveryStep() {
+        addSingle("researcher", "verified research result");
+        HarnessAgent supervisorAgent = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("supervisor final"))
+                .when(supervisorAgent)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("multi-step-supervisor", supervisorAgent);
+        addDefinition(
+                "multi-step-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding(
+                                        "research",
+                                        "researcher",
+                                        "research",
+                                        "investigate and verify",
+                                        true,
+                                        List.of())),
+                        List.of(),
+                        List.of(),
+                        5));
+        when(decisionModel.decide(
+                        org.mockito.ArgumentMatchers.argThat(
+                                item -> item.agentId().equals("multi-step-supervisor")),
+                        anyString()))
+                .thenReturn(
+                        decision(
+                                "{\"steps\":[{\"binding_id\":\"research\",\"instruction\":\"investigate\"},{\"binding_id\":\"research\",\"instruction\":\"verify the first result\"}],\"reason\":\"two passes\"}"),
+                        decision(
+                                "{\"action\":\"NEXT\",\"next_step\":{\"binding_id\":\"research\",\"instruction\":\"verify the first result\"},\"reason\":\"needs verification\"}"),
+                        decision("{\"action\":\"FINISH\",\"reason\":\"verified\"}"));
+
+        ChatResponse response =
+                runtime.chat("multi-step-supervisor", request("check the claim")).block();
+
+        assertEquals("supervisor final", response.text());
+        assertEquals(2, response.task().metadata().get("child_call_count"));
+        assertEquals(2, response.task().metadata().get("revision_count"));
+        assertEquals(false, response.task().metadata().get("parallel"));
+        ArgumentCaptor<UserMessage> childPrompts = ArgumentCaptor.forClass(UserMessage.class);
+        verify(agents.get("researcher"), times(2))
+                .call(childPrompts.capture(), any(RuntimeContext.class));
+        assertTrue(childPrompts.getAllValues().get(1).getTextContent().contains("verify the first result"));
+        assertTrue(childPrompts.getAllValues().get(1).getTextContent().contains("verified research result"));
+    }
+
+    @Test
+    void supervisorReviseCanAddAnUnplannedSpecialistCall() {
+        addSingle("researcher", "research result");
+        addSingle("writer", "writer result");
+        HarnessAgent supervisorAgent = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("supervisor final"))
+                .when(supervisorAgent)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("adaptive-supervisor", supervisorAgent);
+        addDefinition(
+                "adaptive-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding("research", "researcher", "research", "", true, List.of()),
+                                new SubagentBinding("writing", "writer", "writing", "", true, List.of())),
+                        List.of(),
+                        List.of(),
+                        5));
+        when(decisionModel.decide(
+                        org.mockito.ArgumentMatchers.argThat(
+                                item -> item.agentId().equals("adaptive-supervisor")),
+                        anyString()))
+                .thenReturn(
+                        decision(
+                                "{\"steps\":[{\"binding_id\":\"research\",\"instruction\":\"collect facts\"}],\"reason\":\"start with facts\"}"),
+                        decision(
+                                "{\"action\":\"NEXT\",\"next_step\":{\"binding_id\":\"writing\",\"instruction\":\"turn the facts into a final draft\"},\"reason\":\"draft is still needed\"}"),
+                        decision("{\"action\":\"FINISH\",\"reason\":\"draft complete\"}"));
+
+        ChatResponse response =
+                runtime.chat("adaptive-supervisor", request("research and write")).block();
+
+        assertEquals(2, response.task().metadata().get("child_call_count"));
+        verify(agents.get("researcher")).call(any(UserMessage.class), any(RuntimeContext.class));
+        verify(agents.get("writer")).call(any(UserMessage.class), any(RuntimeContext.class));
+    }
+
+    @Test
+    void supervisorStopsAtConfiguredStepBudget() {
+        addSingle("researcher", "research result");
+        HarnessAgent supervisorAgent = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("supervisor final"))
+                .when(supervisorAgent)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("budgeted-supervisor", supervisorAgent);
+        addDefinition(
+                "budgeted-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(new SubagentBinding("research", "researcher", "", "", true, List.of())),
+                        List.of(),
+                        List.of(),
+                        2));
+        when(decisionModel.decide(
+                        org.mockito.ArgumentMatchers.argThat(
+                                item -> item.agentId().equals("budgeted-supervisor")),
+                        anyString()))
+                .thenReturn(
+                        decision(
+                                "{\"steps\":[{\"binding_id\":\"research\",\"instruction\":\"pass one\"},{\"binding_id\":\"research\",\"instruction\":\"pass two\"}],\"reason\":\"repeat\"}"),
+                        decision(
+                                "{\"action\":\"NEXT\",\"next_step\":{\"binding_id\":\"research\",\"instruction\":\"pass two\"},\"reason\":\"continue\"}"));
+
+        ChatResponse response =
+                runtime.chat("budgeted-supervisor", request("repeat safely")).block();
+
+        assertEquals(2, response.task().metadata().get("child_call_count"));
+        assertEquals(1, response.task().metadata().get("revision_count"));
+        assertEquals(2, response.task().metadata().get("max_supervisor_steps"));
+        verify(agents.get("researcher"), times(2))
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        verify(decisionModel, times(2))
+                .decide(
+                        org.mockito.ArgumentMatchers.argThat(
+                                item -> item.agentId().equals("budgeted-supervisor")),
+                        anyString());
+    }
+
+    @Test
     void emptySubagentToolRefsInheritNoTargetTools() {
         definitions.put(
                 "tool-child",
@@ -333,6 +463,160 @@ class NestedOrchestrationTest {
                         .orElseThrow();
         assertTrue(scopedChild.toolRefs().isEmpty());
         assertTrue(scopedChild.mcpRefs().isEmpty());
+    }
+
+    @Test
+    void agentOutputSchemaIsPromptedValidatedAndReturnedAsBusinessSummary() {
+        String id = "structured-agent";
+        definitions.put(
+                id,
+                new AgentDefinition(
+                        id,
+                        "v1",
+                        id,
+                        "",
+                        Map.of(
+                                "output_schema",
+                                Map.of(
+                                        "type",
+                                        "object",
+                                        "required",
+                                        List.of("answer"),
+                                        "properties",
+                                        Map.of("answer", Map.of("type", "string")))),
+                        "",
+                        true,
+                        Path.of("target", "nested-workflow", id),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        OrchestrationPolicy.single()));
+        HarnessAgent agent = mock(HarnessAgent.class);
+        doReturn(
+                        MonoFactory.message(
+                                "{\"status\":\"succeeded\",\"data\":{\"answer\":\"yes\"},\"summary\":\"validated answer\",\"artifacts\":[],\"error\":null}"))
+                .when(agent)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put(id, agent);
+
+        ChatResponse response = runtime.chat(id, request("answer it")).block();
+        List<AgentEventEnvelope> streamed =
+                runtime.stream(id, request("answer it again")).collectList().block();
+
+        assertEquals("validated answer", response.text());
+        assertEquals("yes", response.task().result().data().get("answer"));
+        assertTrue(
+                streamed.stream()
+                        .anyMatch(
+                                event ->
+                                        "agent_result_validated".equals(event.type())));
+        assertTrue(
+                streamed.stream()
+                        .anyMatch(
+                                event -> "validated answer".equals(event.delta())));
+        ArgumentCaptor<UserMessage> prompt = ArgumentCaptor.forClass(UserMessage.class);
+        verify(agent, times(2)).call(prompt.capture(), any(RuntimeContext.class));
+        assertTrue(
+                prompt.getAllValues().stream()
+                        .allMatch(item -> item.getTextContent().contains("JSON Schema")));
+    }
+
+    @Test
+    void supervisorExecutesOnlyExplicitParallelGroupsConcurrently() {
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maxActive = new AtomicInteger();
+        for (String id : List.of("parallel-a", "parallel-b")) {
+            addDefinition(id, OrchestrationPolicy.single());
+            HarnessAgent child = mock(HarnessAgent.class);
+            doReturn(
+                            reactor.core.publisher.Mono.defer(
+                                    () -> {
+                                        int current = active.incrementAndGet();
+                                        maxActive.accumulateAndGet(current, Math::max);
+                                        return reactor.core.publisher.Mono.delay(
+                                                        Duration.ofMillis(80))
+                                                .map(
+                                                        ignored ->
+                                                                Msg.builder()
+                                                                        .role(MsgRole.ASSISTANT)
+                                                                        .textContent(id + " result")
+                                                                        .build())
+                                                .doFinally(ignored -> active.decrementAndGet());
+                                    }))
+                    .when(child)
+                    .call(any(UserMessage.class), any(RuntimeContext.class));
+            agents.put(id, child);
+        }
+        HarnessAgent supervisor = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("final"))
+                .when(supervisor)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("parallel-supervisor", supervisor);
+        addDefinition(
+                "parallel-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding("a", "parallel-a", "", "", true, List.of()),
+                                new SubagentBinding("b", "parallel-b", "", "", true, List.of())),
+                        List.of(),
+                        List.of(),
+                        4,
+                        true,
+                        2));
+        when(decisionModel.decide(any(AgentDefinition.class), anyString()))
+                .thenReturn(
+                        decision(
+                                "{\"steps\":[{\"binding_id\":\"a\",\"instruction\":\"A\",\"parallel_group\":\"g1\"},{\"binding_id\":\"b\",\"instruction\":\"B\",\"parallel_group\":\"g1\"}],\"reason\":\"parallel\"}"),
+                        decision("{\"action\":\"FINISH\",\"reason\":\"done\"}"));
+
+        ChatResponse response = runtime.chat("parallel-supervisor", request("run both")).block();
+
+        assertEquals(2, maxActive.get());
+        assertEquals(true, response.task().metadata().get("parallel"));
+    }
+
+    @Test
+    void supervisorRejectsChildDataThatViolatesBindingSchema() {
+        addSingle(
+                "schema-child",
+                "{\"status\":\"succeeded\",\"data\":{\"answer\":42},\"summary\":\"bad\",\"artifacts\":[],\"error\":null}");
+        HarnessAgent supervisor = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("should not run"))
+                .when(supervisor)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("schema-supervisor", supervisor);
+        addDefinition(
+                "schema-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding(
+                                        "child",
+                                        "schema-child",
+                                        "",
+                                        "",
+                                        true,
+                                        List.of(),
+                                        Map.of(
+                                                "type",
+                                                "object",
+                                                "required",
+                                                List.of("answer"),
+                                                "properties",
+                                                Map.of(
+                                                        "answer",
+                                                        Map.of("type", "string"))))),
+                        List.of(),
+                        List.of()));
+
+        Throwable failure =
+                assertThrows(
+                        Throwable.class,
+                        () -> runtime.chat("schema-supervisor", request("validate")).block());
+
+        assertTrue(fullMessage(failure).contains("schema validation failed"));
+        verify(supervisor, never()).call(any(UserMessage.class), any(RuntimeContext.class));
     }
 
     @Test
@@ -415,6 +699,16 @@ class NestedOrchestrationTest {
             return reactor.core.publisher.Mono.just(
                     Msg.builder().role(MsgRole.ASSISTANT).textContent(text).build());
         }
+    }
+
+    private static String fullMessage(Throwable error) {
+        StringBuilder text = new StringBuilder();
+        Throwable current = error;
+        while (current != null) {
+            if (current.getMessage() != null) text.append(current.getMessage()).append('\n');
+            current = current.getCause();
+        }
+        return text.toString();
     }
 
     private static reactor.core.publisher.Mono<OrchestrationDecisionModel.DecisionResponse> decision(

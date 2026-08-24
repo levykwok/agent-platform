@@ -19,7 +19,7 @@ const TRAIT_LABELS: Record<string, string> = {
 const ORCHESTRATION_LABELS: Record<string, string> = {
   SINGLE: '单 Agent',
   ROUTER: 'Router',
-  WORKFLOW: 'Workflow',
+  WORKFLOW: '串行链路（WORKFLOW）',
   SUPERVISOR: 'Supervisor',
 }
 
@@ -70,6 +70,14 @@ const form = reactive({
   orchestration_routes: [] as JsonMap[],
   workflow_steps: [] as JsonMap[],
   subagents: [] as JsonMap[],
+  max_supervisor_steps: 5,
+  supervisor_parallel_enabled: false,
+  max_supervisor_parallelism: 2,
+  root_timeout_ms: 180000,
+  root_max_agent_calls: 20,
+  root_max_tokens: 100000,
+  root_max_depth: 6,
+  output_schema_text: '',
   model_policy: {} as JsonMap,
 })
 
@@ -160,13 +168,13 @@ const visible = computed(() => agents.value.filter((a) => {
   return [a.display_name, a.name, a.agent_id, a.description].join(' ').toLowerCase().includes(q)
 }))
 const modelPolicyList = computed(() => Object.entries(form.model_policy)
-  .filter(([slot]) => slot !== 'nodes' && slot !== 'slots')
+  .filter(([slot]) => slot !== 'nodes' && slot !== 'slots' && slot !== 'runtime' && slot !== 'output_schema')
   .map(([slot, model]) => ({ slot, model: String(model || '') || '跟随默认绑定' })))
 const orchestrationSummary = computed(() => {
   const mode = String(form.orchestration_mode || 'SINGLE').toUpperCase()
   if (mode === 'ROUTER') return `${form.orchestration_routes.length} 条路由`
   if (mode === 'WORKFLOW') return `${form.workflow_steps.length} 个步骤`
-  if (mode === 'SUPERVISOR') return `${form.subagents.length} 个子代理`
+  if (mode === 'SUPERVISOR') return `${form.subagents.length} 个子代理 · 最多 ${form.max_supervisor_steps} 步`
   return '单代理'
 })
 const stepLabels = ['基本信息', '编排', '技能', '平台工具', 'MCP 服务器', 'Memory 策略', '模型策略', 'Prompt']
@@ -277,7 +285,20 @@ async function selectAgent(id: string) {
         description: s.description || '',
         exposeToUser: s.exposeToUser ?? s.expose_to_user ?? true,
         toolRefs: [...(((s.toolRefs || s.tool_refs) as string[]) || [])],
+        outputSchemaText: Object.keys(((s.outputSchema || s.output_schema) as JsonMap) || {}).length
+          ? JSON.stringify((s.outputSchema || s.output_schema) as JsonMap, null, 2)
+          : '',
       })),
+      max_supervisor_steps: Number(orchestration.maxSupervisorSteps || orchestration.max_supervisor_steps || 5),
+      supervisor_parallel_enabled: orchestration.supervisorParallelEnabled === true || orchestration.supervisor_parallel_enabled === true,
+      max_supervisor_parallelism: Number(orchestration.maxSupervisorParallelism || orchestration.max_supervisor_parallelism || 2),
+      root_timeout_ms: Number((((cfg.model_policy as JsonMap)?.runtime as JsonMap)?.root_timeout_ms) || 180000),
+      root_max_agent_calls: Number((((cfg.model_policy as JsonMap)?.runtime as JsonMap)?.root_max_agent_calls) || 20),
+      root_max_tokens: Number((((cfg.model_policy as JsonMap)?.runtime as JsonMap)?.root_max_tokens) || 100000),
+      root_max_depth: Number((((cfg.model_policy as JsonMap)?.runtime as JsonMap)?.root_max_depth) || 6),
+      output_schema_text: Object.keys((((cfg.model_policy as JsonMap)?.output_schema as JsonMap) || {})).length
+        ? JSON.stringify(((cfg.model_policy as JsonMap).output_schema as JsonMap), null, 2)
+        : '',
       model_policy: { ...((cfg.model_policy as JsonMap) || {}) },
     })
     await loadModelChoices(String(form.domain))
@@ -293,7 +314,10 @@ function newAgent() {
     agent_id: '', display_name: '', description: '', domain: domainFilter.value || 'platform', enabled: true,
     role: '', planner_rules: '', require_structured_plan: true,
     included_skills: [], included_mcps: [], included_tools: [], restrict_tools: false, router_rules: [],
-    orchestration_mode: 'SINGLE', orchestration_routes: [], workflow_steps: [], subagents: [],
+    orchestration_mode: 'SINGLE', orchestration_routes: [], workflow_steps: [], subagents: [], max_supervisor_steps: 5,
+    supervisor_parallel_enabled: false, max_supervisor_parallelism: 2,
+    root_timeout_ms: 180000, root_max_agent_calls: 20, root_max_tokens: 100000, root_max_depth: 6,
+    output_schema_text: '',
     model_policy: {},
   })
   spec.value = null; selectedId.value = ''; step.value = 0; output.value = null
@@ -353,7 +377,7 @@ function addWorkflowTransition(step: JsonMap) {
 function removeWorkflowTransition(step: JsonMap, index: number) {
   ;((step.transitions || []) as JsonMap[]).splice(index, 1)
 }
-function addSubagent() { form.subagents.push({ bindingId: `subagent_${form.subagents.length + 1}`, targetAgentId: '', role: '', description: '', exposeToUser: true, toolRefs: [] }) }
+function addSubagent() { form.subagents.push({ bindingId: `subagent_${form.subagents.length + 1}`, targetAgentId: '', role: '', description: '', exposeToUser: true, toolRefs: [], outputSchemaText: '' }) }
 function removeSubagent(i: number) { form.subagents.splice(i, 1) }
 function toggleModelPolicy(key: string) {
   if (key in form.model_policy) delete form.model_policy[key]
@@ -473,6 +497,12 @@ function modelPolicyPayload(): JsonMap {
     }
     if (Object.keys(cleanNodes).length) out.nodes = cleanNodes
   }
+  const runtime = out.runtime && typeof out.runtime === 'object' && !Array.isArray(out.runtime) ? { ...(out.runtime as JsonMap) } : {}
+  runtime.root_timeout_ms = Math.trunc(Number(form.root_timeout_ms || 180000))
+  runtime.root_max_agent_calls = Math.trunc(Number(form.root_max_agent_calls || 20))
+  runtime.root_max_tokens = Math.trunc(Number(form.root_max_tokens || 100000))
+  runtime.root_max_depth = Math.trunc(Number(form.root_max_depth || 6))
+  out.runtime = runtime
   return out
 }
 
@@ -481,6 +511,19 @@ async function nextOrSubmit() { if (step.value < stepLabels.length - 1) step.val
 
 async function saveAgent() {
   if (!form.display_name.trim()) { notifyError('请填写显示名'); return }
+  const agentModelPolicy = modelPolicyPayload()
+  const outputSchemaText = String(form.output_schema_text || '').trim()
+  if (outputSchemaText) {
+    try {
+      const parsed = JSON.parse(outputSchemaText)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Schema 必须是 JSON 对象')
+      agentModelPolicy.output_schema = parsed as JsonMap
+    } catch (err) {
+      notifyError(`Agent 输出 Schema 无效：${err instanceof Error ? err.message : String(err)}`)
+      step.value = 1
+      return
+    }
+  } else delete agentModelPolicy.output_schema
   const mode = String(form.orchestration_mode || 'SINGLE').toUpperCase()
   const orchestration: JsonMap = { mode }
   if (mode === 'ROUTER') {
@@ -515,11 +558,33 @@ async function saveAgent() {
     orchestration.workflow = workflow
   }
   if (mode === 'SUPERVISOR') {
-    const subagents = form.subagents
-      .map((s) => ({ bindingId: String(s.bindingId || '').trim(), targetAgentId: String(s.targetAgentId || '').trim(), role: String(s.role || '').trim(), description: String(s.description || '').trim(), exposeToUser: s.exposeToUser !== false, toolRefs: [...(((s.toolRefs as string[]) || []))] }))
-      .filter((s) => s.bindingId && s.targetAgentId)
+    const subagents: JsonMap[] = []
+    for (const s of form.subagents) {
+      const bindingId = String(s.bindingId || '').trim()
+      const targetAgentId = String(s.targetAgentId || '').trim()
+      if (!bindingId || !targetAgentId) continue
+      let outputSchema: JsonMap = {}
+      const schemaText = String(s.outputSchemaText || '').trim()
+      if (schemaText) {
+        try {
+          const parsed = JSON.parse(schemaText)
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Schema 必须是 JSON 对象')
+          outputSchema = parsed as JsonMap
+        } catch (err) {
+          notifyError(`子代理 ${bindingId} 的输出 Schema 无效：${err instanceof Error ? err.message : String(err)}`)
+          step.value = 1
+          return
+        }
+      }
+      subagents.push({ bindingId, targetAgentId, role: String(s.role || '').trim(), description: String(s.description || '').trim(), exposeToUser: s.exposeToUser !== false, toolRefs: [...(((s.toolRefs as string[]) || []))], ...(Object.keys(outputSchema).length ? { outputSchema } : {}) })
+    }
   if (!subagents.length) { notifyError('SUPERVISOR 至少需要一个子代理'); step.value = 1; return }
     orchestration.subagents = subagents
+    const maxSteps = Math.trunc(Number(form.max_supervisor_steps || 5))
+    if (maxSteps < 1 || maxSteps > 10) { notifyError('SUPERVISOR 最大步骤数必须在 1 到 10 之间'); step.value = 1; return }
+    orchestration.maxSupervisorSteps = maxSteps
+    orchestration.supervisorParallelEnabled = form.supervisor_parallel_enabled
+    orchestration.maxSupervisorParallelism = Math.max(1, Math.min(8, Math.trunc(Number(form.max_supervisor_parallelism || 2))))
   }
   const skillScope = { include: form.included_skills }
   const mcpScope = { include: form.included_mcps }
@@ -534,7 +599,7 @@ async function saveAgent() {
     skill_scope: skillScope,
     mcp_scope: mcpScope,
     ...(Object.keys(toolScope).length ? { tool_scope: toolScope } : {}),
-    ...(Object.keys(modelPolicyPayload()).length ? { model_policy: modelPolicyPayload() } : {}),
+    ...(Object.keys(agentModelPolicy).length ? { model_policy: agentModelPolicy } : {}),
     orchestration,
     prompt_policy: {
       ...(form.role ? { role: form.role } : {}),
@@ -773,12 +838,19 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
           <label>编排模式</label>
           <select v-model="form.orchestration_mode">
             <option value="SINGLE">SINGLE - 单代理</option>
-<option value="ROUTER">ROUTER - 按关键词路由到目标代理</option>
-            <option value="WORKFLOW">WORKFLOW - 按步骤串行执行多个代理</option>
+<option value="ROUTER">ROUTER - 由 LLM 语义路由到目标代理</option>
+            <option value="WORKFLOW">串行链路（WORKFLOW）- 按步骤顺序调用 Agent</option>
             <option value="SUPERVISOR">SUPERVISOR - 主代理挂载子代理</option>
           </select>
         </div>
-          <p class="pick-hint">这里配置 Agent 自身的 SINGLE、ROUTER、WORKFLOW、SUPERVISOR。独立 Workflow 画布仍是另一类资产，需通过 Workflow Tool 注册后在工具区域绑定。</p>
+          <p class="pick-hint">这里配置 Agent 内部的三种编排与 SINGLE。串行链路（WORKFLOW）只是 Agent 内嵌步骤，不是“编排中心”的独立 Workflow 画布资产。</p>
+          <div class="runtime-budget-grid">
+            <div class="field"><label>根任务总超时（ms）</label><input v-model.number="form.root_timeout_ms" type="number" min="1000" /></div>
+            <div class="field"><label>根任务 Agent 调用上限</label><input v-model.number="form.root_max_agent_calls" type="number" min="1" max="100" /></div>
+            <div class="field"><label>根任务 Token 上限</label><input v-model.number="form.root_max_tokens" type="number" min="100" /></div>
+            <div class="field"><label>最大嵌套深度</label><input v-model.number="form.root_max_depth" type="number" min="1" max="20" /></div>
+            <div class="field output-schema-field"><label>本 Agent data 输出 Schema（可选）</label><textarea v-model="form.output_schema_text" rows="4" placeholder='{"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}'></textarea></div>
+          </div>
 
         <div v-if="form.orchestration_mode === 'ROUTER'">
           <div class="actions"><button class="btn btn-ghost btn-sm" @click="addOrchestrationRoute">添加路由</button></div>
@@ -821,9 +893,15 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         </div>
 
         <div v-else-if="form.orchestration_mode === 'SUPERVISOR'">
+          <p class="pick-hint">Supervisor 默认串行执行。启用可选并行后，只有 PLAN 明确给出同一 parallel_group 的相邻独立任务才会并行；组结束后再统一 REVISE。</p>
+          <div class="supervisor-policy-grid">
+            <div class="field supervisor-step-budget"><label>最大调用步骤数（1–10）</label><input v-model.number="form.max_supervisor_steps" type="number" min="1" max="10" /></div>
+            <div class="field"><label>允许 PLAN 并行组</label><label class="switch-row"><span>{{ form.supervisor_parallel_enabled ? '已启用' : '串行默认' }}</span><span class="toggle"><input type="checkbox" v-model="form.supervisor_parallel_enabled" /><span class="toggle-slider"></span></span></label></div>
+            <div v-if="form.supervisor_parallel_enabled" class="field"><label>最大并行度（1–8）</label><input v-model.number="form.max_supervisor_parallelism" type="number" min="1" max="8" /></div>
+          </div>
 <div class="actions"><button class="btn btn-ghost btn-sm" @click="addSubagent">添加子代理</button></div>
           <table>
-<thead><tr><th>绑定名</th><th>目标代理</th><th>说明</th><th>允许工具（空 = 无）</th><th>暴露</th><th></th></tr></thead>
+<thead><tr><th>绑定名</th><th>目标代理</th><th>说明</th><th>data 输出 Schema（可选）</th><th>允许工具（空 = 无）</th><th>暴露</th><th></th></tr></thead>
             <tbody>
               <tr v-for="(s,i) in form.subagents" :key="'sub'+i">
                 <td><input v-model="s.bindingId" placeholder="researcher"/></td>
@@ -834,6 +912,7 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
                   </select>
                 </td>
                 <td><input v-model="s.description" placeholder="这个子代理负责什么"/></td>
+                <td><textarea v-model="s.outputSchemaText" rows="3" placeholder='{"type":"object","required":["answer"]}'></textarea></td>
                 <td>
                   <select v-model="s.toolRefs" multiple class="subagent-tool-select" title="按住 Ctrl / Command 多选；不选表示子 Agent 无工具">
                     <option v-for="t in platformTools" :key="toolKey(t)" :value="toolKey(t)">{{ t.display_name || t.name || t.tool_id }}</option>
@@ -842,7 +921,7 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         <td><select v-model="s.exposeToUser"><option :value="true">是</option><option :value="false">否</option></select></td>
                 <td><button class="btn small danger" @click="removeSubagent(i)">删除</button></td>
               </tr>
-<tr v-if="!form.subagents.length"><td colspan="6" class="empty">暂无子代理，保存 SUPERVISOR 前至少添加一个。</td></tr>
+<tr v-if="!form.subagents.length"><td colspan="7" class="empty">暂无子代理，保存 SUPERVISOR 前至少添加一个。</td></tr>
             </tbody>
           </table>
         </div>
@@ -930,6 +1009,7 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
       </div>
 
       <div v-else-if="step===6" class="panel-inner">
+        <p class="pick-hint">Router / Supervisor 的决策模型建议绑定低延迟、关闭思考的模型；未单独指定时依次跟随编排决策模型和问答模型。</p>
         <div v-if="!(modelChoices.fixed_slots as JsonMap[]||[]).length && !(modelChoices.aliases as JsonMap[]||[]).length" class="empty">暂无可选模型策略；将使用平台插槽默认链路</div>
         <div v-else class="model-policy-list">
           <template v-if="(modelChoices.fixed_slots as JsonMap[]||[]).length">
@@ -991,6 +1071,10 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
 .runtime-tool-item .risk.high, .runtime-tool-item .risk.medium_high { background: #fee2e2; color: #b91c1c; }
 .runtime-tool-item .tag.danger { background: #fff1f2; color: #be123c; }
 .subagent-tool-select { min-width: 190px; min-height: 78px; }
+.runtime-budget-grid, .supervisor-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #f8fafc; }
+.output-schema-field { grid-column: 1 / -1; }
+.output-schema-field textarea { width: 100%; }
+td textarea { min-width: 230px; width: 100%; resize: vertical; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
 .tool-pick { padding: 4px 2px; }
 .workflow-branch-cell { min-width: 360px; vertical-align: top; }
 .workflow-branch-row { display: grid; grid-template-columns: minmax(100px, 1fr) 18px minmax(120px, 1fr) auto auto; gap: 6px; align-items: center; margin-top: 6px; }

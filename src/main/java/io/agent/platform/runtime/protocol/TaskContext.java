@@ -15,8 +15,31 @@ public record TaskContext(
         String sourceAgentId,
         String targetAgentId,
         String stepId,
+        int depth,
         Instant deadlineAt,
         Map<String, Object> metadata) {
+
+    /** Backward-compatible constructor for the original context contract. */
+    public TaskContext(
+            String taskId,
+            String parentTaskId,
+            String rootTaskId,
+            String sourceAgentId,
+            String targetAgentId,
+            String stepId,
+            Instant deadlineAt,
+            Map<String, Object> metadata) {
+        this(
+                taskId,
+                parentTaskId,
+                rootTaskId,
+                sourceAgentId,
+                targetAgentId,
+                stepId,
+                parentTaskId == null || parentTaskId.isBlank() ? 0 : 1,
+                deadlineAt,
+                metadata);
+    }
 
     public TaskContext {
         taskId = valueOrGenerated(taskId, "task");
@@ -27,7 +50,22 @@ public record TaskContext(
     public static TaskContext root(String sourceAgentId, String targetAgentId) {
         String taskId = generatedId();
         return new TaskContext(
-                taskId, null, taskId, sourceAgentId, targetAgentId, null, null, Map.of());
+                taskId, null, taskId, sourceAgentId, targetAgentId, null, 0, null, Map.of());
+    }
+
+    public static TaskContext root(
+            String rootTaskId, String sourceAgentId, String targetAgentId, Instant deadlineAt) {
+        String taskId = valueOrGenerated(rootTaskId, "task");
+        return new TaskContext(
+                taskId,
+                null,
+                taskId,
+                sourceAgentId,
+                targetAgentId,
+                null,
+                0,
+                deadlineAt,
+                Map.of());
     }
 
     public TaskContext child(String sourceAgentId, String targetAgentId, String stepId) {
@@ -38,6 +76,7 @@ public record TaskContext(
                 sourceAgentId,
                 targetAgentId,
                 stepId,
+                depth + 1,
                 deadlineAt,
                 metadata);
     }
@@ -50,6 +89,7 @@ public record TaskContext(
                 sourceAgentId,
                 targetAgentId,
                 stepId,
+                depth,
                 deadlineAt,
                 metadata);
     }
@@ -64,6 +104,7 @@ public record TaskContext(
                 sourceAgentId,
                 targetAgentId,
                 stepId,
+                depth,
                 deadlineAt,
                 next);
     }

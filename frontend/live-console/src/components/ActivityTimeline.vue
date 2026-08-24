@@ -69,6 +69,14 @@ function niceType(type: string) {
     supervisor_start: 'Supervisor 启动',
     supervisor_decision_start: 'Supervisor LLM 决策开始',
     supervisor_decision: 'Supervisor 专家决策',
+    supervisor_plan_start: 'Supervisor 制定计划',
+    supervisor_plan: 'Supervisor 计划完成',
+    supervisor_step_start: 'Supervisor 调用子 Agent',
+    supervisor_subagent_result: '子 Agent 返回结果',
+    supervisor_revise_start: 'Supervisor 评估下一步',
+    supervisor_revise: 'Supervisor 调整计划',
+    supervisor_summary_start: 'Supervisor 开始汇总',
+    supervisor_summary_end: 'Supervisor 汇总完成',
     single_agent_start: 'Agent 启动',
     agent_start: 'Agent 开始',
     agent_result: 'Agent 结果',
@@ -112,7 +120,8 @@ function isExpanded(item: ActivityItem) {
 }
 
 function title(item: ActivityItem) {
-  const base = niceType(item.type || item.title)
+  let base = niceType(item.type || item.title)
+  if (item.detail?.agent_workflow === true) base = base.replace('Workflow', '串行链路（WORKFLOW）').replace('步骤', '串行步骤')
   const agent = agentName(item)
   const rawTitle = String(item.title || '').trim()
   const displayTitle = !rawTitle || rawTitle.toLowerCase() === 'activity' ? base : rawTitle

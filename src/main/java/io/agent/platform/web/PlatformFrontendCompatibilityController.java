@@ -12,6 +12,7 @@ import io.agent.platform.control.ToolSpec;
 import io.agent.platform.runtime.AgentEventEnvelope;
 import io.agent.platform.runtime.AgentRuntime;
 import io.agent.platform.runtime.ChatRequest;
+import io.agent.platform.runtime.protocol.TaskContext;
 import io.agent.platform.tool.PythonScriptTool;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -288,6 +289,14 @@ public class PlatformFrontendCompatibilityController {
         return map("items", rows, "runs", rows);
     }
 
+    @GetMapping("/agents/orchestration/metrics")
+    public Map<String, Object> orchestrationMetrics(
+            @RequestParam(name = "agent_id", required = false) String agentId,
+            ServerHttpRequest request) {
+        var current = requirePrincipal(request);
+        return map("metrics", state.orchestrationMetrics(agentId, current.userId()));
+    }
+
     @PostMapping("/agents/runs")
     public Mono<Map<String, Object>> createRun(
             @RequestBody Map<String, Object> payload,
@@ -307,7 +316,14 @@ public class PlatformFrontendCompatibilityController {
         Map<String, Object> run = state.createRun(agentId, query, userId);
         String runId = string(run.get("run_id"), "");
         state.appendSessionMessage(agentId, sessionId, userId, "user", query);
-        return runtime.chat(agentId, new ChatRequest(orgId, userId, sessionId, runtimeQuery))
+        return runtime.chat(
+                        agentId,
+                        new ChatRequest(
+                                orgId,
+                                userId,
+                                sessionId,
+                                runtimeQuery,
+                                TaskContext.root(runId, agentId, agentId, null)))
                 .subscribeOn(Schedulers.boundedElastic())
                 .map(
                         response -> {
@@ -377,6 +393,22 @@ public class PlatformFrontendCompatibilityController {
         readableRun(runId, requirePrincipal(request));
         List<Map<String, Object>> rows = state.runEvents(runId);
         return map("items", rows, "events", rows, "next_after_id", rows.size());
+    }
+
+    @PostMapping("/agents/runs/{runId}/orchestration-evaluation")
+    public Map<String, Object> evaluateOrchestration(
+            @PathVariable("runId") String runId,
+            @RequestBody(required = false) Map<String, Object> payload,
+            ServerHttpRequest request) {
+        readableRun(runId, requirePrincipal(request));
+        Map<String, Object> body = payload == null ? Map.of() : payload;
+        Map<String, Object> item =
+                state.recordOrchestrationEvaluation(
+                        runId,
+                        string(body.get("kind"), "router"),
+                        Boolean.TRUE.equals(body.get("correct")),
+                        string(body.get("note"), ""));
+        return map("ok", true, "item", item);
     }
 
     @GetMapping("/agents/runs/{runId}/waiting")
@@ -2036,7 +2068,14 @@ public class PlatformFrontendCompatibilityController {
                                         "run_id",
                                         runId)));
         Flux<ServerSentEvent<Map<String, Object>>> events =
-                runtime.stream(agentId, new ChatRequest(domain, userId, sessionId, runtimeQuery))
+                runtime.stream(
+                                agentId,
+                                new ChatRequest(
+                                        domain,
+                                        userId,
+                                        sessionId,
+                                        runtimeQuery,
+                                        TaskContext.root(runId, agentId, agentId, null)))
                         .filter(PlatformFrontendCompatibilityController::visibleStreamEvent)
                         .doOnSubscribe(ignored -> agentStartedAt.set(Instant.now()))
                         .doOnNext(
@@ -2726,11 +2765,14 @@ public class PlatformFrontendCompatibilityController {
 
     private static String activityTitle(AgentEventEnvelope event) {
         String type = string(event.type(), "agent_event").toLowerCase().replace('.', '_');
+        boolean agentWorkflow =
+                event.payload() != null
+                        && Boolean.TRUE.equals(event.payload().get("agent_workflow"));
         return switch (type) {
-            case "workflow_start" -> "Workflow 开始";
-            case "workflow_step_start" -> "Workflow 步骤开始";
-            case "workflow_step_end" -> "Workflow 步骤完成";
-            case "workflow_final_step" -> "Workflow 最终步骤";
+            case "workflow_start" -> agentWorkflow ? "串行链路（WORKFLOW）开始" : "Workflow 开始";
+            case "workflow_step_start" -> agentWorkflow ? "串行链路步骤开始" : "Workflow 步骤开始";
+            case "workflow_step_end" -> agentWorkflow ? "串行链路步骤完成" : "Workflow 步骤完成";
+            case "workflow_final_step" -> agentWorkflow ? "串行链路最终步骤" : "Workflow 最终步骤";
             case "capability_loaded" -> "能力挂载";
             case "router_decision_start" -> "Router LLM 决策开始";
             case "router_decision" -> "Router 路由决策";

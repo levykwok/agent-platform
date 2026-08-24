@@ -16,6 +16,7 @@ const steps = ref<JsonMap[]>([])
 const events = ref<JsonMap[]>([])
 const waiting = ref<JsonMap | null>(null)
 const detailLoading = ref(false)
+const orchestrationMetrics = ref<JsonMap>({})
 
 function headers(json = false) { return makeHeaders(json, currentOrgId()) }
 function statusCls(s: string) {
@@ -53,6 +54,10 @@ async function loadRuns() {
     if (statusFilter.value) p.set('status', statusFilter.value)
     const d = await readJson<JsonMap>(await fetch(`/platform/frontend/agents/runs?${p}`, { headers: headers(false) }))
     runs.value = (d.items || d.runs || []) as JsonMap[]
+    const mp = new URLSearchParams()
+    if (agentFilter.value) mp.set('agent_id', agentFilter.value)
+    const metrics = await readJson<JsonMap>(await fetch(`/platform/frontend/agents/orchestration/metrics?${mp}`, { headers: headers(false) }))
+    orchestrationMetrics.value = (metrics.metrics || {}) as JsonMap
   } catch (err) {
     notifyError(err)
   } finally {
@@ -84,6 +89,8 @@ async function openRun(r: JsonMap) {
   }
 }
 function pretty(v: unknown) { try { return JSON.stringify(v ?? {}, null, 2) } catch { return String(v ?? '') } }
+function percent(value: unknown) { return typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '暂无样本' }
+function metricNumber(value: unknown, suffix = '') { return typeof value === 'number' ? `${Number(value).toFixed(Number.isInteger(value) ? 0 : 2)}${suffix}` : '—' }
 function eventStatusCls(ev: JsonMap) {
   const type = String(ev.event_type || ev.type || '')
   if (type.includes('failed') || type.includes('rejected') || type.includes('expired')) return 'badge-red'
@@ -235,6 +242,16 @@ const stats = computed(() => ({
   fail: runs.value.filter((r) => statusCls(String(r.status)) === 'badge-red').length,
   running: runs.value.filter((r) => statusCls(String(r.status)) === 'badge-amber').length,
 }))
+const hasRouterDecision = computed(() => events.value.some((ev) => String(ev.event_type || ev.type || '').toLowerCase() === 'router_decision'))
+async function evaluateRouter(correct: boolean) {
+  if (!detail.value?.run_id) return
+  try {
+    await readJson<JsonMap>(await fetch(`/platform/frontend/agents/runs/${encodeURIComponent(String(detail.value.run_id))}/orchestration-evaluation`, {
+      method: 'POST', headers: headers(true), body: JSON.stringify({ kind: 'router', correct }),
+    }))
+    await Promise.all([loadRuns(), refreshSelectedRun()])
+  } catch (err) { notifyError(err) }
+}
 
 onMounted(async () => { await loadAgents(); await loadRuns() })
 </script>
@@ -246,6 +263,14 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
       <div class="stat"><div class="stat-label">成功</div><div class="stat-val" style="color:var(--green)">{{ stats.ok }}</div></div>
       <div class="stat"><div class="stat-label">失败</div><div class="stat-val" :style="stats.fail ? 'color:var(--red)' : ''">{{ stats.fail }}</div></div>
       <div class="stat"><div class="stat-label">运行中</div><div class="stat-val" :style="stats.running ? 'color:var(--yellow)' : ''">{{ stats.running }}</div></div>
+    </div>
+    <div class="orchestration-metrics">
+      <div class="metric"><span>Router 准确率</span><strong>{{ percent(orchestrationMetrics.router_accuracy) }}</strong><small>{{ orchestrationMetrics.router_labeled || 0 }} 条人工标注</small></div>
+      <div class="metric"><span>Supervisor fallback</span><strong>{{ percent(orchestrationMetrics.supervisor_fallback_rate) }}</strong><small>{{ orchestrationMetrics.supervisor_fallbacks || 0 }} / {{ orchestrationMetrics.supervisor_decisions || 0 }}</small></div>
+      <div class="metric"><span>平均子 Agent 调用</span><strong>{{ metricNumber(orchestrationMetrics.supervisor_average_agent_calls) }}</strong><small>每个 Supervisor PLAN</small></div>
+      <div class="metric"><span>编排决策 P95</span><strong>{{ metricNumber(orchestrationMetrics.decision_p95_ms, ' ms') }}</strong><small>Router / PLAN / REVISE</small></div>
+      <div class="metric"><span>运行 P95</span><strong>{{ metricNumber(orchestrationMetrics.run_p95_ms, ' ms') }}</strong><small>{{ orchestrationMetrics.run_count || 0 }} 次运行</small></div>
+      <div class="metric"><span>Token / 成本</span><strong>{{ orchestrationMetrics.total_tokens || 0 }}</strong><small>{{ orchestrationMetrics.currency || 'USD' }} {{ metricNumber(orchestrationMetrics.estimated_cost) }}</small></div>
     </div>
 
     <div class="runs-body">
@@ -275,7 +300,7 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
             <div class="section-head"><div><div class="section-title">{{ agentName(String(detail.agent_id)) }}</div><div class="section-sub mono">{{ detail.run_id }}</div></div><span class="badge" :class="statusCls(String(detail.status))">{{ detail.status }}</span></div>
             <div class="rd-grid">
               <div class="rd-cell"><span>Agent</span><b>{{ detail.agent_id }}</b></div>
-              <div class="rd-cell"><span>版本</span><b>{{ detail.spec_key || detail.agent_version || 'main' }}</b></div>
+              <div class="rd-cell"><span>Agent 版本</span><b>{{ detail.agent_version || 'unknown' }}</b></div>
               <div class="rd-cell"><span>耗时</span><b>{{ elapsed(detail) }}</b></div>
               <div class="rd-cell"><span>用户</span><b>{{ detail.user_id || '—' }}</b></div>
               <div class="rd-cell"><span>开始</span><b>{{ detail.started_at ? fmtDate(detail.started_at) : '—' }}</b></div>
@@ -283,6 +308,8 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
               <div class="rd-cell wide"><span>Trace</span><b class="mono">{{ detail.trace_id || '—' }}</b></div>
             </div>
             <div v-if="detail.error" class="rd-error">错误 [{{ detail.error.code }}]：{{ detail.error.message }}</div>
+            <div v-if="hasRouterDecision" class="router-evaluation"><span>Router 这次选路是否正确？</span><button class="btn btn-ghost btn-sm" @click="evaluateRouter(true)">正确</button><button class="btn btn-ghost btn-sm" @click="evaluateRouter(false)">错误</button></div>
+            <details v-if="detail.config_snapshot" class="run-snapshot"><summary>运行配置快照（{{ detail.agent_version || 'unknown' }}）</summary><pre class="json-box">{{ pretty(detail.config_snapshot) }}</pre></details>
           </section>
 
           <section v-if="waiting" class="panel">
@@ -387,6 +414,12 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
 <style scoped>
 .runs-page { flex: 1; overflow: hidden; padding: 18px 24px; display: flex; flex-direction: column; gap: 16px; }
 .runs-page > .stats { flex-shrink: 0; }
+.orchestration-metrics { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 10px; flex-shrink: 0; }
+.metric { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+.metric span, .metric small { color: var(--muted); font-size: 11px; }
+.metric strong { font-size: 17px; }
+.router-evaluation { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #eef2f7; font-size: 12px; }
+.run-snapshot { margin-top: 10px; }
 .runs-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px 1fr; gap: 16px; overflow: hidden; }
 .runs-list-pane { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border: 1px solid #eef2f7; border-radius: 12px; overflow: hidden; box-shadow: var(--shadow-sm); }
 .runs-filters { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 7px; }
@@ -461,6 +494,7 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
 .event-row details summary { font-size: 12px; color: var(--muted); cursor: pointer; }
 
 @media (max-width: 980px) {
+  .orchestration-metrics { grid-template-columns: repeat(2, 1fr); }
   .runs-page { overflow: visible; }
   .runs-body { grid-template-columns: 1fr; overflow: visible; }
   .runs-list-pane { max-height: 360px; }

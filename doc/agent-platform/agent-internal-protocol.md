@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-本协议用于同一平台内部的 Agent、Router 和 Workflow 之间传递任务，不直接绑定 HTTP、SSE、A2A 或其他网络协议。
+本协议用于同一平台内部的 Agent、Router、串行链路（Agent WORKFLOW）和 Supervisor 之间传递任务，不直接绑定 HTTP、SSE、A2A 或其他网络协议。独立 Workflow 画布使用自己的图运行协议，不属于本文的 Agent 内部编排。
 
 当前目标：
 
@@ -16,7 +16,7 @@
 - 跨组织 Agent 发现
 - 公网身份认证
 - 复杂多方协商
-- 并行执行和分布式调度
+- 分布式调度
 
 ## 2. 核心概念
 
@@ -34,7 +34,8 @@ ProgressEvent    = 执行过程中的状态和进度事件
 用户请求
   └─ root task
        ├─ Router 选择目标
-       ├─ Workflow 创建步骤 task
+       ├─ 串行链路创建步骤 task
+       ├─ Supervisor 创建子 Agent task / 可选并行组
        └─ 目标 Agent 返回 result
 ```
 
@@ -51,6 +52,7 @@ ProgressEvent    = 执行过程中的状态和进度事件
   "user_id": "user-001",
   "session_id": "session-001",
   "step_id": "research",
+  "depth": 1,
   "input": {
     "text": "分析这份技术方案",
     "data": {}
@@ -73,6 +75,7 @@ ProgressEvent    = 执行过程中的状态和进度事件
 | `source_agent_id` | 发起调用的 Agent 或编排入口 |
 | `target_agent_id` | 目标 AgentDefinition |
 | `step_id` | 当前 Workflow 步骤，可为空 |
+| `depth` | 相对 root task 的 Agent 嵌套深度，用于根预算限制 |
 | `input` | 结构化输入，至少支持 `text` 和 `data` |
 | `deadline_at` | 整体截止时间，不由下游自行延长 |
 | `metadata` | trace、重试、实验标记等非业务字段 |
@@ -83,13 +86,10 @@ ProgressEvent    = 执行过程中的状态和进度事件
 {
   "task_id": "task_01J...",
   "status": "COMPLETED",
-  "output": {
-    "content": "技术方案的主要风险是……",
-    "data": {
-      "status": "complete",
-      "risk_count": 3
-    }
-  },
+  "content": "技术方案的主要风险是……",
+  "data": {"risk_count": 3},
+  "summary": "识别出 3 个主要风险",
+  "artifacts": [],
   "error": null,
   "usage": {
     "input_tokens": 1200,
@@ -123,6 +123,8 @@ REJECTED   权限或策略拒绝
   "details": {}
 }
 ```
+
+Agent 间业务结果固定为 `status / data / summary / artifacts / error`。旧纯文本会自动归一化；配置 `model_policy.output_schema` 或子 Agent binding 的 `outputSchema` 后，运行时使用 JSON Schema 子集校验 `data`。
 
 ## 5. ProgressEvent
 
@@ -159,7 +161,7 @@ TASK_FAILED
 TASK_CANCELLED
 ```
 
-## 6. Workflow 分支协议
+## 6. 串行链路（Agent WORKFLOW）分支协议
 
 Agent 输出不直接决定任意目标步骤，只输出状态和内容：
 
@@ -170,7 +172,7 @@ Agent 输出不直接决定任意目标步骤，只输出状态和内容：
 }
 ```
 
-Workflow 根据配置决定跳转：
+Agent 串行链路根据配置决定跳转：
 
 ```yaml
 transitions:
@@ -235,5 +237,6 @@ AgentRuntimeService  → TaskDispatcher
 1. 将 `ChatRequest/ChatResponse` 的内部调用包装成 `TaskRequest/TaskResult`。
 2. 为 `AgentRuntimeService` 增加统一 task_id、parent_task_id 和 root_task_id。
 3. 将编排事件统一成 `ProgressEvent` 字段口径。
-4. 增加 `TaskResult` 的结构化错误和 usage。
-5. 再考虑暂停、恢复、取消和跨进程 Transport Adapter。
+4. `TaskResult` 使用统一业务结果并记录 usage、根预算快照。
+5. Run 固化 Agent 版本、模型策略、子 Agent 绑定和完整配置快照。
+6. 再考虑暂停、恢复、取消和跨进程 Transport Adapter。

@@ -1,6 +1,7 @@
 param(
     [string]$BaseUrl = 'http://localhost:8080',
-    [string]$SessionToken = $env:AGENT_PLATFORM_E2E_SESSION_TOKEN
+    [string]$SessionToken = $env:AGENT_PLATFORM_E2E_SESSION_TOKEN,
+    [string]$DecisionModel = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,8 +47,23 @@ function New-AgentSpec {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$Description,
         [Parameter(Mandatory = $true)][string]$Role,
-        [Parameter(Mandatory = $true)][hashtable]$Orchestration
+        [Parameter(Mandatory = $true)][hashtable]$Orchestration,
+        [hashtable]$OutputSchema = @{}
     )
+
+    $modelPolicy = @{}
+    if (-not [string]::IsNullOrWhiteSpace($DecisionModel)) {
+        $modelPolicy.orchestration = $DecisionModel.Trim()
+    }
+    $modelPolicy.runtime = @{
+        root_timeout_ms = 240000
+        root_max_agent_calls = 20
+        root_max_tokens = 100000
+        root_max_depth = 6
+    }
+    if ($OutputSchema.Count -gt 0) {
+        $modelPolicy.output_schema = $OutputSchema
+    }
 
     return @{
         config_json = @{
@@ -55,9 +71,9 @@ function New-AgentSpec {
             description = $Description
             domain = 'platform'
             enabled = $true
-            # Use the platform QA slot so this suite validates orchestration rather than
-            # coupling the baseline to one provider-specific model ID.
-            model_policy = @{}
+            # By default the suite follows the platform orchestration/QA slot. A caller can
+            # provide -DecisionModel for a repeatable latency benchmark.
+            model_policy = $modelPolicy
             skill_scope = @{ include = @() }
             mcp_scope = @{ include = @() }
             orchestration = $Orchestration
@@ -79,8 +95,9 @@ $definitions = @(
         spec = New-AgentSpec `
             -Name 'Orchestration E2E - Single Analysis' `
             -Description 'Tool-free Single Agent for orchestration end-to-end validation.' `
-            -Role 'You are the analysis node in an orchestration acceptance test. Do not call tools. Output exactly one line in this format: E2E_ANALYSIS_OK | conclusion=<one short sentence>.' `
-            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); workflow = @() }
+            -Role 'You are the analysis node in an orchestration acceptance test. Do not call tools. Return the required Agent business-result JSON with data.conclusion as one short sentence and summary beginning with E2E_ANALYSIS_OK.' `
+            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); workflow = @() } `
+            -OutputSchema @{ type = 'object'; required = @('conclusion'); properties = @{ conclusion = @{ type = 'string' } } }
     },
     @{
         id = 'orchestration-e2e-single-format'
@@ -89,16 +106,17 @@ $definitions = @(
         spec = New-AgentSpec `
             -Name 'Orchestration E2E - Single Format' `
             -Description 'Tool-free Single Agent that formats upstream orchestration output.' `
-            -Role 'You are the formatting node in an orchestration acceptance test. Do not call tools. Output exactly one line in this format: E2E_FORMAT_OK | summary=<one short sentence>.' `
-            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); workflow = @() }
+            -Role 'You are the formatting node in an orchestration acceptance test. Do not call tools. Return the required Agent business-result JSON with data.formatted as one short sentence and summary beginning with E2E_FORMAT_OK.' `
+            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); workflow = @() } `
+            -OutputSchema @{ type = 'object'; required = @('formatted'); properties = @{ formatted = @{ type = 'string' } } }
     },
     @{
         id = 'orchestration-e2e-workflow'
-        name = 'Orchestration E2E - Serial Workflow'
-        description = 'Two-step serial Workflow that calls the analysis and formatting nodes.'
+        name = 'Orchestration E2E - Agent Serial Chain (WORKFLOW)'
+        description = 'Two-step Agent-owned serial chain; this is not a standalone Workflow canvas asset.'
         spec = New-AgentSpec `
-            -Name 'Orchestration E2E - Serial Workflow' `
-            -Description 'Two-step serial Workflow that calls the analysis and formatting nodes.' `
+            -Name 'Orchestration E2E - Agent Serial Chain (WORKFLOW)' `
+            -Description 'Two-step Agent-owned serial chain; this is not a standalone Workflow canvas asset.' `
             -Role 'Run the declared two-step serial orchestration without calling tools.' `
             -Orchestration @{
                 mode = 'WORKFLOW'
@@ -127,10 +145,10 @@ $definitions = @(
     @{
         id = 'orchestration-e2e-router'
         name = 'Orchestration E2E - Router'
-        description = 'Router example that targets the new Single Agent or serial Workflow.'
+        description = 'Router example that targets a Single Agent or Agent serial chain.'
         spec = New-AgentSpec `
             -Name 'Orchestration E2E - Router' `
-            -Description 'Router example that targets the new Single Agent or serial Workflow.' `
+            -Description 'Router example that targets a Single Agent or Agent serial chain.' `
             -Role 'Forward the request using only the declared routing rules.' `
             -Orchestration @{
                 mode = 'ROUTER'
@@ -171,6 +189,9 @@ $definitions = @(
             -Role 'You are the orchestration acceptance-test Supervisor. Do not call tools. After receiving both child results, output exactly one line: E2E_SUPERVISOR_OK | analysis=<whether E2E_ANALYSIS_OK is present> | format=<whether E2E_FORMAT_OK is present>.' `
             -Orchestration @{
                 mode = 'SUPERVISOR'
+                maxSupervisorSteps = 5
+                supervisorParallelEnabled = $true
+                maxSupervisorParallelism = 2
                 routes = @()
                 workflow = @()
                 subagents = @(

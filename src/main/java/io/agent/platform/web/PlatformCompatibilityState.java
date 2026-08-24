@@ -422,12 +422,37 @@ public class PlatformCompatibilityState {
         return String.valueOf(binding.getOrDefault("model_id", "")).trim();
     }
 
+    private String modelIdForExactSlot(String slotKey) {
+        Map<String, Object> binding = slotBindings.get(normalizedChatSlot(slotKey));
+        if (binding == null) {
+            return "";
+        }
+        return String.valueOf(binding.getOrDefault("model_id", "")).trim();
+    }
+
     public String defaultChatModelId() {
         String slotModel = modelIdForSlot("qa");
         if (!slotModel.isBlank()) {
             return slotModel;
         }
         return defaultModelForSlot("chat");
+    }
+
+    /**
+     * Resolves the lightweight LLM used for Router and Supervisor control decisions.
+     * Mode-specific bindings win, followed by the shared orchestration binding and the
+     * regular QA model for backward compatibility.
+     */
+    public String defaultOrchestrationModelId(String mode) {
+        String normalizedMode = mode == null ? "" : mode.trim().toLowerCase();
+        if ("router".equals(normalizedMode) || "supervisor".equals(normalizedMode)) {
+            String modeModel = modelIdForExactSlot(normalizedMode + "_decision");
+            if (!modeModel.isBlank()) {
+                return modeModel;
+            }
+        }
+        String orchestrationModel = modelIdForExactSlot("orchestration");
+        return orchestrationModel.isBlank() ? defaultChatModelId() : orchestrationModel;
     }
 
     public String defaultVlmModelId() {
@@ -472,7 +497,19 @@ public class PlatformCompatibilityState {
                 mode(string(map, "mode", fallback.mode().name())),
                 subagents(map.get("subagents")),
                 routes(map.get("routes")),
-                workflowSteps(map.get("workflow")));
+                workflowSteps(map.get("workflow")),
+                integerAny(
+                        map,
+                        fallback.maxSupervisorSteps(),
+                        "maxSupervisorSteps",
+                        "max_supervisor_steps"),
+                Boolean.TRUE.equals(map.get("supervisorParallelEnabled"))
+                        || Boolean.TRUE.equals(map.get("supervisor_parallel_enabled")),
+                integerAny(
+                        map,
+                        fallback.maxSupervisorParallelism(),
+                        "maxSupervisorParallelism",
+                        "max_supervisor_parallelism"));
     }
 
     private OrchestrationMode mode(String value) {
@@ -504,7 +541,11 @@ public class PlatformCompatibilityState {
                 Boolean.TRUE.equals(map.get("exposeToUser"))
                         || Boolean.TRUE.equals(map.get("expose_to_user")),
                 stringList(
-                        map.get("toolRefs") == null ? map.get("tool_refs") : map.get("toolRefs")));
+                        map.get("toolRefs") == null ? map.get("tool_refs") : map.get("toolRefs")),
+                objectMap(
+                        map.get("outputSchema") == null
+                                ? map.get("output_schema")
+                                : map.get("outputSchema")));
     }
 
     private List<RouteRule> routes(Object value) {
@@ -602,6 +643,16 @@ public class PlatformCompatibilityState {
             }
         }
         return "";
+    }
+
+    private int integerAny(Map<String, Object> map, int fallback, String... keys) {
+        for (String key : keys) {
+            Integer value = numberInt(map.get(key), null);
+            if (value != null) {
+                return value;
+            }
+        }
+        return fallback;
     }
 
     private Long numberLong(Object primary, Object fallback) {
@@ -2385,6 +2436,9 @@ public class PlatformCompatibilityState {
     public Map<String, Object> createRun(String agentId, String query, String userId) {
         String runId = "run_" + UUID.randomUUID().toString().replace("-", "");
         Instant now = Instant.now();
+        AgentDefinition definition = agentRegistry.findPublished(agentId).orElse(null);
+        Map<String, Object> spec = agentSpec(agentId);
+        Map<String, Object> configSnapshot = objectMap(spec.get("config_json"));
         Map<String, Object> run =
                 row(
                         "run_id",
@@ -2407,6 +2461,16 @@ public class PlatformCompatibilityState {
                         "",
                         "spec_key",
                         "agentscope_runtime");
+        run.put("agent_version", definition == null ? "" : definition.version());
+        run.put("model_snapshot", definition == null ? "" : definition.model());
+        run.put(
+                "model_policy_snapshot",
+                definition == null ? Map.of() : definition.modelPolicy());
+        run.put(
+                "orchestration_snapshot",
+                definition == null ? Map.of() : definition.orchestration());
+        run.put("config_snapshot", configSnapshot);
+        run.put("snapshot_created_at", now.toString());
         List<Map<String, Object>> steps =
                 List.of(
                         row(
@@ -2792,6 +2856,158 @@ public class PlatformCompatibilityState {
         return runEvents.getOrDefault(runId, List.of());
     }
 
+    public Map<String, Object> recordOrchestrationEvaluation(
+            String runId, String kind, boolean correct, String note) {
+        Map<String, Object> payload =
+                row(
+                        "kind",
+                        kind == null || kind.isBlank() ? "router" : kind.toLowerCase(),
+                        "correct",
+                        correct,
+                        "note",
+                        note == null ? "" : note,
+                        "evaluated_at",
+                        Instant.now().toString());
+        appendRunEvent(runId, "orchestration.evaluation", payload);
+        return payload;
+    }
+
+    public Map<String, Object> orchestrationMetrics(String agentId, String userId) {
+        List<Map<String, Object>> selectedRuns = runs(agentId, "", Integer.MAX_VALUE, userId);
+        Set<String> selectedRunIds =
+                selectedRuns.stream()
+                        .map(run -> String.valueOf(run.getOrDefault("run_id", "")))
+                        .filter(id -> !id.isBlank())
+                        .collect(java.util.stream.Collectors.toSet());
+        long routerDecisions = 0;
+        long routerLabels = 0;
+        long routerCorrect = 0;
+        long supervisorDecisions = 0;
+        long supervisorFallbacks = 0;
+        long supervisorPlans = 0;
+        long supervisorChildCalls = 0;
+        List<Long> decisionDurations = new ArrayList<>();
+        for (String runId : selectedRunIds) {
+            for (Map<String, Object> event : runEvents(runId)) {
+                String type = String.valueOf(event.getOrDefault("event_type", "")).toLowerCase();
+                Map<String, Object> payload = objectMap(event.get("payload"));
+                if ("router_decision".equals(type)) routerDecisions++;
+                if ("supervisor_plan".equals(type)) {
+                    supervisorPlans++;
+                    supervisorDecisions++;
+                    if ("fallback".equals(String.valueOf(payload.get("decision_source")))) {
+                        supervisorFallbacks++;
+                    }
+                }
+                if ("supervisor_revise".equals(type)) {
+                    supervisorDecisions++;
+                    if ("fallback".equals(String.valueOf(payload.get("decision_source")))) {
+                        supervisorFallbacks++;
+                    }
+                }
+                if ("supervisor_subagent_result".equals(type)) supervisorChildCalls++;
+                if (("router_decision".equals(type)
+                                || "supervisor_plan".equals(type)
+                                || "supervisor_revise".equals(type))
+                        && payload.get("duration_ms") instanceof Number duration) {
+                    decisionDurations.add(duration.longValue());
+                }
+                if ("orchestration.evaluation".equals(type)
+                        && "router".equals(String.valueOf(payload.getOrDefault("kind", "router")))) {
+                    routerLabels++;
+                    if (Boolean.TRUE.equals(payload.get("correct"))) routerCorrect++;
+                }
+            }
+        }
+
+        long inputTokens = 0;
+        long outputTokens = 0;
+        double estimatedCost = 0D;
+        String currency = "USD";
+        List<Map<String, Object>> auditSnapshot;
+        synchronized (audit) {
+            auditSnapshot = List.copyOf(audit);
+        }
+        for (Map<String, Object> event : auditSnapshot) {
+            if (!"llm.call".equals(String.valueOf(event.get("event_type")))) continue;
+            Map<String, Object> payload = objectMap(event.get("payload"));
+            if (!selectedRunIds.contains(String.valueOf(payload.getOrDefault("root_task_id", "")))) {
+                continue;
+            }
+            long in = number(payload.get("input_tokens"), 0L);
+            long out = number(payload.get("output_tokens"), 0L);
+            inputTokens += in;
+            outputTokens += out;
+            String modelId = String.valueOf(payload.getOrDefault("configured_model", ""));
+            if (modelId.isBlank()) {
+                modelId = String.valueOf(payload.getOrDefault("model_name", ""));
+            }
+            Map<String, Object> pricing =
+                    objectMap(modelRows.getOrDefault(modelId, Map.of()).get("pricing_json"));
+            double inputPrice = decimal(pricing.get("input_per_million_tokens"));
+            double outputPrice = decimal(pricing.get("output_per_million_tokens"));
+            estimatedCost += (in * inputPrice + out * outputPrice) / 1_000_000D;
+            if (pricing.get("currency") != null) currency = String.valueOf(pricing.get("currency"));
+        }
+
+        List<Long> runDurations =
+                selectedRuns.stream()
+                        .map(PlatformCompatibilityState::runDurationMs)
+                        .filter(value -> value >= 0)
+                        .toList();
+        Map<String, Object> metrics = new LinkedHashMap<>();
+        metrics.put("run_count", selectedRuns.size());
+        metrics.put("router_decisions", routerDecisions);
+        metrics.put("router_labeled", routerLabels);
+        metrics.put(
+                "router_accuracy",
+                routerLabels == 0 ? null : (double) routerCorrect / (double) routerLabels);
+        metrics.put("supervisor_decisions", supervisorDecisions);
+        metrics.put("supervisor_fallbacks", supervisorFallbacks);
+        metrics.put(
+                "supervisor_fallback_rate",
+                supervisorDecisions == 0
+                        ? null
+                        : (double) supervisorFallbacks / (double) supervisorDecisions);
+        metrics.put(
+                "supervisor_average_agent_calls",
+                supervisorPlans == 0 ? null : (double) supervisorChildCalls / supervisorPlans);
+        metrics.put("decision_p95_ms", percentile95(decisionDurations));
+        metrics.put("run_p95_ms", percentile95(runDurations));
+        metrics.put("input_tokens", inputTokens);
+        metrics.put("output_tokens", outputTokens);
+        metrics.put("total_tokens", inputTokens + outputTokens);
+        metrics.put("estimated_cost", estimatedCost);
+        metrics.put("currency", currency);
+        return metrics;
+    }
+
+    private static long runDurationMs(Map<String, Object> run) {
+        try {
+            Instant started = Instant.parse(String.valueOf(run.get("started_at")));
+            Instant finished = Instant.parse(String.valueOf(run.get("finished_at")));
+            return Math.max(0L, java.time.Duration.between(started, finished).toMillis());
+        } catch (Exception ignored) {
+            return -1L;
+        }
+    }
+
+    private static Long percentile95(List<Long> values) {
+        if (values == null || values.isEmpty()) return null;
+        List<Long> sorted = values.stream().sorted().toList();
+        int index = Math.max(0, (int) Math.ceil(sorted.size() * 0.95D) - 1);
+        return sorted.get(index);
+    }
+
+    private static double decimal(Object value) {
+        if (value instanceof Number number) return number.doubleValue();
+        try {
+            return value == null ? 0D : Double.parseDouble(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return 0D;
+        }
+    }
+
     public void appendRunEventFromEnvelope(String runId, AgentEventEnvelope event) {
         if (runId == null || runId.isBlank() || event == null) {
             return;
@@ -2942,6 +3158,45 @@ public class PlatformCompatibilityState {
                         "qa",
                         "display_name",
                         "问答模型",
+                        "model_kind",
+                        "chat",
+                        "provider_call_type",
+                        "generate",
+                        "required_capabilities",
+                        List.of(),
+                        "is_custom",
+                        false),
+                row(
+                        "slot_key",
+                        "orchestration",
+                        "display_name",
+                        "编排决策模型",
+                        "model_kind",
+                        "chat",
+                        "provider_call_type",
+                        "generate",
+                        "required_capabilities",
+                        List.of(),
+                        "is_custom",
+                        false),
+                row(
+                        "slot_key",
+                        "router_decision",
+                        "display_name",
+                        "Router 决策模型",
+                        "model_kind",
+                        "chat",
+                        "provider_call_type",
+                        "generate",
+                        "required_capabilities",
+                        List.of(),
+                        "is_custom",
+                        false),
+                row(
+                        "slot_key",
+                        "supervisor_decision",
+                        "display_name",
+                        "Supervisor 决策模型",
                         "model_kind",
                         "chat",
                         "provider_call_type",

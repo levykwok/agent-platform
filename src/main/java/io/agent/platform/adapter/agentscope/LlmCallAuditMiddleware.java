@@ -4,6 +4,7 @@
 package io.agent.platform.adapter.agentscope;
 
 import io.agent.platform.web.PlatformCompatibilityState;
+import io.agent.platform.runtime.RootTaskBudgetManager;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
@@ -28,12 +29,22 @@ public class LlmCallAuditMiddleware implements MiddlewareBase {
     private final PlatformCompatibilityState platformState;
     private final String agentId;
     private final String configuredModelId;
+    private final RootTaskBudgetManager rootTaskBudgetManager;
 
     public LlmCallAuditMiddleware(
             PlatformCompatibilityState platformState, String agentId, String configuredModelId) {
+        this(platformState, agentId, configuredModelId, null);
+    }
+
+    public LlmCallAuditMiddleware(
+            PlatformCompatibilityState platformState,
+            String agentId,
+            String configuredModelId,
+            RootTaskBudgetManager rootTaskBudgetManager) {
         this.platformState = platformState;
         this.agentId = safe(agentId);
         this.configuredModelId = safe(configuredModelId);
+        this.rootTaskBudgetManager = rootTaskBudgetManager;
     }
 
     @Override
@@ -42,10 +53,15 @@ public class LlmCallAuditMiddleware implements MiddlewareBase {
             RuntimeContext ctx,
             ModelCallInput input,
             Function<ModelCallInput, Flux<AgentEvent>> next) {
+        String rootTaskId = safe(ctx == null ? null : ctx.get("root_task_id", String.class));
+        if (rootTaskBudgetManager != null) {
+            rootTaskBudgetManager.acquireModel(rootTaskId);
+        }
         return next.apply(input)
                 .doOnNext(
                         event -> {
                             if (event instanceof ModelCallEndEvent modelCallEndEvent) {
+                                recordBudget(ctx, modelCallEndEvent);
                                 record(input, ctx, modelCallEndEvent);
                             }
                         });
@@ -63,6 +79,7 @@ public class LlmCallAuditMiddleware implements MiddlewareBase {
             payload.put("agent_id", agentId);
             payload.put("user_id", safe(ctx == null ? null : ctx.getUserId()));
             payload.put("session_id", safe(ctx == null ? null : ctx.getSessionId()));
+            payload.put("root_task_id", safe(ctx == null ? null : ctx.get("root_task_id", String.class)));
             payload.put("tenant_id", safe(ctx == null ? null : ctx.get("tenant_id", String.class)));
             payload.put("reply_id", safe(event.getReplyId()));
             payload.put("configured_model", configuredModel);
@@ -88,6 +105,13 @@ public class LlmCallAuditMiddleware implements MiddlewareBase {
         } catch (Exception e) {
             log.warn("Failed to audit llm call for agent {}: {}", agentId, e.getMessage());
         }
+    }
+
+    private void recordBudget(RuntimeContext ctx, ModelCallEndEvent event) {
+        if (rootTaskBudgetManager == null || event == null || event.getUsage() == null) return;
+        rootTaskBudgetManager.recordTokens(
+                safe(ctx == null ? null : ctx.get("root_task_id", String.class)),
+                event.getUsage().getTotalTokens());
     }
 
     private String resolveModelName(ModelCallInput input) {
