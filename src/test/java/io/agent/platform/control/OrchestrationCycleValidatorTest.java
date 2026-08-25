@@ -26,7 +26,7 @@ class OrchestrationCycleValidatorTest {
                                         List.of(),
                                         List.of(),
                                         List.of(
-                                                new WorkflowStep(
+                                                new PipelineStep(
                                                         "call-b", "flow-b", "call b")))),
                         definition(
                                 "flow-b",
@@ -35,7 +35,7 @@ class OrchestrationCycleValidatorTest {
                                         List.of(),
                                         List.of(),
                                         List.of(
-                                                new WorkflowStep(
+                                                new PipelineStep(
                                                         "call-a", "flow-a", "call a")))));
 
         IllegalStateException error =
@@ -57,7 +57,7 @@ class OrchestrationCycleValidatorTest {
                                         List.of(),
                                         List.of(),
                                         List.of(
-                                                new WorkflowStep(
+                                                new PipelineStep(
                                                         "call-b", "flow-b", "call b")))),
                         definition(
                                 "flow-b",
@@ -66,7 +66,7 @@ class OrchestrationCycleValidatorTest {
                                         List.of(),
                                         List.of(),
                                         List.of(
-                                                new WorkflowStep(
+                                                new PipelineStep(
                                                         "call-leaf", "leaf", "call leaf")))),
                         definition("leaf", OrchestrationPolicy.single()));
 

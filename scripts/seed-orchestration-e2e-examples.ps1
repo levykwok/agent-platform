@@ -96,7 +96,7 @@ $definitions = @(
             -Name 'Orchestration E2E - Single Analysis' `
             -Description 'Tool-free Single Agent for orchestration end-to-end validation.' `
             -Role 'You are the analysis node in an orchestration acceptance test. Do not call tools. Return the required Agent business-result JSON with data.conclusion as one short sentence and summary beginning with E2E_ANALYSIS_OK.' `
-            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); workflow = @() } `
+            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); pipeline = @() } `
             -OutputSchema @{ type = 'object'; required = @('conclusion'); properties = @{ conclusion = @{ type = 'string' } } }
     },
     @{
@@ -107,7 +107,7 @@ $definitions = @(
             -Name 'Orchestration E2E - Single Format' `
             -Description 'Tool-free Single Agent that formats upstream orchestration output.' `
             -Role 'You are the formatting node in an orchestration acceptance test. Do not call tools. Return the required Agent business-result JSON with data.formatted as one short sentence and summary beginning with E2E_FORMAT_OK.' `
-            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); workflow = @() } `
+            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); pipeline = @() } `
             -OutputSchema @{ type = 'object'; required = @('formatted'); properties = @{ formatted = @{ type = 'string' } } }
     },
     @{
@@ -122,7 +122,7 @@ $definitions = @(
                 mode = 'PIPELINE'
                 subagents = @()
                 routes = @()
-                workflow = @(
+                pipeline = @(
                     @{
                         stepId = 'analyze'
                         agentId = 'orchestration-e2e-single-analysis'
@@ -153,13 +153,13 @@ $definitions = @(
             -Orchestration @{
                 mode = 'ROUTER'
                 subagents = @()
-                workflow = @()
+                pipeline = @()
                 routes = @(
                     @{
-                        ruleId = 'serial-workflow'
+                        ruleId = 'pipeline-route'
                         targetAgentId = 'orchestration-e2e-workflow'
                         contains = 'serial validation'
-                        keywords = @('workflow', 'serial')
+                        keywords = @('pipeline', 'serial')
                         defaultRoute = $false
                     },
                     @{
@@ -193,7 +193,7 @@ $definitions = @(
                 supervisorParallelEnabled = $true
                 maxSupervisorParallelism = 2
                 routes = @()
-                workflow = @()
+                pipeline = @()
                 subagents = @(
                     @{
                         bindingId = 'analysis-child'

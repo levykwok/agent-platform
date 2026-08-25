@@ -20,8 +20,8 @@ import io.agent.platform.control.WorkflowNode;
 import io.agent.platform.control.WorkflowNodeType;
 import io.agent.platform.control.WorkflowPort;
 import io.agent.platform.control.WorkflowFailurePolicy;
-import io.agent.platform.control.WorkflowStep;
-import io.agent.platform.control.WorkflowTransition;
+import io.agent.platform.control.PipelineStep;
+import io.agent.platform.control.PipelineTransition;
 import io.agent.platform.control.WorkflowValueValidationResult;
 import io.agent.platform.control.WorkflowValueValidator;
 import io.agent.platform.runtime.protocol.TaskContext;
@@ -396,12 +396,12 @@ public class AgentRuntimeService implements AgentRuntime {
 
     /** Executes the Agent-level ordered sequence. This is intentionally separate from the canvas graph. */
     private Mono<ChatResponse> runAgentPipeline(AgentDefinition definition, ChatRequest request) {
-        List<WorkflowStep> steps = definition.orchestration().workflow();
+        List<PipelineStep> steps = definition.orchestration().pipeline();
         if (steps.isEmpty()) {
             return Mono.error(new AgentRuntimeException("Pipeline agent has no steps: " + definition.agentId()));
         }
         Instant startedAt = Instant.now();
-        return runWorkflowSteps(definition, request, steps, 0, request.message(), new java.util.HashSet<>())
+        return runPipelineSteps(definition, request, steps, 0, request.message(), new java.util.HashSet<>())
                 .map(
                         execution ->
                                 response(
@@ -416,45 +416,45 @@ public class AgentRuntimeService implements AgentRuntime {
                                                 Map.of("orchestration", "PIPELINE", "steps", steps.size()))));
     }
 
-    private Mono<WorkflowStepExecution> runWorkflowSteps(
+    private Mono<PipelineStepExecution> runPipelineSteps(
             AgentDefinition definition,
             ChatRequest request,
-            List<WorkflowStep> steps,
+            List<PipelineStep> steps,
             int index,
             String input,
             java.util.Set<String> visited) {
         if (index >= steps.size()) {
-            return Mono.just(new WorkflowStepExecution(input, null));
+            return Mono.just(new PipelineStepExecution(input, null));
         }
-        WorkflowStep step = steps.get(index);
+        PipelineStep step = steps.get(index);
         if (!visited.add(step.stepId())) {
             return Mono.error(new AgentRuntimeException("Pipeline cycle detected at step: " + step.stepId()));
         }
-        return runWorkflowStep(step, request, input)
+        return runPipelineStep(step, request, input)
                 .flatMap(
                         execution -> {
-                    WorkflowStepOutput output = WorkflowStepOutput.parse(execution.text());
-                    return runWorkflowSteps(
-                            definition, request, steps, nextWorkflowIndex(steps, index, output.status()),
+                    PipelineStepOutput output = PipelineStepOutput.parse(execution.text());
+                    return runPipelineSteps(
+                            definition, request, steps, nextPipelineIndex(steps, index, output.status()),
                             output.content(), visited);
                 });
     }
 
-    private Mono<WorkflowStepExecution> runWorkflowStep(WorkflowStep step, ChatRequest request, String input) {
+    private Mono<PipelineStepExecution> runPipelineStep(PipelineStep step, ChatRequest request, String input) {
         AgentDefinition target = definition(step.agentId());
         ChatRequest child =
                 new ChatRequest(
                         request.tenantId(),
                         request.userId(),
                         sessionKey(request) + "_" + pathSafe(step.stepId(), "step"),
-                        workflowStepMessage(step, input),
+                        pipelineStepMessage(step, input),
                         request.taskContext().child(request.taskContext().targetAgentId(), target.agentId(), step.stepId()),
                         request.images());
-        Mono<WorkflowStepExecution> guarded =
+        Mono<PipelineStepExecution> guarded =
                 executeDefinition(target, child)
                         .map(
                                 response ->
-                                        new WorkflowStepExecution(
+                                        new PipelineStepExecution(
                                                 responseBusinessText(response), response.task()));
         if (step.timeoutMs() != null) guarded = guarded.timeout(Duration.ofMillis(step.timeoutMs()));
         if (step.maxRetries() > 0) {
@@ -463,12 +463,12 @@ public class AgentRuntimeService implements AgentRuntime {
         return guarded.onErrorResume(
                 error ->
                         switch (step.failurePolicy()) {
-                            case SKIP, USE_INPUT -> Mono.just(new WorkflowStepExecution(input, null));
+                            case SKIP, USE_INPUT -> Mono.just(new PipelineStepExecution(input, null));
                             case FAIL_FAST -> Mono.error(error);
                         });
     }
 
-    static Mono<String> withStepPolicy(WorkflowStep step, String input, Mono<String> action) {
+    static Mono<String> withStepPolicy(PipelineStep step, String input, Mono<String> action) {
         Mono<String> guarded = action;
         if (step.timeoutMs() != null) guarded = guarded.timeout(Duration.ofMillis(step.timeoutMs()));
         if (step.maxRetries() > 0) guarded = guarded.retryWhen(Retry.fixedDelay(step.maxRetries(), Duration.ofMillis(100)));
@@ -479,7 +479,7 @@ public class AgentRuntimeService implements AgentRuntime {
     }
 
     static Flux<AgentEventEnvelope> withFluxStepPolicy(
-            WorkflowStep step, String input, Flux<AgentEventEnvelope> action) {
+            PipelineStep step, String input, Flux<AgentEventEnvelope> action) {
         Flux<AgentEventEnvelope> guarded = action;
         if (step.timeoutMs() != null) guarded = guarded.timeout(Duration.ofMillis(step.timeoutMs()));
         if (step.maxRetries() > 0) guarded = guarded.retryWhen(Retry.fixedDelay(step.maxRetries(), Duration.ofMillis(100)));
@@ -497,7 +497,7 @@ public class AgentRuntimeService implements AgentRuntime {
     }
 
     private Flux<AgentEventEnvelope> streamPipeline(AgentDefinition definition, ChatRequest request) {
-        List<WorkflowStep> steps = definition.orchestration().workflow();
+        List<PipelineStep> steps = definition.orchestration().pipeline();
         if (steps.isEmpty()) {
             return Flux.error(new AgentRuntimeException("Pipeline agent has no steps: " + definition.agentId()));
         }
@@ -507,50 +507,50 @@ public class AgentRuntimeService implements AgentRuntime {
     }
 
     private Flux<AgentEventEnvelope> streamPipelineStep(
-            List<WorkflowStep> steps, int index, ChatRequest request, String input) {
+            List<PipelineStep> steps, int index, ChatRequest request, String input) {
         if (index >= steps.size()) return Flux.empty();
-        WorkflowStep step = steps.get(index);
+        PipelineStep step = steps.get(index);
         if (index == steps.size() - 1 && step.transitions().isEmpty()) {
             return streamPipelineFinalStep(step, request, input);
         }
         return Flux.concat(
                 Flux.just(agentPipelineEvent(step.agentId(), "pipeline_step_start", "Start pipeline step " + safe(step.stepId(), "step") + " -> " + step.agentId())),
                 pipelineAgentSummaryEvents(step.agentId(), "start"),
-                runWorkflowStep(step, request, input).flatMapMany(raw -> {
-                    WorkflowStepOutput output = WorkflowStepOutput.parse(raw.text());
+                runPipelineStep(step, request, input).flatMapMany(raw -> {
+                    PipelineStepOutput output = PipelineStepOutput.parse(raw.text());
                     return Flux.concat(
                             pipelineAgentSummaryEvents(step.agentId(), "end"),
                             Flux.just(agentPipelineEvent(step.agentId(), "pipeline_step_end", "Finished pipeline step " + safe(step.stepId(), "step") + " -> " + step.agentId())),
-                            streamPipelineStep(steps, nextWorkflowIndex(steps, index, output.status()), request, output.content()));
+                            streamPipelineStep(steps, nextPipelineIndex(steps, index, output.status()), request, output.content()));
                 }));
     }
 
-    static int nextWorkflowIndex(List<WorkflowStep> steps, int index, String status) {
-        WorkflowStep step = steps.get(index);
+    static int nextPipelineIndex(List<PipelineStep> steps, int index, String status) {
+        PipelineStep step = steps.get(index);
         String normalized = safe(status, "").toLowerCase();
-        for (WorkflowTransition transition : step.transitions()) {
+        for (PipelineTransition transition : step.transitions()) {
             if (!transition.defaultTransition() && !transition.when().isBlank() && normalized.equals(transition.when().trim().toLowerCase())) {
-                return findWorkflowStep(steps, transition.nextStepId(), index + 1);
+                return findPipelineStep(steps, transition.nextStepId(), index + 1);
             }
         }
-        for (WorkflowTransition transition : step.transitions()) {
-            if (transition.defaultTransition()) return findWorkflowStep(steps, transition.nextStepId(), index + 1);
+        for (PipelineTransition transition : step.transitions()) {
+            if (transition.defaultTransition()) return findPipelineStep(steps, transition.nextStepId(), index + 1);
         }
         return index + 1;
     }
 
-    private static int findWorkflowStep(List<WorkflowStep> steps, String stepId, int fallback) {
+    private static int findPipelineStep(List<PipelineStep> steps, String stepId, int fallback) {
         for (int i = 0; i < steps.size(); i++) if (steps.get(i).stepId().equals(stepId)) return i;
         return fallback;
     }
 
     private Flux<AgentEventEnvelope> streamPipelineFinalStep(
-            WorkflowStep step, ChatRequest request, String input) {
+            PipelineStep step, ChatRequest request, String input) {
         AgentDefinition target = definition(step.agentId());
         ChatRequest child =
                 new ChatRequest(
                         request.tenantId(), request.userId(), sessionKey(request) + "_" + pathSafe(step.stepId(), "step"),
-                        workflowStepMessage(step, input),
+                        pipelineStepMessage(step, input),
                         request.taskContext().child(request.taskContext().targetAgentId(), target.agentId(), step.stepId()),
                         request.images());
         return Flux.concat(
@@ -610,7 +610,7 @@ public class AgentRuntimeService implements AgentRuntime {
         }
         return runWorkflowNode(node, request, workflowValueText(input == null ? null : input.data()))
                 .flatMap(rawOutput -> {
-                    WorkflowStepOutput parsed = WorkflowStepOutput.parse(rawOutput);
+                    WorkflowNodeOutput parsed = WorkflowNodeOutput.parse(rawOutput);
                     List<WorkflowEdge> outgoing = edges.stream().filter(edge -> edge != null && edge.from() != null && nodeId.equals(edge.from().nodeId())).toList();
                     WorkflowEdge next = chooseTypedEdge(outgoing, parsed.content());
                     WorkflowPort outputPort = next == null ? firstOutputPort(node) : findPort(node.outputPorts(), next.from().portId());
@@ -773,7 +773,7 @@ public class AgentRuntimeService implements AgentRuntime {
         return runWorkflowNode(node, request, workflowValueText(input == null ? null : input.data()))
                 .flatMap(
                         rawOutput -> {
-                            WorkflowStepOutput parsed = WorkflowStepOutput.parse(rawOutput);
+                            WorkflowNodeOutput parsed = WorkflowNodeOutput.parse(rawOutput);
                             List<WorkflowEdge> outgoing = outgoingWorkflowEdges(edges, nodeId);
                             WorkflowEdge next = chooseTypedEdge(outgoing, parsed.content());
                             if (next == null) {
@@ -1028,7 +1028,7 @@ public class AgentRuntimeService implements AgentRuntime {
         return value.replace("{{input}}", safeInput).replace("${input}", safeInput);
     }
 
-    private String workflowStepMessage(WorkflowStep step, String input) {
+    private String pipelineStepMessage(PipelineStep step, String input) {
         String message =
                 step.instruction() == null || step.instruction().isBlank()
                         ? input
@@ -2936,7 +2936,7 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private record BranchResult(String joinNodeId, ContractValue value) {}
 
-    private record WorkflowStepExecution(String text, AgentTaskEnvelope task) {}
+    private record PipelineStepExecution(String text, AgentTaskEnvelope task) {}
 
     private AgentDefinition definition(String agentId) {
         AgentDefinition definition =

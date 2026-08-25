@@ -329,7 +329,7 @@ toolRefs: []
 5. 本地 filesystem 仅固定到 Agent workspace，不再使用 `${user.dir}`；文件和 Shell 能力默认关闭，Shell 仅允许在显式启用 Docker sandbox 时出现。
 6. Python 工具不再在宿主机直接执行。只有 Docker sandbox 开启时才运行，并使用 `--network none`、只读根文件系统、只读脚本挂载、`cap-drop=ALL`、`no-new-privileges`、PID/内存/CPU 限制。
 7. 平台显式设置默认执行预算：ReAct 最大 6 轮、最多 12 次工具调用、总超时 120 秒；子 Agent 默认最多 4 个、并发 2、单次超时 90 秒。配置值均有边界限制。
-8. 平台自身负责 `SINGLE`、`ROUTER`、`WORKFLOW`、`SUPERVISOR` 编排，Harness 不再自行创建子 Agent。子 Agent `toolRefs: []` 明确表示无工具，不再继承父工具；管理页支持逐子 Agent 多选允许工具。
+8. 平台自身负责 `SINGLE`、`PIPELINE`、`ROUTER`、`SUPERVISOR` 编排，Harness 不再自行创建子 Agent。子 Agent `toolRefs: []` 明确表示无工具，不再继承父工具；管理页支持逐子 Agent 多选允许工具。
 9. Supervisor 的 8 个 schedule 方法改为注册 `ScheduledTaskTools` 一次，再逐 schema 应用策略，修复把方法名误当 Tool Asset ID 导致 Main runtime-manifest 500 的问题。
 10. MCP schema 别名拒绝策略同时遵守全局和 Agent scope；一个 Agent 的停用策略不会误伤另一个 Agent。
 11. `capability_loaded` 事件增加最终运行时 Tool Manifest、轮次、工具调用、总超时、子 Agent 数量和并发预算，工具调用只记录状态和拒绝原因，不记录原始参数与输出。

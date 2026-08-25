@@ -4,6 +4,7 @@
 package io.agent.platform.adapter.agentscope;
 
 import io.agent.platform.control.AgentDefinition;
+import io.agent.platform.control.OrchestrationMode;
 import io.agent.platform.control.PlatformStorageLayer;
 import io.agent.platform.control.RuntimeToolGovernance;
 import io.agent.platform.runtime.RootTaskBudgetManager;

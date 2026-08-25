@@ -59,16 +59,16 @@ class WorkflowNodeTest {
     }
 
     @Test
-    void agentPolicyKeepsItsOwnOrderedWorkflowSteps() {
+    void agentPolicyKeepsItsOwnOrderedPipelineSteps() {
         OrchestrationPolicy policy =
                 new OrchestrationPolicy(
                         OrchestrationMode.PIPELINE,
                         List.of(),
                         List.of(),
-                        List.of(new WorkflowStep("write", "writer", "Write")));
+                        List.of(new PipelineStep("write", "writer", "Write")));
 
-        assertEquals(1, policy.workflow().size());
-        assertEquals("writer", policy.workflow().get(0).agentId());
+        assertEquals(1, policy.pipeline().size());
+        assertEquals("writer", policy.pipeline().get(0).agentId());
     }
 
     @Test

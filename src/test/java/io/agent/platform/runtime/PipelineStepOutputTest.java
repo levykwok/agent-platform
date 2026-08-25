@@ -7,12 +7,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import org.junit.jupiter.api.Test;
 
-class WorkflowStepOutputTest {
+class PipelineStepOutputTest {
 
     @Test
     void parsesStructuredStatusAndPassesContentForward() {
-        WorkflowStepOutput output =
-                WorkflowStepOutput.parse(
+        PipelineStepOutput output =
+                PipelineStepOutput.parse(
                         "{\"status\":\"needs_review\",\"content\":\"please review\"}");
 
         assertEquals("needs_review", output.status());
@@ -21,8 +21,8 @@ class WorkflowStepOutputTest {
 
     @Test
     void supportsJsonWrappedInMarkdownFenceOrExtraText() {
-        WorkflowStepOutput output =
-                WorkflowStepOutput.parse(
+        PipelineStepOutput output =
+                PipelineStepOutput.parse(
                         "Result:\n```json\n{\"status\": \"complete\", \"content\": \"done\"}\n```");
 
         assertEquals("complete", output.status());
@@ -31,8 +31,8 @@ class WorkflowStepOutputTest {
 
     @Test
     void keepsLegacyMarkerAsCompatibilityFallback() {
-        WorkflowStepOutput output =
-                WorkflowStepOutput.parse("answer [workflow_status: needs_review]");
+        PipelineStepOutput output =
+                PipelineStepOutput.parse("answer [workflow_status: needs_review]");
 
         assertEquals("needs_review", output.status());
         assertEquals("answer [workflow_status: needs_review]", output.content());
@@ -40,7 +40,7 @@ class WorkflowStepOutputTest {
 
     @Test
     void plainTextHasNoBranchStatus() {
-        WorkflowStepOutput output = WorkflowStepOutput.parse("ordinary answer");
+        PipelineStepOutput output = PipelineStepOutput.parse("ordinary answer");
 
         assertEquals("", output.status());
         assertEquals("ordinary answer", output.content());

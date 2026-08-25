@@ -3,13 +3,14 @@
  */
 package io.agent.platform.control;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import java.util.List;
 
 public record OrchestrationPolicy(
         OrchestrationMode mode,
         List<SubagentBinding> subagents,
         List<RouteRule> routes,
-        List<WorkflowStep> workflow,
+        @JsonAlias("workflow") List<PipelineStep> pipeline,
         int maxSupervisorSteps,
         boolean supervisorParallelEnabled,
         int maxSupervisorParallelism) {
@@ -28,17 +29,17 @@ public record OrchestrationPolicy(
             OrchestrationMode mode,
             List<SubagentBinding> subagents,
             List<RouteRule> routes,
-            List<WorkflowStep> workflow) {
-        this(mode, subagents, routes, workflow, DEFAULT_MAX_SUPERVISOR_STEPS, false, 2);
+            List<PipelineStep> pipeline) {
+        this(mode, subagents, routes, pipeline, DEFAULT_MAX_SUPERVISOR_STEPS, false, 2);
     }
 
     public OrchestrationPolicy(
             OrchestrationMode mode,
             List<SubagentBinding> subagents,
             List<RouteRule> routes,
-            List<WorkflowStep> workflow,
+            List<PipelineStep> pipeline,
             int maxSupervisorSteps) {
-        this(mode, subagents, routes, workflow, maxSupervisorSteps, false, 2);
+        this(mode, subagents, routes, pipeline, maxSupervisorSteps, false, 2);
     }
 
     public static OrchestrationPolicy single() {
@@ -56,7 +57,7 @@ public record OrchestrationPolicy(
         mode = mode == null ? OrchestrationMode.SINGLE : mode;
         subagents = subagents == null ? List.of() : List.copyOf(subagents);
         routes = routes == null ? List.of() : List.copyOf(routes);
-        workflow = workflow == null ? List.of() : List.copyOf(workflow);
+        pipeline = pipeline == null ? List.of() : List.copyOf(pipeline);
         maxSupervisorSteps =
                 maxSupervisorSteps <= 0
                         ? DEFAULT_MAX_SUPERVISOR_STEPS

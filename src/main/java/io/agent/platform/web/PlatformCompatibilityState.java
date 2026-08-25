@@ -21,8 +21,8 @@ import io.agent.platform.control.SkillSpec;
 import io.agent.platform.control.SubagentBinding;
 import io.agent.platform.control.ToolRegistry;
 import io.agent.platform.control.ToolSpec;
-import io.agent.platform.control.WorkflowStep;
-import io.agent.platform.control.WorkflowTransition;
+import io.agent.platform.control.PipelineStep;
+import io.agent.platform.control.PipelineTransition;
 import io.agent.platform.control.YamlAgentDefinitionRegistry;
 import io.agent.platform.runtime.AgentEventEnvelope;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -497,7 +497,10 @@ public class PlatformCompatibilityState {
                 mode(string(map, "mode", fallback.mode().name())),
                 subagents(map.get("subagents")),
                 routes(map.get("routes")),
-                workflowSteps(map.get("workflow")),
+                pipelineSteps(
+                        map.get("pipeline") == null
+                                ? map.get("workflow")
+                                : map.get("pipeline")),
                 integerAny(
                         map,
                         fallback.maxSupervisorSteps(),
@@ -570,58 +573,58 @@ public class PlatformCompatibilityState {
                         || Boolean.TRUE.equals(map.get("default_route")));
     }
 
-    private List<WorkflowStep> workflowSteps(Object value) {
+    private List<PipelineStep> pipelineSteps(Object value) {
         if (!(value instanceof List<?> list)) {
             return List.of();
         }
         return list.stream()
                 .filter(Map.class::isInstance)
                 .map(Map.class::cast)
-                .map(this::workflowStep)
+                .map(this::pipelineStep)
                 .toList();
     }
 
-    private WorkflowStep workflowStep(Map<?, ?> raw) {
+    private PipelineStep pipelineStep(Map<?, ?> raw) {
         Map<String, Object> map = normalize(raw);
-        return new WorkflowStep(
+        return new PipelineStep(
                 stringAny(map, "stepId", "step_id", "id"),
                 stringAny(map, "agentId", "agent_id", "targetAgentId"),
                 string(map, "instruction", ""),
                 numberLong(map.get("timeoutMs"), map.get("timeout_ms")),
                 numberInt(map.get("maxRetries"), map.get("max_retries")),
-                workflowFailurePolicy(map),
-                workflowTransitions(map.get("transitions")));
+                pipelineFailurePolicy(map),
+                pipelineTransitions(map.get("transitions")));
     }
 
-    private List<WorkflowTransition> workflowTransitions(Object value) {
+    private List<PipelineTransition> pipelineTransitions(Object value) {
         if (!(value instanceof List<?> list)) {
             return List.of();
         }
         return list.stream()
                 .filter(Map.class::isInstance)
                 .map(Map.class::cast)
-                .map(this::workflowTransition)
+                .map(this::pipelineTransition)
                 .toList();
     }
 
-    private WorkflowTransition workflowTransition(Map<?, ?> raw) {
+    private PipelineTransition pipelineTransition(Map<?, ?> raw) {
         Map<String, Object> map = normalize(raw);
-        return new WorkflowTransition(
+        return new PipelineTransition(
                 string(map, "when", ""),
                 stringAny(map, "nextStepId", "next_step_id", "next"),
                 Boolean.TRUE.equals(map.get("defaultTransition"))
                         || Boolean.TRUE.equals(map.get("default_transition")));
     }
 
-    private WorkflowStep.FailurePolicy workflowFailurePolicy(Map<String, Object> map) {
+    private PipelineStep.FailurePolicy pipelineFailurePolicy(Map<String, Object> map) {
         String value = stringAny(map, "failurePolicy", "failure_policy");
         if (value.isBlank()) {
             return null;
         }
         try {
-            return WorkflowStep.FailurePolicy.valueOf(value.toUpperCase());
+            return PipelineStep.FailurePolicy.valueOf(value.toUpperCase());
         } catch (IllegalArgumentException ignored) {
-            return WorkflowStep.FailurePolicy.FAIL_FAST;
+            return PipelineStep.FailurePolicy.FAIL_FAST;
         }
     }
 
@@ -2955,6 +2958,19 @@ public class PlatformCompatibilityState {
                         .map(PlatformCompatibilityState::runDurationMs)
                         .filter(value -> value >= 0)
                         .toList();
+        Map<String, Long> runCountByMode =
+                selectedRuns.stream()
+                        .collect(
+                                java.util.stream.Collectors.groupingBy(
+                                        PlatformCompatibilityState::runOrchestrationMode,
+                                        LinkedHashMap::new,
+                                        java.util.stream.Collectors.counting()));
+        List<Long> pipelineDurations =
+                selectedRuns.stream()
+                        .filter(run -> "PIPELINE".equals(runOrchestrationMode(run)))
+                        .map(PlatformCompatibilityState::runDurationMs)
+                        .filter(value -> value >= 0)
+                        .toList();
         Map<String, Object> metrics = new LinkedHashMap<>();
         metrics.put("run_count", selectedRuns.size());
         metrics.put("router_decisions", routerDecisions);
@@ -2974,12 +2990,27 @@ public class PlatformCompatibilityState {
                 supervisorPlans == 0 ? null : (double) supervisorChildCalls / supervisorPlans);
         metrics.put("decision_p95_ms", percentile95(decisionDurations));
         metrics.put("run_p95_ms", percentile95(runDurations));
+        metrics.put("run_count_by_mode", Map.copyOf(runCountByMode));
+        metrics.put("pipeline_runs", runCountByMode.getOrDefault("PIPELINE", 0L));
+        metrics.put("pipeline_p95_ms", percentile95(pipelineDurations));
         metrics.put("input_tokens", inputTokens);
         metrics.put("output_tokens", outputTokens);
         metrics.put("total_tokens", inputTokens + outputTokens);
         metrics.put("estimated_cost", estimatedCost);
         metrics.put("currency", currency);
         return metrics;
+    }
+
+    private static String runOrchestrationMode(Map<String, Object> run) {
+        Object value = run.get("orchestration_snapshot");
+        String mode = "SINGLE";
+        if (value instanceof OrchestrationPolicy policy) {
+            mode = policy.mode().name();
+        } else if (value instanceof Map<?, ?> map && map.get("mode") != null) {
+            mode = String.valueOf(map.get("mode"));
+        }
+        String normalized = mode == null ? "SINGLE" : mode.trim().toUpperCase();
+        return "WORKFLOW".equals(normalized) ? "PIPELINE" : normalized;
     }
 
     private static long runDurationMs(Map<String, Object> run) {

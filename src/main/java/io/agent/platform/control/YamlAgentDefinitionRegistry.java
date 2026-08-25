@@ -34,6 +34,7 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
 
     @PostConstruct
     public void load() throws IOException {
+        configStore.migrateLegacyAgentPipelineSchema();
         AgentsConfig config =
                 configStore.read(PlatformConfigStore.ConfigFile.AGENTS, AgentsConfig.class);
         Map<String, AgentDefinition> loaded = new LinkedHashMap<>();
@@ -160,11 +161,11 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                                 r.keywords().stream().map(this::resolve).toList(),
                                         r.defaultRoute()))
                         .toList();
-        List<WorkflowStep> workflow =
-                policy.workflow().stream()
+        List<PipelineStep> pipeline =
+                policy.pipeline().stream()
                         .map(
                                 step ->
-                                        new WorkflowStep(
+                                        new PipelineStep(
                                                 resolve(step.stepId()),
                                                 resolve(step.agentId()),
                                                 resolve(step.instruction()),
@@ -174,7 +175,7 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                                 step.transitions().stream()
                                                         .map(
                                                                 transition ->
-                                                                        new WorkflowTransition(
+                                                                        new PipelineTransition(
                                                                                 resolve(transition.when()),
                                                                                 resolve(transition.nextStepId()),
                                                                                 transition.defaultTransition()))
@@ -184,7 +185,7 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                 policy.mode(),
                 subagents,
                 routes,
-                workflow,
+                pipeline,
                 policy.maxSupervisorSteps(),
                 policy.supervisorParallelEnabled(),
                 policy.maxSupervisorParallelism());
@@ -278,13 +279,13 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
 
     private void validatePipeline(
             AgentDefinition definition, Map<String, AgentDefinition> loaded) {
-        List<WorkflowStep> steps = definition.orchestration().workflow();
+        List<PipelineStep> steps = definition.orchestration().pipeline();
         if (steps.isEmpty()) {
             throw new IllegalStateException(
                     "PIPELINE agent requires at least one step: " + definition.agentId());
         }
         Set<String> stepIds = new java.util.LinkedHashSet<>();
-        for (WorkflowStep step : steps) {
+        for (PipelineStep step : steps) {
             if (step.stepId() == null || step.stepId().isBlank() || !stepIds.add(step.stepId())) {
                 throw new IllegalStateException(
                         "Pipeline step id must be unique and non-blank for " + definition.agentId());
@@ -301,14 +302,14 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
             }
         }
         for (int index = 0; index < steps.size(); index++) {
-            WorkflowStep step = steps.get(index);
-            for (WorkflowTransition transition : step.transitions()) {
+            PipelineStep step = steps.get(index);
+            for (PipelineTransition transition : step.transitions()) {
                 if (!stepIds.contains(transition.nextStepId())) {
                     throw new IllegalStateException(
                             "Pipeline transition target not found: " + transition.nextStepId());
                 }
                 if (steps.indexOf(step) >= steps.stream()
-                        .map(WorkflowStep::stepId)
+                        .map(PipelineStep::stepId)
                         .toList()
                         .indexOf(transition.nextStepId())) {
                     throw new IllegalStateException(

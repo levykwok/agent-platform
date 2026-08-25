@@ -3,13 +3,14 @@
  */
 package io.agent.platform.control;
 
-public record WorkflowTransition(String when, String nextStepId, boolean defaultTransition) {
+/** A forward-only branch between Pipeline steps. */
+public record PipelineTransition(String when, String nextStepId, boolean defaultTransition) {
 
-    public WorkflowTransition(String when, String nextStepId) {
+    public PipelineTransition(String when, String nextStepId) {
         this(when, nextStepId, false);
     }
 
-    public WorkflowTransition {
+    public PipelineTransition {
         when = when == null ? "" : when;
         nextStepId = nextStepId == null ? "" : nextStepId;
     }

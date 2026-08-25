@@ -18,7 +18,7 @@ class OrchestrationPolicyTest {
     void missingSupervisorStepBudgetUsesBackwardCompatibleDefault() throws Exception {
         OrchestrationPolicy policy =
                 objectMapper.readValue(
-                        "{\"mode\":\"SUPERVISOR\",\"subagents\":[],\"routes\":[],\"workflow\":[]}",
+                        "{\"mode\":\"SUPERVISOR\",\"subagents\":[],\"routes\":[],\"pipeline\":[]}",
                         OrchestrationPolicy.class);
 
         assertEquals(OrchestrationPolicy.DEFAULT_MAX_SUPERVISOR_STEPS, policy.maxSupervisorSteps());
@@ -72,6 +72,9 @@ class OrchestrationPolicyTest {
                         OrchestrationPolicy.class);
 
         assertEquals(OrchestrationMode.PIPELINE, policy.mode());
-        assertTrue(objectMapper.writeValueAsString(policy).contains("\"mode\":\"PIPELINE\""));
+        String serialized = objectMapper.writeValueAsString(policy);
+        assertTrue(serialized.contains("\"mode\":\"PIPELINE\""));
+        assertTrue(serialized.contains("\"pipeline\":[]"));
+        assertFalse(serialized.contains("\"workflow\""));
     }
 }

@@ -74,7 +74,7 @@ const form = reactive({
   router_rules: [] as JsonMap[],
   orchestration_mode: 'SINGLE',
   orchestration_routes: [] as JsonMap[],
-  workflow_steps: [] as JsonMap[],
+  pipeline_steps: [] as JsonMap[],
   subagents: [] as JsonMap[],
   max_supervisor_steps: 5,
   supervisor_parallel_enabled: false,
@@ -179,7 +179,7 @@ const modelPolicyList = computed(() => Object.entries(form.model_policy)
 const orchestrationSummary = computed(() => {
   const mode = normalizeOrchestrationMode(form.orchestration_mode)
   if (mode === 'ROUTER') return `${form.orchestration_routes.length} 条路由`
-  if (mode === 'PIPELINE') return `${form.workflow_steps.length} 个步骤`
+  if (mode === 'PIPELINE') return `${form.pipeline_steps.length} 个步骤`
   if (mode === 'SUPERVISOR') return `${form.subagents.length} 个子代理 · 最多 ${form.max_supervisor_steps} 步`
   return '单代理'
 })
@@ -274,7 +274,7 @@ async function selectAgent(id: string) {
         keywords: Array.isArray(r.keywords) ? (r.keywords as string[]).join(', ') : (r.keywords || ''),
         defaultRoute: r.defaultRoute ?? r.default_route ?? false,
       })),
-      workflow_steps: ((orchestration.workflow as JsonMap[]) || []).map((s) => ({
+      pipeline_steps: (((orchestration.pipeline || orchestration.workflow) as JsonMap[]) || []).map((s) => ({
         stepId: s.stepId || s.step_id || '',
         agentId: s.agentId || s.agent_id || '',
         instruction: s.instruction || '',
@@ -320,7 +320,7 @@ function newAgent() {
     agent_id: '', display_name: '', description: '', domain: domainFilter.value || 'platform', enabled: true,
     role: '', planner_rules: '', require_structured_plan: true,
     included_skills: [], included_mcps: [], included_tools: [], restrict_tools: false, router_rules: [],
-    orchestration_mode: 'SINGLE', orchestration_routes: [], workflow_steps: [], subagents: [], max_supervisor_steps: 5,
+    orchestration_mode: 'SINGLE', orchestration_routes: [], pipeline_steps: [], subagents: [], max_supervisor_steps: 5,
     supervisor_parallel_enabled: false, max_supervisor_parallelism: 2,
     root_timeout_ms: 180000, root_max_agent_calls: 20, root_max_tokens: 100000, root_max_depth: 6,
     output_schema_text: '',
@@ -374,13 +374,13 @@ function addRouterRule() { form.router_rules.push({ intent: '', keywords: '' }) 
 function removeRouterRule(i: number) { form.router_rules.splice(i, 1) }
 function addOrchestrationRoute() { form.orchestration_routes.push({ ruleId: `route_${form.orchestration_routes.length + 1}`, targetAgentId: '', contains: '', keywords: '', defaultRoute: false }) }
 function removeOrchestrationRoute(i: number) { form.orchestration_routes.splice(i, 1) }
-function addWorkflowStep() { form.workflow_steps.push({ stepId: `step_${form.workflow_steps.length + 1}`, agentId: '', instruction: '', transitions: [] }) }
-function removeWorkflowStep(i: number) { form.workflow_steps.splice(i, 1) }
-function addWorkflowTransition(step: JsonMap) {
+function addPipelineStep() { form.pipeline_steps.push({ stepId: `step_${form.pipeline_steps.length + 1}`, agentId: '', instruction: '', transitions: [] }) }
+function removePipelineStep(i: number) { form.pipeline_steps.splice(i, 1) }
+function addPipelineTransition(step: JsonMap) {
   if (!Array.isArray(step.transitions)) step.transitions = []
   ;(step.transitions as JsonMap[]).push({ when: '', nextStepId: '', defaultTransition: false })
 }
-function removeWorkflowTransition(step: JsonMap, index: number) {
+function removePipelineTransition(step: JsonMap, index: number) {
   ;((step.transitions || []) as JsonMap[]).splice(index, 1)
 }
 function addSubagent() { form.subagents.push({ bindingId: `subagent_${form.subagents.length + 1}`, targetAgentId: '', role: '', description: '', exposeToUser: true, toolRefs: [], outputSchemaText: '' }) }
@@ -546,7 +546,7 @@ async function saveAgent() {
     orchestration.routes = routes
   }
   if (mode === 'PIPELINE') {
-    const workflow = form.workflow_steps
+    const pipeline = form.pipeline_steps
       .map((s) => ({
         stepId: String(s.stepId || '').trim(),
         agentId: String(s.agentId || '').trim(),
@@ -560,8 +560,8 @@ async function saveAgent() {
           .filter((t) => t.nextStepId && (t.when || t.defaultTransition)),
       }))
       .filter((s) => s.stepId && s.agentId)
-    if (!workflow.length) { notifyError('PIPELINE 至少需要一个有效步骤'); step.value = 1; return }
-    orchestration.workflow = workflow
+    if (!pipeline.length) { notifyError('PIPELINE 至少需要一个有效步骤'); step.value = 1; return }
+    orchestration.pipeline = pipeline
   }
   if (mode === 'SUPERVISOR') {
     const subagents: JsonMap[] = []
@@ -714,8 +714,8 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
 
       <div class="ov-section">
         <div class="ov-label">代理编排</div>
-        <div v-if="form.orchestration_mode === 'PIPELINE' && form.workflow_steps.length" class="orch-flow">
-          <div v-for="(s, i) in form.workflow_steps" :key="`${s.stepId}-${i}`" class="orch-step">
+        <div v-if="form.orchestration_mode === 'PIPELINE' && form.pipeline_steps.length" class="orch-flow">
+          <div v-for="(s, i) in form.pipeline_steps" :key="`${s.stepId}-${i}`" class="orch-step">
             <div class="orch-index">{{ i + 1 }}</div>
             <div class="orch-main"><div class="orch-title">{{ s.stepId || `step_${i + 1}` }} <span>→ {{ s.agentId ? agentDisplayLabel(String(s.agentId)) : '未选择代理' }}</span></div><div class="orch-desc">{{ s.instruction || '无额外指令' }}</div></div>
           </div>
@@ -882,18 +882,18 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         </div>
 
         <div v-else-if="form.orchestration_mode === 'PIPELINE'">
-          <div class="actions"><button class="btn btn-ghost btn-sm" @click="addWorkflowStep">添加步骤</button></div>
+          <div class="actions"><button class="btn btn-ghost btn-sm" @click="addPipelineStep">添加步骤</button></div>
           <table>
             <thead><tr><th>步骤 ID</th><th>执行代理</th><th>指令</th><th>条件分支</th><th></th></tr></thead>
             <tbody>
-              <tr v-for="(s, i) in form.workflow_steps" :key="`step${i}`">
+              <tr v-for="(s, i) in form.pipeline_steps" :key="`step${i}`">
                 <td><input v-model="s.stepId" placeholder="research" /></td>
                 <td><select v-model="s.agentId"><option value="">选择代理</option><option v-for="a in agents" :key="String(a.agent_id)" :value="a.agent_id">{{ agentOptionLabel(a) }}</option></select></td>
                 <td><input v-model="s.instruction" placeholder="传给该代理的步骤指令" /></td>
-                <td class="workflow-branch-cell"><button class="btn btn-ghost btn-sm" @click="addWorkflowTransition(s)">添加分支</button><div v-for="(t, ti) in (s.transitions || [])" :key="`${i}-${ti}`" class="workflow-branch-row"><input v-model="t.when" placeholder="状态" :disabled="t.defaultTransition === true" /><span>→</span><select v-model="t.nextStepId"><option value="">选择后续步骤</option><option v-for="target in form.workflow_steps.slice(i + 1)" :key="String(target.stepId)" :value="String(target.stepId)">{{ target.stepId || '未命名步骤' }}</option></select><label class="workflow-default"><input type="checkbox" v-model="t.defaultTransition" /> 默认</label><button class="btn small danger" @click="removeWorkflowTransition(s, ti)">删除</button></div><div v-if="!(s.transitions || []).length" class="branch-empty">无分支，按顺序执行</div></td>
-                <td><button class="btn small danger" @click="removeWorkflowStep(i)">删除</button></td>
+                <td class="pipeline-branch-cell"><button class="btn btn-ghost btn-sm" @click="addPipelineTransition(s)">添加分支</button><div v-for="(t, ti) in (s.transitions || [])" :key="`${i}-${ti}`" class="pipeline-branch-row"><input v-model="t.when" placeholder="状态" :disabled="t.defaultTransition === true" /><span>→</span><select v-model="t.nextStepId"><option value="">选择后续步骤</option><option v-for="target in form.pipeline_steps.slice(i + 1)" :key="String(target.stepId)" :value="String(target.stepId)">{{ target.stepId || '未命名步骤' }}</option></select><label class="pipeline-default"><input type="checkbox" v-model="t.defaultTransition" /> 默认</label><button class="btn small danger" @click="removePipelineTransition(s, ti)">删除</button></div><div v-if="!(s.transitions || []).length" class="branch-empty">无分支，按顺序执行</div></td>
+                <td><button class="btn small danger" @click="removePipelineStep(i)">删除</button></td>
               </tr>
-              <tr v-if="!form.workflow_steps.length"><td colspan="5" class="empty">暂无步骤，保存 PIPELINE 前至少添加一个。</td></tr>
+              <tr v-if="!form.pipeline_steps.length"><td colspan="5" class="empty">暂无步骤，保存 PIPELINE 前至少添加一个。</td></tr>
             </tbody>
           </table>
         </div>
@@ -1082,10 +1082,10 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
 .output-schema-field textarea { width: 100%; }
 td textarea { min-width: 230px; width: 100%; resize: vertical; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; }
 .tool-pick { padding: 4px 2px; }
-.workflow-branch-cell { min-width: 360px; vertical-align: top; }
-.workflow-branch-row { display: grid; grid-template-columns: minmax(100px, 1fr) 18px minmax(120px, 1fr) auto auto; gap: 6px; align-items: center; margin-top: 6px; }
-.workflow-branch-row input, .workflow-branch-row select { min-width: 0; }
-.workflow-default { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 11px; color: var(--muted); }
+.pipeline-branch-cell { min-width: 360px; vertical-align: top; }
+.pipeline-branch-row { display: grid; grid-template-columns: minmax(100px, 1fr) 18px minmax(120px, 1fr) auto auto; gap: 6px; align-items: center; margin-top: 6px; }
+.pipeline-branch-row input, .pipeline-branch-row select { min-width: 0; }
+.pipeline-default { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 11px; color: var(--muted); }
 .branch-empty { color: var(--muted); font-size: 11px; margin-top: 7px; }
 .tool-pick .tool-card { cursor: pointer; }
 .tool-pick .tool-card.pick { transition: border-color .15s, box-shadow .15s, transform .15s; }

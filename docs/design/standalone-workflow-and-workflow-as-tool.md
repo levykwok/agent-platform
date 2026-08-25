@@ -24,7 +24,7 @@ WorkflowAsset
               └─ Agent.toolRefs[]
 
 Agent
-  ├─ orchestration.mode=PIPELINE → Agent WorkflowStep[]
+  ├─ orchestration.mode=PIPELINE → Agent PipelineStep[]
   └─ toolRefs[] → WorkflowToolRegistration
 
 Workflow
@@ -190,7 +190,7 @@ Agent 的工具区域显示已注册的 Workflow Tool，保存时只写入：
 
 ## 8. 模型隔离要求
 
-- Agent 直接编排只使用 `WorkflowStep` / `WorkflowTransition`；
+- Agent 直接编排只使用 `PipelineStep` / `PipelineTransition`；
 - 独立 Workflow 只使用 `WorkflowNode` / `WorkflowPort` / `WorkflowEdge`；
 - 独立 Workflow 的 `WorkflowNode` 不包含 `transitions`；
 - 两套模型不做转换桥接，也不按数组顺序推断画布连线；

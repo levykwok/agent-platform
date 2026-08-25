@@ -11,25 +11,25 @@ import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
-class WorkflowStepTest {
+class PipelineStepTest {
 
     private final ObjectMapper yaml = new ObjectMapper(new YAMLFactory());
 
     @Test
     void legacyConstructorKeepsOriginalDefaults() {
-        WorkflowStep step = new WorkflowStep("research", "researcher", "Analyze the request");
+        PipelineStep step = new PipelineStep("research", "researcher", "Analyze the request");
 
         assertEquals("research", step.stepId());
         assertEquals("researcher", step.agentId());
         assertEquals("Analyze the request", step.instruction());
         assertNull(step.timeoutMs());
         assertEquals(0, step.maxRetries());
-        assertEquals(WorkflowStep.FailurePolicy.FAIL_FAST, step.failurePolicy());
+        assertEquals(PipelineStep.FailurePolicy.FAIL_FAST, step.failurePolicy());
     }
 
     @Test
     void yamlFieldsDeserializeIntoExecutionPolicy() throws Exception {
-        WorkflowStep step =
+        PipelineStep step =
                 yaml.readValue(
                         "stepId: research\n"
                                 + "agentId: researcher\n"
@@ -37,16 +37,16 @@ class WorkflowStepTest {
                                 + "timeoutMs: 120000\n"
                                 + "maxRetries: 2\n"
                                 + "failurePolicy: USE_INPUT\n",
-                        WorkflowStep.class);
+                        PipelineStep.class);
 
         assertEquals(120000L, step.timeoutMs());
         assertEquals(2, step.maxRetries());
-        assertEquals(WorkflowStep.FailurePolicy.USE_INPUT, step.failurePolicy());
+        assertEquals(PipelineStep.FailurePolicy.USE_INPUT, step.failurePolicy());
     }
 
     @Test
     void yamlTransitionsDeserializeIntoStep() throws Exception {
-        WorkflowStep step =
+        PipelineStep step =
                 yaml.readValue(
                         "stepId: research\n"
                                 + "agentId: researcher\n"
@@ -55,7 +55,7 @@ class WorkflowStepTest {
                                 + "    nextStepId: reviewer\n"
                                 + "  - nextStepId: writer\n"
                                 + "    defaultTransition: true\n",
-                        WorkflowStep.class);
+                        PipelineStep.class);
 
         assertEquals(2, step.transitions().size());
         assertEquals("needs_review", step.transitions().get(0).when());
@@ -65,26 +65,26 @@ class WorkflowStepTest {
 
     @Test
     void absentPolicyFieldsUseSafeDefaults() throws Exception {
-        WorkflowStep step =
+        PipelineStep step =
                 yaml.readValue(
                         "stepId: write\nagentId: writer\ninstruction: Write an answer\n",
-                        WorkflowStep.class);
+                        PipelineStep.class);
 
         assertNull(step.timeoutMs());
         assertEquals(0, step.maxRetries());
-        assertEquals(WorkflowStep.FailurePolicy.FAIL_FAST, step.failurePolicy());
+        assertEquals(PipelineStep.FailurePolicy.FAIL_FAST, step.failurePolicy());
     }
 
     @Test
     void allFailurePoliciesAreExplicitlySupported() {
         assertEquals(
                 Map.of(
-                        "FAIL_FAST", WorkflowStep.FailurePolicy.FAIL_FAST,
-                        "SKIP", WorkflowStep.FailurePolicy.SKIP,
-                        "USE_INPUT", WorkflowStep.FailurePolicy.USE_INPUT),
+                        "FAIL_FAST", PipelineStep.FailurePolicy.FAIL_FAST,
+                        "SKIP", PipelineStep.FailurePolicy.SKIP,
+                        "USE_INPUT", PipelineStep.FailurePolicy.USE_INPUT),
                 Map.of(
-                        "FAIL_FAST", WorkflowStep.FailurePolicy.valueOf("FAIL_FAST"),
-                        "SKIP", WorkflowStep.FailurePolicy.valueOf("SKIP"),
-                        "USE_INPUT", WorkflowStep.FailurePolicy.valueOf("USE_INPUT")));
+                        "FAIL_FAST", PipelineStep.FailurePolicy.valueOf("FAIL_FAST"),
+                        "SKIP", PipelineStep.FailurePolicy.valueOf("SKIP"),
+                        "USE_INPUT", PipelineStep.FailurePolicy.valueOf("USE_INPUT")));
     }
 }

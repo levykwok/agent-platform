@@ -9,26 +9,28 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-record WorkflowStepOutput(String status, String content) {
+record PipelineStepOutput(String status, String content) {
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final Pattern LEGACY_MARKER =
-            Pattern.compile("\\[workflow_status\\s*:\\s*([^\\]]+)]", Pattern.CASE_INSENSITIVE);
+    private static final Pattern STATUS_MARKER =
+            Pattern.compile(
+                    "\\[(?:pipeline|workflow)_status\\s*:\\s*([^\\]]+)]",
+                    Pattern.CASE_INSENSITIVE);
 
-    static WorkflowStepOutput parse(String raw) {
+    static PipelineStepOutput parse(String raw) {
         String text = raw == null ? "" : raw.trim();
-        WorkflowStepOutput structured = parseJson(text);
+        PipelineStepOutput structured = parseJson(text);
         if (structured != null) {
             return structured;
         }
-        Matcher marker = LEGACY_MARKER.matcher(text);
+        Matcher marker = STATUS_MARKER.matcher(text);
         if (marker.find()) {
-            return new WorkflowStepOutput(normalize(marker.group(1)), text);
+            return new PipelineStepOutput(normalize(marker.group(1)), text);
         }
-        return new WorkflowStepOutput("", text);
+        return new PipelineStepOutput("", text);
     }
 
-    private static WorkflowStepOutput parseJson(String text) {
+    private static PipelineStepOutput parseJson(String text) {
         int start = text.indexOf('{');
         int end = text.lastIndexOf('}');
         if (start < 0 || end <= start) {
@@ -41,7 +43,7 @@ record WorkflowStepOutput(String status, String content) {
                 return null;
             }
             String content = root.path("content").asText("");
-            return new WorkflowStepOutput(normalize(status), content.isBlank() ? text : content);
+            return new PipelineStepOutput(normalize(status), content.isBlank() ? text : content);
         } catch (Exception ignored) {
             return null;
         }

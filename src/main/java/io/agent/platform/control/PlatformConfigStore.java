@@ -3,7 +3,9 @@
  */
 package io.agent.platform.control;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import java.io.IOException;
 import java.io.InputStream;
@@ -52,6 +54,44 @@ public class PlatformConfigStore {
     public <T> T read(ConfigFile file, Class<T> type) throws IOException {
         String content = readContent(file);
         return mapper.readValue(content, type);
+    }
+
+    /**
+     * Canonicalizes the former Agent WORKFLOW schema in-place while preserving unknown fields.
+     * This migration is idempotent and applies only to the Agent configuration document.
+     */
+    public synchronized boolean migrateLegacyAgentPipelineSchema() throws IOException {
+        JsonNode root = mapper.readTree(readContent(ConfigFile.AGENTS));
+        if (!migrateLegacyAgentPipelineTree(root)) {
+            return false;
+        }
+        write(ConfigFile.AGENTS, root);
+        return true;
+    }
+
+    static boolean migrateLegacyAgentPipelineTree(JsonNode root) {
+        if (root == null || !root.path("agents").isArray()) {
+            return false;
+        }
+        boolean changed = false;
+        for (JsonNode agent : root.path("agents")) {
+            JsonNode rawOrchestration = agent.path("orchestration");
+            if (!(rawOrchestration instanceof ObjectNode orchestration)) {
+                continue;
+            }
+            if ("WORKFLOW".equalsIgnoreCase(orchestration.path("mode").asText(""))) {
+                orchestration.put("mode", "PIPELINE");
+                changed = true;
+            }
+            if (orchestration.has("workflow")) {
+                if (!orchestration.has("pipeline")) {
+                    orchestration.set("pipeline", orchestration.get("workflow"));
+                }
+                orchestration.remove("workflow");
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     public void write(ConfigFile file, Object value) {

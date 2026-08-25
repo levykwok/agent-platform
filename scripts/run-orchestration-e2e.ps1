@@ -234,6 +234,13 @@ try {
     if ($agentPipelineEvent.Count -eq 0) {
         throw 'Agent PIPELINE events were not marked as the Agent-owned pipeline.'
     }
+    $pipelineSnapshot = $pipelineResult.persisted_run.config_snapshot.orchestration
+    $pipelineProperties = @($pipelineSnapshot.PSObject.Properties.Name)
+    if ([string]$pipelineSnapshot.mode -ne 'PIPELINE' `
+        -or $pipelineProperties -notcontains 'pipeline' `
+        -or $pipelineProperties -contains 'workflow') {
+        throw 'Agent PIPELINE run snapshot did not use the canonical orchestration.pipeline schema.'
+    }
     $supervisorResult = @($results | Where-Object { $_.label -eq 'supervisor' } | Select-Object -First 1)
     $supervisorSteps = @($supervisorResult.persisted_events | Where-Object { $_.event_type -eq 'supervisor_step_start' })
     $supervisorRevisions = @($supervisorResult.persisted_events | Where-Object { $_.event_type -eq 'supervisor_revise' })
@@ -249,7 +256,10 @@ try {
         throw 'Supervisor child events did not persist the unified business-result contract.'
     }
     $metrics = Get-Json -Path '/platform/frontend/agents/orchestration/metrics'
-    if ($null -eq $metrics.metrics.supervisor_fallbacks -or $null -eq $metrics.metrics.run_p95_ms) {
+    if ($null -eq $metrics.metrics.supervisor_fallbacks `
+        -or $null -eq $metrics.metrics.run_p95_ms `
+        -or $null -eq $metrics.metrics.pipeline_runs `
+        -or $null -eq $metrics.metrics.pipeline_p95_ms) {
         throw 'Orchestration quality metrics endpoint did not return the required aggregates.'
     }
     $finishedAt = [DateTimeOffset]::UtcNow

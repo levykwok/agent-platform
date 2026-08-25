@@ -5,14 +5,15 @@ package io.agent.platform.control;
 
 import java.util.List;
 
-public record WorkflowStep(
+/** One ordered Agent invocation in an Agent-owned Pipeline. */
+public record PipelineStep(
         String stepId,
         String agentId,
         String instruction,
         Long timeoutMs,
         Integer maxRetries,
         FailurePolicy failurePolicy,
-        List<WorkflowTransition> transitions) {
+        List<PipelineTransition> transitions) {
 
     public enum FailurePolicy {
         FAIL_FAST,
@@ -20,12 +21,11 @@ public record WorkflowStep(
         USE_INPUT
     }
 
-    /** Backward-compatible constructor for the original three-field workflow schema. */
-    public WorkflowStep(String stepId, String agentId, String instruction) {
+    public PipelineStep(String stepId, String agentId, String instruction) {
         this(stepId, agentId, instruction, null, null, null, List.of());
     }
 
-    public WorkflowStep(
+    public PipelineStep(
             String stepId,
             String agentId,
             String instruction,
@@ -35,8 +35,7 @@ public record WorkflowStep(
         this(stepId, agentId, instruction, timeoutMs, maxRetries, failurePolicy, List.of());
     }
 
-    public WorkflowStep {
-        timeoutMs = timeoutMs;
+    public PipelineStep {
         maxRetries = maxRetries == null ? 0 : maxRetries;
         failurePolicy = failurePolicy == null ? FailurePolicy.FAIL_FAST : failurePolicy;
         transitions = transitions == null ? List.of() : List.copyOf(transitions);

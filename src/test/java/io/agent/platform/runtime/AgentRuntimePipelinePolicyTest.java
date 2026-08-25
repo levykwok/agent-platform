@@ -7,18 +7,18 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import io.agent.platform.control.WorkflowStep;
+import io.agent.platform.control.PipelineStep;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
-class AgentRuntimeWorkflowPolicyTest {
+class AgentRuntimePipelinePolicyTest {
 
     @Test
     void retriesUntilTheStepSucceeds() {
         AtomicInteger attempts = new AtomicInteger();
-        WorkflowStep step = step(2, WorkflowStep.FailurePolicy.FAIL_FAST);
+        PipelineStep step = step(2, PipelineStep.FailurePolicy.FAIL_FAST);
 
         String result =
                 AgentRuntimeService.withStepPolicy(
@@ -40,7 +40,7 @@ class AgentRuntimeWorkflowPolicyTest {
     @Test
     void failFastPropagatesAfterRetryBudgetIsExhausted() {
         AtomicInteger attempts = new AtomicInteger();
-        WorkflowStep step = step(1, WorkflowStep.FailurePolicy.FAIL_FAST);
+        PipelineStep step = step(1, PipelineStep.FailurePolicy.FAIL_FAST);
 
         IllegalStateException error =
                 assertThrows(
@@ -64,9 +64,9 @@ class AgentRuntimeWorkflowPolicyTest {
 
     @Test
     void timeoutIsRetriedAndThenUsesPreviousInputWhenConfigured() {
-        WorkflowStep step =
-                new WorkflowStep(
-                        "step", "agent", null, 20L, 1, WorkflowStep.FailurePolicy.USE_INPUT);
+        PipelineStep step =
+                new PipelineStep(
+                        "step", "agent", null, 20L, 1, PipelineStep.FailurePolicy.USE_INPUT);
 
         String result = AgentRuntimeService.withStepPolicy(step, "previous", Mono.never()).block();
 
@@ -76,7 +76,7 @@ class AgentRuntimeWorkflowPolicyTest {
     @Test
     void skipUsesPreviousInputWithoutRetrying() {
         AtomicInteger attempts = new AtomicInteger();
-        WorkflowStep step = step(3, WorkflowStep.FailurePolicy.SKIP);
+        PipelineStep step = step(3, PipelineStep.FailurePolicy.SKIP);
 
         String result =
                 AgentRuntimeService.withStepPolicy(
@@ -96,7 +96,7 @@ class AgentRuntimeWorkflowPolicyTest {
 
     @Test
     void streamedFallbackEmitsPreviousInputAndFailureMetadata() {
-        WorkflowStep step = step(0, WorkflowStep.FailurePolicy.USE_INPUT);
+        PipelineStep step = step(0, PipelineStep.FailurePolicy.USE_INPUT);
 
         AgentEventEnvelope event =
                 AgentRuntimeService.withFluxStepPolicy(
@@ -115,9 +115,9 @@ class AgentRuntimeWorkflowPolicyTest {
 
     @Test
     void timeoutExceptionCanBeObservedWhenFailFastIsSelected() {
-        WorkflowStep step =
-                new WorkflowStep(
-                        "step", "agent", null, 20L, 0, WorkflowStep.FailurePolicy.FAIL_FAST);
+        PipelineStep step =
+                new PipelineStep(
+                        "step", "agent", null, 20L, 0, PipelineStep.FailurePolicy.FAIL_FAST);
 
         Throwable error =
                 assertThrows(
@@ -129,7 +129,7 @@ class AgentRuntimeWorkflowPolicyTest {
         assertInstanceOf(TimeoutException.class, error.getCause());
     }
 
-    private static WorkflowStep step(int retries, WorkflowStep.FailurePolicy policy) {
-        return new WorkflowStep("step", "agent", null, null, retries, policy);
+    private static PipelineStep step(int retries, PipelineStep.FailurePolicy policy) {
+        return new PipelineStep("step", "agent", null, null, retries, policy);
     }
 }

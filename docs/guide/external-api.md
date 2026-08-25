@@ -52,6 +52,24 @@ X-API-Key: demo-key-change-me
 
 请求也兼容 `tenantId`、`userId`、`sessionId` 的驼峰写法。返回结果包含请求 ID、实际 Agent、会话 ID 和文本答案。
 
+### 图片与文本附件
+
+视觉模型可以通过 `images` 接收图片 URL 或 Base64 数据；每张图片必须且只能填写 `url` 或 `data`：
+
+```json
+{
+  "message": "描述图片并结合说明文件回答",
+  "images": [
+    {"data": "<base64>", "media_type": "image/png"}
+  ],
+  "files": [
+    {"name": "context.md", "media_type": "text/markdown", "content": "补充背景"}
+  ]
+}
+```
+
+`files` 是安全受限的内联文本附件：最多 8 个，单个不超过 200,000 字符，总计不超过 500,000 字符。当前不接受 PDF、Office、压缩包等二进制文件；此类文件应先进入平台文档上传/解析链路，再通过文档引用调用。
+
 ## 流式调用
 
 将地址改为 `/chat/stream`，并设置：

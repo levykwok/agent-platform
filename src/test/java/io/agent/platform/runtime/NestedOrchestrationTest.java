@@ -27,7 +27,7 @@ import io.agent.platform.control.RouteRule;
 import io.agent.platform.control.SubagentBinding;
 import io.agent.platform.runtime.protocol.TaskContext;
 import io.agent.platform.runtime.protocol.TaskStatus;
-import io.agent.platform.control.WorkflowStep;
+import io.agent.platform.control.PipelineStep;
 import io.agent.platform.web.PlatformCompatibilityState;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.message.Msg;
@@ -91,11 +91,11 @@ class NestedOrchestrationTest {
     void routerCanTargetWorkflow() {
         addSingle("researcher", "research result");
         addSingle("writer", "final answer");
-        addWorkflow(
+        addPipeline(
                 "research-flow",
                 List.of(
-                        new WorkflowStep("research", "researcher", "research"),
-                        new WorkflowStep("write", "writer", "write")));
+                        new PipelineStep("research", "researcher", "research"),
+                        new PipelineStep("write", "writer", "write")));
         addRouter(
                 "entry",
                 List.of(new RouteRule("to_flow", "research-flow", "", List.of("go"), false)));
@@ -108,7 +108,7 @@ class NestedOrchestrationTest {
     @Test
     void routerDefaultCanTargetWorkflow() {
         addSingle("writer", "default final answer");
-        addWorkflow("default-flow", List.of(new WorkflowStep("write", "writer", "write")));
+        addPipeline("default-flow", List.of(new PipelineStep("write", "writer", "write")));
         addRouter("entry", List.of(new RouteRule("default", "default-flow", "", List.of(), true)));
 
         ChatResponse response = runtime.chat("entry", request("unmatched")).block();
@@ -190,7 +190,7 @@ class NestedOrchestrationTest {
         addRouter(
                 "step-router",
                 List.of(new RouteRule("to_leaf", "leaf-a", "", List.of("go"), false)));
-        addWorkflow("outer-flow", List.of(new WorkflowStep("route", "step-router", "route")));
+        addPipeline("outer-flow", List.of(new PipelineStep("route", "step-router", "route")));
 
         ChatResponse response = runtime.chat("outer-flow", request("go")).block();
 
@@ -201,12 +201,12 @@ class NestedOrchestrationTest {
     void workflowStepCanTargetAnotherWorkflow() {
         addSingle("inner-agent", "inner result");
         addSingle("outer-agent", "outer result");
-        addWorkflow("inner-flow", List.of(new WorkflowStep("inner", "inner-agent", "inner")));
-        addWorkflow(
+        addPipeline("inner-flow", List.of(new PipelineStep("inner", "inner-agent", "inner")));
+        addPipeline(
                 "outer-flow",
                 List.of(
-                        new WorkflowStep("call-inner", "inner-flow", "call inner"),
-                        new WorkflowStep("outer", "outer-agent", "finish")));
+                        new PipelineStep("call-inner", "inner-flow", "call inner"),
+                        new PipelineStep("outer", "outer-agent", "finish")));
 
         ChatResponse response = runtime.chat("outer-flow", request("go")).block();
 
@@ -660,7 +660,7 @@ class NestedOrchestrationTest {
         agents.put(id, agent);
     }
 
-    private void addWorkflow(String id, List<WorkflowStep> steps) {
+    private void addPipeline(String id, List<PipelineStep> steps) {
         addDefinition(
                 id,
                 new OrchestrationPolicy(OrchestrationMode.PIPELINE, List.of(), List.of(), steps));

@@ -17,7 +17,7 @@ import org.springframework.core.env.Environment;
 class YamlAgentDefinitionRegistryTest {
 
     @Test
-    void reloadPreservesWorkflowExecutionPolicyAndTransitions() throws Exception {
+    void reloadPreservesPipelineExecutionPolicyAndTransitions() throws Exception {
         PlatformConfigStore configStore = mock(PlatformConfigStore.class);
         Environment environment = mock(Environment.class);
         PlatformStorageLayer storage = mock(PlatformStorageLayer.class);
@@ -26,17 +26,17 @@ class YamlAgentDefinitionRegistryTest {
         when(storage.agentDefinitionWorkspace(anyString()))
                 .thenAnswer(invocation -> Path.of("target", "registry-test", invocation.getArgument(0)));
 
-        WorkflowStep research =
-                new WorkflowStep(
+        PipelineStep research =
+                new PipelineStep(
                         "research",
                         "researcher",
                         "Research the request",
                         1_200L,
                         2,
-                        WorkflowStep.FailurePolicy.USE_INPUT,
+                        PipelineStep.FailurePolicy.USE_INPUT,
                         List.of(
-                                new WorkflowTransition("needs_review", "reviewer"),
-                                new WorkflowTransition("", "writer", true)));
+                                new PipelineTransition("needs_review", "reviewer"),
+                                new PipelineTransition("", "writer", true)));
         OrchestrationPolicy workflow =
                 new OrchestrationPolicy(
                         OrchestrationMode.PIPELINE,
@@ -44,8 +44,8 @@ class YamlAgentDefinitionRegistryTest {
                         List.of(),
                         List.of(
                                 research,
-                                new WorkflowStep("reviewer", "reviewer", "Review"),
-                                new WorkflowStep("writer", "writer", "Write")));
+                                new PipelineStep("reviewer", "reviewer", "Review"),
+                                new PipelineStep("writer", "writer", "Write")));
         YamlAgentDefinitionRegistry.AgentConfig flow =
                 new YamlAgentDefinitionRegistry.AgentConfig(
                         "research-flow",
@@ -72,15 +72,15 @@ class YamlAgentDefinitionRegistryTest {
                 new YamlAgentDefinitionRegistry(configStore, environment, storage);
         registry.load();
 
-        WorkflowStep loaded =
+        PipelineStep loaded =
                 registry.findPublished("research-flow")
                         .orElseThrow()
                         .orchestration()
-                        .workflow()
+                        .pipeline()
                         .get(0);
         assertEquals(1_200L, loaded.timeoutMs());
         assertEquals(2, loaded.maxRetries());
-        assertEquals(WorkflowStep.FailurePolicy.USE_INPUT, loaded.failurePolicy());
+        assertEquals(PipelineStep.FailurePolicy.USE_INPUT, loaded.failurePolicy());
         assertEquals(2, loaded.transitions().size());
         assertEquals("reviewer", loaded.transitions().get(0).nextStepId());
         assertEquals("writer", loaded.transitions().get(1).nextStepId());

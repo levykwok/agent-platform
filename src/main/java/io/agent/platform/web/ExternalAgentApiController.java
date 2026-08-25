@@ -69,7 +69,7 @@ public class ExternalAgentApiController {
     @PostMapping("/agents/{agentId}/chat")
     public Mono<ResponseEntity<Object>> chat(
             @PathVariable("agentId") String agentId, @RequestBody Map<String, Object> payload) {
-        ExternalChatRequest request = ExternalChatRequest.from(payload);
+        ExternalChatRequest request = parseRequest(payload);
         ensureAgent(agentId);
         ensureMessage(request);
         String requestId = "req_" + UUID.randomUUID();
@@ -88,7 +88,7 @@ public class ExternalAgentApiController {
     @PostMapping(value = "/agents/{agentId}/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<ServerSentEvent<AgentEventEnvelope>> stream(
             @PathVariable("agentId") String agentId, @RequestBody Map<String, Object> payload) {
-        ExternalChatRequest request = ExternalChatRequest.from(payload);
+        ExternalChatRequest request = parseRequest(payload);
         ensureAgent(agentId);
         ensureMessage(request);
         return runtime.stream(agentId, request.toRuntimeRequest())
@@ -110,6 +110,14 @@ public class ExternalAgentApiController {
         if (registry.findPublished(agentId).filter(AgentDefinition::enabled).isEmpty()) {
             throw new ResponseStatusException(
                     HttpStatus.NOT_FOUND, "Published agent was not found: " + agentId);
+        }
+    }
+
+    private static ExternalChatRequest parseRequest(Map<String, Object> payload) {
+        try {
+            return ExternalChatRequest.from(payload);
+        } catch (IllegalArgumentException error) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, error.getMessage(), error);
         }
     }
 

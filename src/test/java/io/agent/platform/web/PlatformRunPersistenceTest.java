@@ -11,7 +11,9 @@ import static org.mockito.Mockito.when;
 
 import io.agent.platform.control.AgentDefinitionRegistry;
 import io.agent.platform.control.AgentDefinition;
+import io.agent.platform.control.OrchestrationMode;
 import io.agent.platform.control.OrchestrationPolicy;
+import io.agent.platform.control.PipelineStep;
 import io.agent.platform.control.McpRegistry;
 import io.agent.platform.control.ModelConfigRegistry;
 import io.agent.platform.control.ModelProviderRegistry;
@@ -22,6 +24,7 @@ import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -45,7 +48,11 @@ class PlatformRunPersistenceTest {
                         List.of("tool-a"),
                         List.of("mcp-a"),
                         List.of("skill-a"),
-                        OrchestrationPolicy.single());
+                        new OrchestrationPolicy(
+                                OrchestrationMode.PIPELINE,
+                                List.of(),
+                                List.of(),
+                                List.of(new PipelineStep("write", "writer", "Write"))));
         PlatformCompatibilityState state = newState(storage, definition);
 
         var run = state.createRun("snapshot-agent", "test", "user-1");
@@ -54,6 +61,13 @@ class PlatformRunPersistenceTest {
         assertEquals("model-a", run.get("model_snapshot"));
         assertEquals(Map.of("qa", "model-a"), run.get("model_policy_snapshot"));
         assertTrue(((Map<?, ?>) run.get("config_snapshot")).containsKey("orchestration"));
+        String serialized = new ObjectMapper().writeValueAsString(run);
+        assertTrue(serialized.contains("\"mode\":\"PIPELINE\""));
+        assertTrue(serialized.contains("\"pipeline\""));
+        assertFalse(serialized.contains("\"workflow\""));
+        assertEquals(
+                1L,
+                state.orchestrationMetrics("snapshot-agent", "user-1").get("pipeline_runs"));
     }
 
     @Test
