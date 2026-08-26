@@ -4,6 +4,8 @@
 package io.agent.platform.control;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
 public record OrchestrationPolicy(
@@ -18,6 +20,31 @@ public record OrchestrationPolicy(
 
     public static final int DEFAULT_MAX_SUPERVISOR_STEPS = 5;
     public static final int MAX_SUPERVISOR_STEPS = 10;
+    public static final boolean DEFAULT_ROUTER_DISABLE_THINKING = true;
+
+    @JsonCreator
+    public OrchestrationPolicy(
+            @JsonProperty("mode") OrchestrationMode mode,
+            @JsonProperty("subagents") List<SubagentBinding> subagents,
+            @JsonProperty("routes") List<RouteRule> routes,
+            @JsonProperty("pipeline") @JsonAlias("workflow") List<PipelineStep> pipeline,
+            @JsonProperty("maxSupervisorSteps") int maxSupervisorSteps,
+            @JsonProperty("supervisorParallelEnabled") boolean supervisorParallelEnabled,
+            @JsonProperty("maxSupervisorParallelism") int maxSupervisorParallelism,
+            @JsonProperty("routerDisableThinking") @JsonAlias("router_disable_thinking")
+                    Boolean routerDisableThinking) {
+        this(
+                mode,
+                subagents,
+                routes,
+                pipeline,
+                maxSupervisorSteps,
+                supervisorParallelEnabled,
+                maxSupervisorParallelism,
+                routerDisableThinking == null
+                        ? DEFAULT_ROUTER_DISABLE_THINKING
+                        : routerDisableThinking);
+    }
 
     public OrchestrationPolicy(
             OrchestrationMode mode,
@@ -59,7 +86,7 @@ public record OrchestrationPolicy(
                 maxSupervisorSteps,
                 supervisorParallelEnabled,
                 maxSupervisorParallelism,
-                false);
+                DEFAULT_ROUTER_DISABLE_THINKING);
     }
 
     public static OrchestrationPolicy single() {
@@ -71,7 +98,7 @@ public record OrchestrationPolicy(
                 DEFAULT_MAX_SUPERVISOR_STEPS,
                 false,
                 2,
-                false);
+                DEFAULT_ROUTER_DISABLE_THINKING);
     }
 
     public OrchestrationPolicy {
