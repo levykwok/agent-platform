@@ -152,6 +152,7 @@ $definitions = @(
             -Role 'Forward the request using only the declared routing rules.' `
             -Orchestration @{
                 mode = 'ROUTER'
+                routerDisableThinking = $true
                 subagents = @()
                 pipeline = @()
                 routes = @(

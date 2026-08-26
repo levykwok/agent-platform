@@ -13,7 +13,8 @@ public record OrchestrationPolicy(
         @JsonAlias("workflow") List<PipelineStep> pipeline,
         int maxSupervisorSteps,
         boolean supervisorParallelEnabled,
-        int maxSupervisorParallelism) {
+        int maxSupervisorParallelism,
+        boolean routerDisableThinking) {
 
     public static final int DEFAULT_MAX_SUPERVISOR_STEPS = 5;
     public static final int MAX_SUPERVISOR_STEPS = 10;
@@ -42,6 +43,25 @@ public record OrchestrationPolicy(
         this(mode, subagents, routes, pipeline, maxSupervisorSteps, false, 2);
     }
 
+    public OrchestrationPolicy(
+            OrchestrationMode mode,
+            List<SubagentBinding> subagents,
+            List<RouteRule> routes,
+            List<PipelineStep> pipeline,
+            int maxSupervisorSteps,
+            boolean supervisorParallelEnabled,
+            int maxSupervisorParallelism) {
+        this(
+                mode,
+                subagents,
+                routes,
+                pipeline,
+                maxSupervisorSteps,
+                supervisorParallelEnabled,
+                maxSupervisorParallelism,
+                false);
+    }
+
     public static OrchestrationPolicy single() {
         return new OrchestrationPolicy(
                 OrchestrationMode.SINGLE,
@@ -50,7 +70,8 @@ public record OrchestrationPolicy(
                 List.of(),
                 DEFAULT_MAX_SUPERVISOR_STEPS,
                 false,
-                2);
+                2,
+                false);
     }
 
     public OrchestrationPolicy {

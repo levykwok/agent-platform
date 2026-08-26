@@ -140,6 +140,38 @@ class NestedOrchestrationTest {
     }
 
     @Test
+    void routerEventsExposeThinkingOverride() {
+        addSingle("leaf", "result");
+        addDefinition(
+                "fast-router",
+                new OrchestrationPolicy(
+                        OrchestrationMode.ROUTER,
+                        List.of(),
+                        List.of(new RouteRule("route", "leaf", "", List.of(), true)),
+                        List.of(),
+                        OrchestrationPolicy.DEFAULT_MAX_SUPERVISOR_STEPS,
+                        false,
+                        2,
+                        true));
+
+        List<AgentEventEnvelope> events =
+                runtime.stream("fast-router", request("route this")).take(2).collectList().block();
+
+        List<AgentEventEnvelope> routerEvents =
+                events.stream()
+                        .filter(
+                                event ->
+                                        "router_decision_start".equals(event.type())
+                                                || "router_decision".equals(event.type()))
+                        .toList();
+        assertEquals(2, routerEvents.size());
+        assertTrue(
+                routerEvents.stream()
+                        .allMatch(
+                                event -> Boolean.TRUE.equals(event.payload().get("thinking_disabled"))));
+    }
+
+    @Test
     void routerFallsBackToConfiguredDefaultWhenLlmOutputIsInvalid() {
         addSingle("leaf-a", "first result");
         addSingle("leaf-default", "fallback result");

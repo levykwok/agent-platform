@@ -6,6 +6,7 @@ package io.agent.platform.runtime;
 import io.agent.platform.adapter.agentscope.AgentExecutionPolicy;
 import io.agent.platform.adapter.agentscope.AgentScopeHarnessFactory;
 import io.agent.platform.control.AgentDefinition;
+import io.agent.platform.control.OrchestrationMode;
 import io.agentscope.core.message.ContentBlock;
 import io.agentscope.core.message.TextBlock;
 import io.agentscope.core.message.UserMessage;
@@ -24,6 +25,12 @@ public final class AgentScopeOrchestrationDecisionModel implements Orchestration
     private static final long MAX_DECISION_TIMEOUT_MS = 30_000L;
     private static final GenerateOptions DECISION_OPTIONS =
             GenerateOptions.builder().temperature(0.0).maxTokens(512).build();
+    private static final GenerateOptions ROUTER_NO_THINKING_OPTIONS =
+            GenerateOptions.builder()
+                    .temperature(0.0)
+                    .maxTokens(512)
+                    .additionalBodyParam("enable_thinking", false)
+                    .build();
 
     private final AgentScopeHarnessFactory harnessFactory;
 
@@ -44,7 +51,7 @@ public final class AgentScopeOrchestrationDecisionModel implements Orchestration
         UserMessage message =
                 new UserMessage(List.of(TextBlock.builder().text(prompt == null ? "" : prompt).build()));
         return ModelRegistry.resolve(modelId)
-                .stream(List.of(message), List.of(), DECISION_OPTIONS)
+                .stream(List.of(message), List.of(), decisionOptions(definition))
                 .doOnNext(
                         response -> {
                             if (response.getUsage() != null) {
@@ -76,5 +83,14 @@ public final class AgentScopeOrchestrationDecisionModel implements Orchestration
 
     private static long elapsedMs(long started) {
         return Math.max(0L, (System.nanoTime() - started) / 1_000_000L);
+    }
+
+    static GenerateOptions decisionOptions(AgentDefinition definition) {
+        if (definition != null
+                && definition.orchestration().mode() == OrchestrationMode.ROUTER
+                && definition.orchestration().routerDisableThinking()) {
+            return ROUTER_NO_THINKING_OPTIONS;
+        }
+        return DECISION_OPTIONS;
     }
 }

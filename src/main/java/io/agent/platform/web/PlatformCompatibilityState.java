@@ -512,7 +512,12 @@ public class PlatformCompatibilityState {
                         map,
                         fallback.maxSupervisorParallelism(),
                         "maxSupervisorParallelism",
-                        "max_supervisor_parallelism"));
+                        "max_supervisor_parallelism"),
+                booleanAny(
+                        map,
+                        fallback.routerDisableThinking(),
+                        "routerDisableThinking",
+                        "router_disable_thinking"));
     }
 
     private OrchestrationMode mode(String value) {
@@ -653,6 +658,19 @@ public class PlatformCompatibilityState {
             Integer value = numberInt(map.get(key), null);
             if (value != null) {
                 return value;
+            }
+        }
+        return fallback;
+    }
+
+    private boolean booleanAny(Map<String, Object> map, boolean fallback, String... keys) {
+        for (String key : keys) {
+            Object value = map.get(key);
+            if (value instanceof Boolean bool) {
+                return bool;
+            }
+            if (value != null && !String.valueOf(value).isBlank()) {
+                return Boolean.parseBoolean(String.valueOf(value));
             }
         }
         return fallback;

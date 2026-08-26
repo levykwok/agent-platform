@@ -2638,6 +2638,8 @@ public class AgentRuntimeService implements AgentRuntime {
         payload.put("target_agent_id", decision.target().agentId());
         payload.put("matched", decision.rule() != null);
         payload.put("decision_source", decision.source());
+        payload.put(
+                "thinking_disabled", definition.orchestration().routerDisableThinking());
         payload.put("reason", decision.reason());
         payload.put("model_id", decision.modelId());
         payload.put("duration_ms", decision.durationMs());
@@ -2671,6 +2673,8 @@ public class AgentRuntimeService implements AgentRuntime {
                         "ROUTER",
                         "candidate_count",
                         definition.orchestration().routes().size(),
+                        "thinking_disabled",
+                        definition.orchestration().routerDisableThinking(),
                         "decision_source",
                         "llm"));
     }

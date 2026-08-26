@@ -188,7 +188,8 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                 pipeline,
                 policy.maxSupervisorSteps(),
                 policy.supervisorParallelEnabled(),
-                policy.maxSupervisorParallelism());
+                policy.maxSupervisorParallelism(),
+                policy.routerDisableThinking());
     }
 
     private String safe(String value, String fallback) {

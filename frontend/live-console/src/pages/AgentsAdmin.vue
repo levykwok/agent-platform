@@ -74,6 +74,7 @@ const form = reactive({
   router_rules: [] as JsonMap[],
   orchestration_mode: 'SINGLE',
   orchestration_routes: [] as JsonMap[],
+  router_disable_thinking: false,
   pipeline_steps: [] as JsonMap[],
   subagents: [] as JsonMap[],
   max_supervisor_steps: 5,
@@ -274,6 +275,7 @@ async function selectAgent(id: string) {
         keywords: Array.isArray(r.keywords) ? (r.keywords as string[]).join(', ') : (r.keywords || ''),
         defaultRoute: r.defaultRoute ?? r.default_route ?? false,
       })),
+      router_disable_thinking: orchestration.routerDisableThinking === true || orchestration.router_disable_thinking === true,
       pipeline_steps: (((orchestration.pipeline || orchestration.workflow) as JsonMap[]) || []).map((s) => ({
         stepId: s.stepId || s.step_id || '',
         agentId: s.agentId || s.agent_id || '',
@@ -320,7 +322,7 @@ function newAgent() {
     agent_id: '', display_name: '', description: '', domain: domainFilter.value || 'platform', enabled: true,
     role: '', planner_rules: '', require_structured_plan: true,
     included_skills: [], included_mcps: [], included_tools: [], restrict_tools: false, router_rules: [],
-    orchestration_mode: 'SINGLE', orchestration_routes: [], pipeline_steps: [], subagents: [], max_supervisor_steps: 5,
+    orchestration_mode: 'SINGLE', orchestration_routes: [], router_disable_thinking: false, pipeline_steps: [], subagents: [], max_supervisor_steps: 5,
     supervisor_parallel_enabled: false, max_supervisor_parallelism: 2,
     root_timeout_ms: 180000, root_max_agent_calls: 20, root_max_tokens: 100000, root_max_depth: 6,
     output_schema_text: '',
@@ -544,6 +546,7 @@ async function saveAgent() {
       .filter((r) => r.ruleId && r.targetAgentId && (r.defaultRoute || r.contains || r.keywords.length))
     if (!routes.length) { notifyError('ROUTER 至少需要一条有效路由'); step.value = 1; return }
     orchestration.routes = routes
+    orchestration.routerDisableThinking = form.router_disable_thinking
   }
   if (mode === 'PIPELINE') {
     const pipeline = form.pipeline_steps
@@ -859,6 +862,10 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
           </div>
 
         <div v-if="form.orchestration_mode === 'ROUTER'">
+          <div class="supervisor-policy-grid">
+            <div class="field"><label>强制关闭 Router Thinking</label><label class="switch-row"><span>{{ form.router_disable_thinking ? '已强制关闭' : '跟随模型默认' }}</span><span class="toggle"><input type="checkbox" v-model="form.router_disable_thinking" /><span class="toggle-slider"></span></span></label></div>
+          </div>
+          <p class="pick-hint">开启后仅在 Router 的 LLM 路由决策请求中发送 <code>enable_thinking=false</code>；不会影响目标 Agent 或 Supervisor。</p>
           <div class="actions"><button class="btn btn-ghost btn-sm" @click="addOrchestrationRoute">添加路由</button></div>
           <table>
 <thead><tr><th>规则 ID</th><th>包含文本</th><th>关键词列表</th><th>默认</th><th>目标代理</th><th></th></tr></thead>

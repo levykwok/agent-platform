@@ -24,6 +24,21 @@ class OrchestrationPolicyTest {
         assertEquals(OrchestrationPolicy.DEFAULT_MAX_SUPERVISOR_STEPS, policy.maxSupervisorSteps());
         assertFalse(policy.supervisorParallelEnabled());
         assertEquals(2, policy.maxSupervisorParallelism());
+        assertFalse(policy.routerDisableThinking());
+    }
+
+    @Test
+    void routerThinkingPolicyRoundTrips() throws Exception {
+        OrchestrationPolicy policy =
+                objectMapper.readValue(
+                        "{\"mode\":\"ROUTER\",\"routerDisableThinking\":true}",
+                        OrchestrationPolicy.class);
+
+        assertTrue(policy.routerDisableThinking());
+        OrchestrationPolicy restored =
+                objectMapper.readValue(
+                        objectMapper.writeValueAsString(policy), OrchestrationPolicy.class);
+        assertTrue(restored.routerDisableThinking());
     }
 
     @Test
