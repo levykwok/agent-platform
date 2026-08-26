@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import AgentWaitingCard from '../components/AgentWaitingCard.vue'
 import { currentOrgId, fmtDate, makeHeaders, readJson, type JsonMap } from '../lib/platformApi'
-import { notifyError } from '../stores/notify'
+import { notifyError, notifySuccess } from '../stores/notify'
 
 const runs = ref<JsonMap[]>([])
 const agentsList = ref<JsonMap[]>([])
@@ -16,14 +16,21 @@ const steps = ref<JsonMap[]>([])
 const events = ref<JsonMap[]>([])
 const waiting = ref<JsonMap | null>(null)
 const detailLoading = ref(false)
+const cancellingRunId = ref('')
 const orchestrationMetrics = ref<JsonMap>({})
+const evaluationHistory = ref<JsonMap[]>([])
+const evaluationRunning = ref(false)
+const evaluationSpec = ref(JSON.stringify({
+  name: '编排回归评测',
+  cases: [{ name: '基本链路', input: '请完成一个简单测试', expected: { max_duration_ms: 120000 } }],
+}, null, 2))
 
 function headers(json = false) { return makeHeaders(json, currentOrgId()) }
 function statusCls(s: string) {
   const v = String(s || '').toLowerCase()
-  if (['succeeded', 'success', 'completed', 'ok', 'done'].includes(v)) return 'badge-green'
+  if (['succeeded', 'success', 'completed', 'passed', 'ok', 'done'].includes(v)) return 'badge-green'
   if (['failed', 'error', 'cancelled', 'canceled'].includes(v)) return 'badge-red'
-  if (['running', 'queued', 'pending', 'in_progress'].includes(v)) return 'badge-amber'
+  if (['running', 'recovering', 'cancelling', 'queued', 'pending', 'in_progress'].includes(v)) return 'badge-amber'
   return 'badge-gray'
 }
 function agentName(id: string) { return agentsList.value.find((a) => a.agent_id === id)?.display_name || id }
@@ -58,6 +65,12 @@ async function loadRuns() {
     if (agentFilter.value) mp.set('agent_id', agentFilter.value)
     const metrics = await readJson<JsonMap>(await fetch(`/platform/frontend/agents/orchestration/metrics?${mp}`, { headers: headers(false) }))
     orchestrationMetrics.value = (metrics.metrics || {}) as JsonMap
+    if (agentFilter.value) {
+      const evals = await readJson<JsonMap>(await fetch(`/platform/frontend/agents/${encodeURIComponent(agentFilter.value)}/orchestration-evaluations?limit=10`, { headers: headers(false) }))
+      evaluationHistory.value = (evals.items || evals.evaluations || []) as JsonMap[]
+    } else {
+      evaluationHistory.value = []
+    }
   } catch (err) {
     notifyError(err)
   } finally {
@@ -236,6 +249,29 @@ async function onWaitingChanged() {
   await refreshSelectedRun()
 }
 
+function canCancelRun(run: JsonMap | null) {
+  return ['running', 'recovering', 'cancelling'].includes(String(run?.status || '').toLowerCase())
+}
+
+async function cancelSelectedRun() {
+  const runId = String(detail.value?.run_id || '')
+  if (!runId || cancellingRunId.value || !canCancelRun(detail.value)) return
+  if (!window.confirm('确定取消这次运行吗？已提交完成的编排步骤会保留。')) return
+  cancellingRunId.value = runId
+  try {
+    const result = await readJson<JsonMap>(await fetch(`/agent-runs/runs/${encodeURIComponent(runId)}/cancel`, {
+      method: 'POST', headers: headers(true), body: '{}',
+    }))
+    if (!result.ok && String(result.status || '') !== 'cancelled') throw new Error('运行当前无法取消')
+    notifySuccess('已提交取消请求')
+    await Promise.all([loadRuns(), refreshSelectedRun()])
+  } catch (err) {
+    notifyError(err)
+  } finally {
+    cancellingRunId.value = ''
+  }
+}
+
 const stats = computed(() => ({
   total: runs.value.length,
   ok: runs.value.filter((r) => statusCls(String(r.status)) === 'badge-green').length,
@@ -251,6 +287,23 @@ async function evaluateRouter(correct: boolean) {
     }))
     await Promise.all([loadRuns(), refreshSelectedRun()])
   } catch (err) { notifyError(err) }
+}
+
+async function runOrchestrationEvaluation() {
+  if (!agentFilter.value || evaluationRunning.value) return
+  evaluationRunning.value = true
+  try {
+    const payload = JSON.parse(evaluationSpec.value) as JsonMap
+    const result = await readJson<JsonMap>(await fetch(`/platform/frontend/agents/${encodeURIComponent(agentFilter.value)}/orchestration-evaluations/run`, {
+      method: 'POST', headers: headers(true), body: JSON.stringify(payload),
+    }))
+    notifySuccess(`评测完成：${result.passed_count || 0}/${result.case_count || 0} 通过`)
+    await loadRuns()
+  } catch (err) {
+    notifyError(err)
+  } finally {
+    evaluationRunning.value = false
+  }
 }
 
 onMounted(async () => { await loadAgents(); await loadRuns() })
@@ -272,6 +325,21 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
       <div class="metric"><span>运行 P95</span><strong>{{ metricNumber(orchestrationMetrics.run_p95_ms, ' ms') }}</strong><small>{{ orchestrationMetrics.run_count || 0 }} 次 · Pipeline {{ orchestrationMetrics.pipeline_runs || 0 }} / {{ metricNumber(orchestrationMetrics.pipeline_p95_ms, ' ms') }}</small></div>
       <div class="metric"><span>Token / 成本</span><strong>{{ orchestrationMetrics.total_tokens || 0 }}</strong><small>{{ orchestrationMetrics.currency || 'USD' }} {{ metricNumber(orchestrationMetrics.estimated_cost) }}</small></div>
     </div>
+
+    <section v-if="agentFilter" class="panel orchestration-eval-panel">
+      <div class="section-head"><div><div class="section-title">编排回归评测 · {{ agentName(agentFilter) }}</div><div class="section-sub">真实调用 Agent，并自动断言 route_id / target_agent_id、binding_ids、child_call_count、pipeline_step_ids、output_contains 与 max_duration_ms。</div></div><button class="btn btn-primary btn-sm" :disabled="evaluationRunning" @click="runOrchestrationEvaluation">{{ evaluationRunning ? '评测运行中…' : '运行评测' }}</button></div>
+      <div class="eval-layout">
+        <textarea v-model="evaluationSpec" class="eval-editor" spellcheck="false"></textarea>
+        <div class="eval-history">
+          <div v-if="!evaluationHistory.length" class="empty">该 Agent 暂无评测记录</div>
+          <article v-for="item in evaluationHistory" :key="String(item.evaluation_id)" class="eval-result">
+            <div><strong>{{ item.name }}</strong><span class="badge" :class="statusCls(String(item.status))">{{ item.status }}</span></div>
+            <small>{{ item.passed_count || 0 }}/{{ item.case_count || 0 }} 通过 · {{ item.duration_ms || 0 }} ms · {{ fmtDate(item.started_at) }}</small>
+            <details><summary>结果详情</summary><pre class="json-box">{{ pretty(item.results) }}</pre></details>
+          </article>
+        </div>
+      </div>
+    </section>
 
     <div class="runs-body">
       <aside class="runs-list-pane">
@@ -297,7 +365,7 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
         <div v-if="!detail" class="empty-state"><div class="empty-icon">📈</div><h3>运行观测</h3><p>选择左侧一次运行，查看它的状态、步骤、工具调用与结果。</p></div>
         <template v-else>
           <section class="panel">
-            <div class="section-head"><div><div class="section-title">{{ agentName(String(detail.agent_id)) }}</div><div class="section-sub mono">{{ detail.run_id }}</div></div><span class="badge" :class="statusCls(String(detail.status))">{{ detail.status }}</span></div>
+            <div class="section-head"><div><div class="section-title">{{ agentName(String(detail.agent_id)) }}</div><div class="section-sub mono">{{ detail.run_id }}</div></div><div class="run-head-actions"><button v-if="canCancelRun(detail)" class="btn btn-danger btn-sm" :disabled="cancellingRunId === detail.run_id" @click="cancelSelectedRun">{{ cancellingRunId === detail.run_id ? '取消中…' : '取消运行' }}</button><span class="badge" :class="statusCls(String(detail.status))">{{ detail.status }}</span></div></div>
             <div class="rd-grid">
               <div class="rd-cell"><span>Agent</span><b>{{ detail.agent_id }}</b></div>
               <div class="rd-cell"><span>Agent 版本</span><b>{{ detail.agent_version || 'unknown' }}</b></div>
@@ -418,6 +486,15 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
 .metric { display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
 .metric span, .metric small { color: var(--muted); font-size: 11px; }
 .metric strong { font-size: 17px; }
+.orchestration-eval-panel { flex-shrink: 0; padding: 14px 16px; }
+.eval-layout { display: grid; grid-template-columns: minmax(320px, .9fr) minmax(360px, 1.1fr); gap: 14px; margin-top: 12px; }
+.eval-editor { min-height: 210px; resize: vertical; border: 1px solid #cbd5e1; border-radius: 9px; padding: 10px; background: #0f172a; color: #dbeafe; font: 11px/1.55 ui-monospace, Menlo, Consolas, monospace; }
+.eval-history { min-height: 210px; max-height: 320px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.eval-result { border: 1px solid #e2e8f0; border-radius: 9px; padding: 9px 11px; background: #f8fafc; }
+.eval-result > div { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.eval-result small { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+.eval-result details { margin-top: 6px; }
+.eval-result summary { cursor: pointer; font-size: 11px; color: #475569; }
 .router-evaluation { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #eef2f7; font-size: 12px; }
 .run-snapshot { margin-top: 10px; }
 .runs-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 320px 1fr; gap: 16px; overflow: hidden; }
@@ -438,6 +515,7 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
 .run-detail { min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
 .run-detail > * { flex-shrink: 0; }
 .run-detail .panel { padding: 16px 18px; }
+.run-head-actions { display: flex; align-items: center; gap: 10px; }
 .rd-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .rd-cell { background: #f8fafc; border: 1px solid #eef2f7; border-radius: 9px; padding: 8px 11px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .rd-cell.wide { grid-column: 1 / -1; }
@@ -495,6 +573,7 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
 
 @media (max-width: 980px) {
   .orchestration-metrics { grid-template-columns: repeat(2, 1fr); }
+  .eval-layout { grid-template-columns: 1fr; }
   .runs-page { overflow: visible; }
   .runs-body { grid-template-columns: 1fr; overflow: visible; }
   .runs-list-pane { max-height: 360px; }
