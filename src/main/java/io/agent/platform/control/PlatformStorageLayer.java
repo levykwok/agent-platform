@@ -33,6 +33,12 @@ public class PlatformStorageLayer {
                     String sqliteSessionTablePrefix,
             @Value("${agent.platform.mcp.discovery.cache-file:}") String mcpDiscoveryCacheFile) {
         this.workspace = Path.of(workspace).toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(this.workspace);
+        } catch (IOException error) {
+            throw new IllegalStateException(
+                    "Failed to create platform workspace: " + this.workspace, error);
+        }
         this.persistenceMode = PersistenceMode.from(mode);
         this.sqliteUrl = effectiveSqliteUrl(sqliteUrl);
         this.sqliteConfigTable = sanitizeName(sqliteConfigTable, "platform_config");

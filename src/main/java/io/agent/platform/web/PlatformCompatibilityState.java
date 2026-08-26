@@ -2583,6 +2583,54 @@ public class PlatformCompatibilityState {
         return run;
     }
 
+    public Map<String, Object> requestRunCancellation(String runId) {
+        Map<String, Object> current = runs.get(runId);
+        if (current == null) {
+            return row("run_id", runId, "status", "unknown");
+        }
+        String status = String.valueOf(current.getOrDefault("status", ""));
+        if (!"running".equals(status) && !"recovering".equals(status)) {
+            return current;
+        }
+        Map<String, Object> run = new LinkedHashMap<>(current);
+        run.put("status", "cancelling");
+        run.put("cancel_requested_at", Instant.now().toString());
+        runs.put(runId, run);
+        persistRun(run);
+        appendRunEvent(runId, "run.cancel_requested", row("status", "cancelling"));
+        return run;
+    }
+
+    public Map<String, Object> cancelRun(String runId, String reason) {
+        Map<String, Object> current = runs.getOrDefault(runId, row("run_id", runId));
+        String status = String.valueOf(current.getOrDefault("status", ""));
+        if ("succeeded".equals(status) || "failed".equals(status) || "cancelled".equals(status)) {
+            return current;
+        }
+        String message = reason == null || reason.isBlank() ? "运行已取消" : reason;
+        Map<String, Object> run = new LinkedHashMap<>(current);
+        run.put("status", "cancelled");
+        run.put("finished_at", Instant.now().toString());
+        run.put("error", row("code", "RUN_CANCELLED", "message", message));
+        runs.put(runId, run);
+        persistRun(run);
+        markStep(runId, "respond", "cancelled", message);
+        appendRunEvent(runId, "run.cancelled", row("reason", message));
+        return run;
+    }
+
+    public Map<String, Object> markRunRecovering(String runId) {
+        Map<String, Object> current = runs.get(runId);
+        if (current == null) return row("run_id", runId, "status", "unknown");
+        Map<String, Object> run = new LinkedHashMap<>(current);
+        run.put("status", "recovering");
+        run.put("recovered_at", Instant.now().toString());
+        runs.put(runId, run);
+        persistRun(run);
+        appendRunEvent(runId, "run.recovering", row("status", "recovering"));
+        return run;
+    }
+
     private void markStep(String runId, String stepId, String status, String summary) {
         List<Map<String, Object>> rows = runSteps.get(runId);
         if (rows == null) {

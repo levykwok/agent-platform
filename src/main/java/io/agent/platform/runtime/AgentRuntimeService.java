@@ -102,6 +102,7 @@ public class AgentRuntimeService implements AgentRuntime {
     private final RuntimeToolGovernance toolGovernance;
     private final OrchestrationDecisionModel orchestrationDecisionModel;
     private final RootTaskBudgetManager rootTaskBudgetManager;
+    private final OrchestrationCheckpointStore checkpointStore;
     private final Map<String, HarnessAgent> agentCache = new ConcurrentHashMap<>();
     private final AtomicLong cachedToolPolicyVersion = new AtomicLong(Long.MIN_VALUE);
 
@@ -113,7 +114,8 @@ public class AgentRuntimeService implements AgentRuntime {
             WorkflowAssetService workflowAssetService,
             RuntimeToolGovernance toolGovernance,
             OrchestrationDecisionModel orchestrationDecisionModel,
-            RootTaskBudgetManager rootTaskBudgetManager) {
+            RootTaskBudgetManager rootTaskBudgetManager,
+            OrchestrationCheckpointStore checkpointStore) {
         this(
                 registry,
                 harnessFactory,
@@ -122,6 +124,7 @@ public class AgentRuntimeService implements AgentRuntime {
                 toolGovernance,
                 orchestrationDecisionModel,
                 rootTaskBudgetManager,
+                checkpointStore,
                 true);
     }
 
@@ -139,6 +142,7 @@ public class AgentRuntimeService implements AgentRuntime {
                 null,
                 new AgentScopeOrchestrationDecisionModel(harnessFactory),
                 new RootTaskBudgetManager(),
+                null,
                 true);
     }
 
@@ -150,6 +154,7 @@ public class AgentRuntimeService implements AgentRuntime {
             RuntimeToolGovernance toolGovernance,
             OrchestrationDecisionModel orchestrationDecisionModel,
             RootTaskBudgetManager rootTaskBudgetManager,
+            OrchestrationCheckpointStore checkpointStore,
             boolean tenantAwareHarnessFactory) {
         this.registry = registry;
         this.harnessFactory = harnessFactory;
@@ -158,6 +163,7 @@ public class AgentRuntimeService implements AgentRuntime {
         this.toolGovernance = toolGovernance;
         this.orchestrationDecisionModel = orchestrationDecisionModel;
         this.rootTaskBudgetManager = rootTaskBudgetManager;
+        this.checkpointStore = checkpointStore;
         this.tenantAwareHarnessFactory = tenantAwareHarnessFactory;
     }
 
@@ -174,6 +180,7 @@ public class AgentRuntimeService implements AgentRuntime {
                 null,
                 new AgentScopeOrchestrationDecisionModel(harnessFactory),
                 new RootTaskBudgetManager(),
+                null,
                 false);
     }
 
@@ -191,6 +198,26 @@ public class AgentRuntimeService implements AgentRuntime {
                 null,
                 orchestrationDecisionModel,
                 new RootTaskBudgetManager(),
+                null,
+                false);
+    }
+
+    /** Compatibility constructor for deterministic durable-recovery tests. */
+    public AgentRuntimeService(
+            AgentDefinitionRegistry registry,
+            AgentScopeHarnessFactory harnessFactory,
+            PlatformCompatibilityState platformState,
+            OrchestrationDecisionModel orchestrationDecisionModel,
+            OrchestrationCheckpointStore checkpointStore) {
+        this(
+                registry,
+                harnessFactory,
+                platformState,
+                null,
+                null,
+                orchestrationDecisionModel,
+                new RootTaskBudgetManager(),
+                checkpointStore,
                 false);
     }
 
@@ -329,7 +356,23 @@ public class AgentRuntimeService implements AgentRuntime {
     public List<Map<String, Object>> runtimeToolManifest(
             String agentId, String tenantId, String userId) {
         AgentDefinition definition = definition(agentId);
-        agent(definition, tenantId, userId);
+        try {
+            agent(definition, tenantId, userId);
+        } catch (RuntimeException unavailable) {
+            return definition.toolRefs().stream()
+                    .map(
+                            ref ->
+                                    Map.<String, Object>of(
+                                            "tool_id",
+                                            ref,
+                                            "source",
+                                            "configured",
+                                            "runtime_available",
+                                            false,
+                                            "unavailable_reason",
+                                            failureMessage(unavailable)))
+                    .toList();
+        }
         return toolGovernance == null
                 ? definition.toolRefs().stream()
                         .map(ref -> Map.<String, Object>of("tool_id", ref, "source", "configured"))
@@ -355,22 +398,54 @@ public class AgentRuntimeService implements AgentRuntime {
     }
 
     private Mono<ChatResponse> runSupervisor(AgentDefinition definition, ChatRequest request) {
-        return planSupervisor(definition, request)
+        SupervisorResume resume = supervisorResume(definition, request);
+        if (resume.completed() != null) {
+            return Mono.just(recoveredSupervisorResponse(definition, request, resume.completed()));
+        }
+        Mono<SupervisorPlan> planned =
+                resume.plan() == null
+                        ? planSupervisor(definition, request)
+                                .doOnNext(
+                                        plan ->
+                                                checkpointSupervisor(
+                                                        definition,
+                                                        request,
+                                                        "PLAN_COMMITTED",
+                                                        plan,
+                                                        plan.steps().isEmpty()
+                                                                ? null
+                                                                : plan.steps().get(0),
+                                                        plan.steps().stream().skip(1).toList(),
+                                                        List.of(),
+                                                        List.of(),
+                                                        false,
+                                                        null))
+                        : Mono.just(resume.plan());
+        return planned
                 .flatMap(
                         plan -> {
                             if (plan.steps().isEmpty()) {
                                 return runSingle(definition, request);
                             }
-                            SupervisorStep first = plan.steps().get(0);
+                            SupervisorStep first =
+                                    resume.plan() == null ? plan.steps().get(0) : resume.current();
                             List<SupervisorStep> remaining =
-                                    plan.steps().stream().skip(1).toList();
+                                    resume.plan() == null
+                                            ? plan.steps().stream().skip(1).toList()
+                                            : resume.remaining();
                             return runSupervisorSteps(
                                             definition,
                                             request,
                                             first,
                                             remaining,
-                                            List.of(),
-                                            List.of())
+                                            resume.plan() == null
+                                                    ? List.of()
+                                                    : resume.replies(),
+                                            resume.plan() == null
+                                                    ? List.of()
+                                                    : resume.revisions(),
+                                            resume.plan() != null && resume.needsRevision(),
+                                            plan)
                                     .flatMap(
                                             supervisorRun ->
                                                     callAgent(
@@ -391,7 +466,15 @@ public class AgentRuntimeService implements AgentRuntime {
                                                                                             execution.envelope(),
                                                                                             definition,
                                                                                             plan,
-                                                                                            supervisorRun))));
+                                                                                            supervisorRun)))
+                                                            .doOnNext(
+                                                                    response ->
+                                                                            checkpointSupervisorCompleted(
+                                                                                    definition,
+                                                                                    request,
+                                                                                    plan,
+                                                                                    supervisorRun,
+                                                                                    response)));
                         });
     }
 
@@ -402,15 +485,25 @@ public class AgentRuntimeService implements AgentRuntime {
             return Mono.error(new AgentRuntimeException("Pipeline agent has no steps: " + definition.agentId()));
         }
         Instant startedAt = Instant.now();
+        PipelineResume resume = pipelineResume(definition, request);
+        java.util.Set<String> visited = new java.util.HashSet<>(resume.visited());
         return runPipelineSteps(
                         definition,
                         request,
                         steps,
-                        0,
-                        PipelineValue.initial(request.message()),
-                        new java.util.HashSet<>())
+                        resume.nextIndex(),
+                        resume.value(),
+                        visited)
                 .map(
-                        execution ->
+                        execution -> {
+                            checkpointPipeline(
+                                    definition,
+                                    request,
+                                    steps.size(),
+                                    execution.value(),
+                                    visited,
+                                    true);
+                            return
                                 response(
                                         definition.agentId(),
                                         request,
@@ -420,7 +513,8 @@ public class AgentRuntimeService implements AgentRuntime {
                                                 definition.agentId(),
                                                 execution.value(),
                                                 startedAt,
-                                                Map.of("orchestration", "PIPELINE", "steps", steps.size()))));
+                                                Map.of("orchestration", "PIPELINE", "steps", steps.size())));
+                        });
     }
 
     private Mono<PipelineStepExecution> runPipelineSteps(
@@ -440,28 +534,46 @@ public class AgentRuntimeService implements AgentRuntime {
         return runPipelineStep(step, request, input)
                 .flatMap(
                         execution ->
-                                runPipelineSteps(
-                                        definition,
-                                        request,
-                                        steps,
-                                        nextPipelineIndex(
-                                                steps,
-                                                index,
-                                                execution.value().transitionStatus()),
-                                        execution.value(),
-                                        visited));
+                                {
+                                    int next =
+                                            nextPipelineIndex(
+                                                    steps,
+                                                    index,
+                                                    execution.value().transitionStatus());
+                                    checkpointPipeline(
+                                            definition,
+                                            request,
+                                            next,
+                                            execution.value(),
+                                            visited,
+                                            false);
+                                    return runPipelineSteps(
+                                            definition,
+                                            request,
+                                            steps,
+                                            next,
+                                            execution.value(),
+                                            visited);
+                                });
     }
 
     private Mono<PipelineStepExecution> runPipelineStep(
             PipelineStep step, ChatRequest request, PipelineValue input) {
         AgentDefinition target = definition(step.agentId());
+        TaskContext childContext =
+                orchestrationChildContext(
+                        request.taskContext(),
+                        request.taskContext().targetAgentId(),
+                        target.agentId(),
+                        step.stepId(),
+                        "pipeline:" + step.stepId());
         ChatRequest child =
                 new ChatRequest(
                         request.tenantId(),
                         request.userId(),
                         sessionKey(request) + "_" + pathSafe(step.stepId(), "step"),
                         pipelineStepMessage(step, input),
-                        request.taskContext().child(request.taskContext().targetAgentId(), target.agentId(), step.stepId()),
+                        childContext,
                         request.images());
         Mono<PipelineStepExecution> guarded =
                 executeDefinition(target, child)
@@ -514,17 +626,38 @@ public class AgentRuntimeService implements AgentRuntime {
         if (steps.isEmpty()) {
             return Flux.error(new AgentRuntimeException("Pipeline agent has no steps: " + definition.agentId()));
         }
+        PipelineResume resume = pipelineResume(definition, request);
         return Flux.concat(
                 Flux.just(agentPipelineEvent(definition.agentId(), "pipeline_start", "Running Agent pipeline " + definition.agentId())),
-                streamPipelineStep(steps, 0, request, PipelineValue.initial(request.message())));
+                streamPipelineStep(
+                        definition,
+                        steps,
+                        resume.nextIndex(),
+                        request,
+                        resume.value(),
+                        new java.util.HashSet<>(resume.visited())));
     }
 
     private Flux<AgentEventEnvelope> streamPipelineStep(
-            List<PipelineStep> steps, int index, ChatRequest request, PipelineValue input) {
-        if (index >= steps.size()) return Flux.empty();
+            AgentDefinition definition,
+            List<PipelineStep> steps,
+            int index,
+            ChatRequest request,
+            PipelineValue input,
+            java.util.Set<String> visited) {
+        if (index >= steps.size()) {
+            checkpointPipeline(definition, request, index, input, visited, true);
+            return Flux.just(
+                    pipelineRecoveredResultEvent(definition, input));
+        }
         PipelineStep step = steps.get(index);
+        if (!visited.add(step.stepId())) {
+            return Flux.error(
+                    new AgentRuntimeException(
+                            "Pipeline cycle detected at step: " + step.stepId()));
+        }
         if (index == steps.size() - 1 && step.transitions().isEmpty()) {
-            return streamPipelineFinalStep(step, request, input);
+            return streamPipelineFinalStep(definition, step, request, input, visited);
         }
         return Flux.concat(
                 Flux.just(agentPipelineEvent(step.agentId(), "pipeline_step_start", "Start pipeline step " + safe(step.stepId(), "step") + " -> " + step.agentId())),
@@ -532,21 +665,37 @@ public class AgentRuntimeService implements AgentRuntime {
                 runPipelineStep(step, request, input)
                         .flatMapMany(
                                 execution ->
-                                        Flux.concat(
-                                                pipelineAgentSummaryEvents(step.agentId(), "end"),
-                                                Flux.just(
-                                                        pipelineStepResultEvent(
-                                                                step, execution.value(), false)),
-                                                streamPipelineStep(
-                                                        steps,
-                                                        nextPipelineIndex(
-                                                                steps,
-                                                                index,
-                                                                execution
-                                                                        .value()
-                                                                        .transitionStatus()),
-                                                        request,
-                                                        execution.value()))));
+                                        {
+                                            int next =
+                                                    nextPipelineIndex(
+                                                            steps,
+                                                            index,
+                                                            execution
+                                                                    .value()
+                                                                    .transitionStatus());
+                                            checkpointPipeline(
+                                                    definition,
+                                                    request,
+                                                    next,
+                                                    execution.value(),
+                                                    visited,
+                                                    false);
+                                            return Flux.concat(
+                                                    pipelineAgentSummaryEvents(
+                                                            step.agentId(), "end"),
+                                                    Flux.just(
+                                                            pipelineStepResultEvent(
+                                                                    step,
+                                                                    execution.value(),
+                                                                    false)),
+                                                    streamPipelineStep(
+                                                            definition,
+                                                            steps,
+                                                            next,
+                                                            request,
+                                                            execution.value(),
+                                                            visited));
+                                        }));
     }
 
     static int nextPipelineIndex(List<PipelineStep> steps, int index, String status) {
@@ -569,13 +718,24 @@ public class AgentRuntimeService implements AgentRuntime {
     }
 
     private Flux<AgentEventEnvelope> streamPipelineFinalStep(
-            PipelineStep step, ChatRequest request, PipelineValue input) {
+            AgentDefinition definition,
+            PipelineStep step,
+            ChatRequest request,
+            PipelineValue input,
+            java.util.Set<String> visited) {
         AgentDefinition target = definition(step.agentId());
+        TaskContext childContext =
+                orchestrationChildContext(
+                        request.taskContext(),
+                        request.taskContext().targetAgentId(),
+                        target.agentId(),
+                        step.stepId(),
+                        "pipeline:" + step.stepId());
         ChatRequest child =
                 new ChatRequest(
                         request.tenantId(), request.userId(), sessionKey(request) + "_" + pathSafe(step.stepId(), "step"),
                         pipelineStepMessage(step, input),
-                        request.taskContext().child(request.taskContext().targetAgentId(), target.agentId(), step.stepId()),
+                        childContext,
                         request.images());
         PipelineStreamAccumulator accumulator = new PipelineStreamAccumulator();
         Flux<AgentEventEnvelope> execution =
@@ -585,10 +745,17 @@ public class AgentRuntimeService implements AgentRuntime {
                 Flux.just(agentPipelineEvent(target.agentId(), "pipeline_final_step", "Streaming final pipeline step " + safe(step.stepId(), "step") + " -> " + target.agentId())),
                 execution,
                 Flux.defer(
-                        () ->
-                                Flux.just(
-                                        pipelineStepResultEvent(
-                                                step, accumulator.value(), true))));
+                        () -> {
+                            PipelineValue value = accumulator.value();
+                            checkpointPipeline(
+                                    definition,
+                                    request,
+                                    definition.orchestration().pipeline().size(),
+                                    value,
+                                    visited,
+                                    true);
+                            return Flux.just(pipelineStepResultEvent(step, value, true));
+                        }));
     }
 
     /** Executes the independent Workflow graph; nodes and edges are the only execution model. */
@@ -1076,36 +1243,63 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private Flux<AgentEventEnvelope> streamSupervisor(
             AgentDefinition definition, ChatRequest request) {
+        SupervisorResume resume = supervisorResume(definition, request);
+        if (resume.completed() != null) {
+            return Flux.just(supervisorRecoveredResultEvent(definition, resume.completed()));
+        }
+        Mono<SupervisorPlan> planned =
+                resume.plan() == null
+                        ? planSupervisor(definition, request)
+                                .doOnNext(
+                                        plan ->
+                                                checkpointSupervisor(
+                                                        definition,
+                                                        request,
+                                                        "PLAN_COMMITTED",
+                                                        plan,
+                                                        plan.steps().isEmpty()
+                                                                ? null
+                                                                : plan.steps().get(0),
+                                                        plan.steps().stream().skip(1).toList(),
+                                                        List.of(),
+                                                        List.of(),
+                                                        false,
+                                                        null))
+                        : Mono.just(resume.plan());
         return Flux.concat(
                 Flux.just(supervisorEvent(definition)),
-                Flux.just(supervisorPlanStartEvent(definition)),
-                planSupervisor(definition, request)
+                resume.plan() == null
+                        ? Flux.just(supervisorPlanStartEvent(definition))
+                        : Flux.empty(),
+                planned
                         .flatMapMany(
                                 plan -> {
                                     if (plan.steps().isEmpty()) {
-                                        return Flux.concat(
-                                                Flux.just(supervisorPlanEvent(definition, plan)),
-                                                capabilityEvents(
-                                                        definition,
-                                                        request.tenantId(),
-                                                        request.userId()),
-                                                streamAgent(
-                                                        definition,
-                                                        request.message(),
-                                                        runtimeContext(request),
-                                                        request.taskContext(),
-                                                        request.images(),
-                                                        request.tenantId(),
-                                                        request.userId()));
+                                        return supervisorDirectStream(
+                                                definition, request, plan);
                                     }
                                     return Flux.concat(
                                             Flux.just(supervisorPlanEvent(definition, plan)),
                                             streamSupervisorSteps(
                                                     definition,
                                                     request,
-                                                    plan.steps().get(0),
-                                                    plan.steps().stream().skip(1).toList(),
-                                                    List.of()));
+                                                    resume.plan() == null
+                                                            ? plan.steps().get(0)
+                                                            : resume.current(),
+                                                    resume.plan() == null
+                                                            ? plan.steps().stream()
+                                                                    .skip(1)
+                                                                    .toList()
+                                                            : resume.remaining(),
+                                                    resume.plan() == null
+                                                            ? List.of()
+                                                            : resume.replies(),
+                                                    resume.plan() == null
+                                                            ? List.of()
+                                                            : resume.revisions(),
+                                                    resume.plan() != null
+                                                            && resume.needsRevision(),
+                                                    plan));
                                 }));
     }
 
@@ -1114,9 +1308,92 @@ public class AgentRuntimeService implements AgentRuntime {
             ChatRequest request,
             SupervisorStep current,
             List<SupervisorStep> remaining,
-            List<SubagentReply> completed) {
+            List<SubagentReply> completed,
+            List<SupervisorRevision> revisions,
+            boolean needsRevision,
+            SupervisorPlan plan) {
         return Flux.defer(
                 () -> {
+                    if (needsRevision) {
+                        if (completed.size() >= supervisorStepBudget(supervisor)) {
+                            return supervisorSummaryStream(
+                                    supervisor,
+                                    request,
+                                    completed,
+                                    revisions,
+                                    plan,
+                                    "max_steps");
+                        }
+                        return Flux.concat(
+                                Flux.just(
+                                        supervisorReviseStartEvent(
+                                                supervisor, completed.size())),
+                                reviseSupervisor(
+                                                supervisor,
+                                                request.message(),
+                                                remaining,
+                                                completed,
+                                                request.taskContext().rootTaskId())
+                                        .flatMapMany(
+                                                revision -> {
+                                                    List<SupervisorRevision> revised =
+                                                            append(revisions, revision);
+                                                    checkpointSupervisor(
+                                                            supervisor,
+                                                            request,
+                                                            revision.finish()
+                                                                            || revision.next()
+                                                                                    == null
+                                                                    ? "DELEGATION_COMPLETED"
+                                                                    : "REVISION_COMMITTED",
+                                                            plan,
+                                                            revision.next(),
+                                                            revision.remaining(),
+                                                            completed,
+                                                            revised,
+                                                            false,
+                                                            null);
+                                                    Flux<AgentEventEnvelope> event =
+                                                            Flux.just(
+                                                                    supervisorReviseEvent(
+                                                                            supervisor,
+                                                                            revision,
+                                                                            completed.size()));
+                                                    if (revision.finish()
+                                                            || revision.next() == null) {
+                                                        return Flux.concat(
+                                                                event,
+                                                                supervisorSummaryStream(
+                                                                        supervisor,
+                                                                        request,
+                                                                        completed,
+                                                                        revised,
+                                                                        plan,
+                                                                        revision.source()
+                                                                                + ":finish"));
+                                                    }
+                                                    return Flux.concat(
+                                                            event,
+                                                            streamSupervisorSteps(
+                                                                    supervisor,
+                                                                    request,
+                                                                    revision.next(),
+                                                                    revision.remaining(),
+                                                                    completed,
+                                                                    revised,
+                                                                    false,
+                                                                    plan));
+                                                }));
+                    }
+                    if (current == null) {
+                        return supervisorSummaryStream(
+                                supervisor,
+                                request,
+                                completed,
+                                revisions,
+                                plan,
+                                "delegation_complete");
+                    }
                     List<SupervisorStep> batch = supervisorBatch(supervisor, current, remaining);
                     List<SupervisorStep> afterBatch = remainingAfterBatch(remaining, batch);
                     int firstStepIndex = completed.size() + 1;
@@ -1160,52 +1437,44 @@ public class AgentRuntimeService implements AgentRuntime {
                                                 }
                                                 Flux<AgentEventEnvelope> resultEvents =
                                                         Flux.fromIterable(completedEvents);
-                                                if (replies.size() >= supervisorStepBudget(supervisor)) {
+                                                boolean budgetReached =
+                                                        replies.size()
+                                                                >= supervisorStepBudget(supervisor);
+                                                checkpointSupervisor(
+                                                        supervisor,
+                                                        request,
+                                                        budgetReached
+                                                                ? "DELEGATION_COMPLETED"
+                                                                : "BATCH_COMMITTED",
+                                                        plan,
+                                                        null,
+                                                        afterBatch,
+                                                        replies,
+                                                        revisions,
+                                                        !budgetReached,
+                                                        null);
+                                                if (budgetReached) {
                                                     return Flux.concat(
                                                             resultEvents,
                                                             supervisorSummaryStream(
-                                                                    supervisor, request, replies, "max_steps"));
+                                                                    supervisor,
+                                                                    request,
+                                                                    replies,
+                                                                    revisions,
+                                                                    plan,
+                                                                    "max_steps"));
                                                 }
                                                 return Flux.concat(
                                                         resultEvents,
-                                                        Flux.just(
-                                                                supervisorReviseStartEvent(
-                                                                        supervisor, replies.size())),
-                                                        reviseSupervisor(
-                                                                        supervisor,
-                                                                        request.message(),
-                                                                        afterBatch,
-                                                                        replies,
-                                                                        request.taskContext()
-                                                                                .rootTaskId())
-                                                                .flatMapMany(
-                                                                        revision -> {
-                                                                            Flux<AgentEventEnvelope> revised =
-                                                                                    Flux.just(
-                                                                                            supervisorReviseEvent(
-                                                                                                    supervisor,
-                                                                                                    revision,
-                                                                                                    replies.size()));
-                                                                            if (revision.finish()
-                                                                                    || revision.next() == null) {
-                                                                                return Flux.concat(
-                                                                                        revised,
-                                                                                        supervisorSummaryStream(
-                                                                                                supervisor,
-                                                                                                request,
-                                                                                                replies,
-                                                                                                revision.source()
-                                                                                                        + ":finish"));
-                                                                            }
-                                                                            return Flux.concat(
-                                                                                    revised,
-                                                                                    streamSupervisorSteps(
-                                                                                            supervisor,
-                                                                                            request,
-                                                                                            revision.next(),
-                                                                                            revision.remaining(),
-                                                                                            replies));
-                                                                        }));
+                                                        streamSupervisorSteps(
+                                                                supervisor,
+                                                                request,
+                                                                null,
+                                                                afterBatch,
+                                                                replies,
+                                                                revisions,
+                                                                true,
+                                                                plan));
                                             });
                     return Flux.concat(started, executed);
                 });
@@ -1215,19 +1484,90 @@ public class AgentRuntimeService implements AgentRuntime {
             AgentDefinition supervisor,
             ChatRequest request,
             List<SubagentReply> replies,
+            List<SupervisorRevision> revisions,
+            SupervisorPlan plan,
             String reason) {
+        PipelineStreamAccumulator accumulator = new PipelineStreamAccumulator();
+        Flux<AgentEventEnvelope> summary =
+                streamAgent(
+                                supervisor,
+                                supervisorSummaryMessage(supervisor, request.message(), replies),
+                                runtimeContext(request),
+                                request.taskContext(),
+                                request.images(),
+                                request.tenantId(),
+                                request.userId())
+                        .doOnNext(accumulator::accept);
         return Flux.concat(
                 Flux.just(supervisorSummaryStartEvent(supervisor, replies.size(), reason)),
                 capabilityEvents(supervisor, request.tenantId(), request.userId()),
-                streamAgent(
-                        supervisor,
-                        supervisorSummaryMessage(supervisor, request.message(), replies),
-                        runtimeContext(request),
-                        request.taskContext(),
-                        request.images(),
-                        request.tenantId(),
-                        request.userId()),
+                summary,
+                Flux.defer(
+                        () -> {
+                            PipelineValue value = accumulator.value();
+                            checkpointSupervisor(
+                                    supervisor,
+                                    request,
+                                    "COMPLETED",
+                                    plan,
+                                    null,
+                                    List.of(),
+                                    replies,
+                                    revisions,
+                                    false,
+                                    new RecoveredSupervisorResult(
+                                            value.text(),
+                                            value.result(),
+                                            Map.of(
+                                                    "orchestration",
+                                                    "SUPERVISOR",
+                                                    "recovered_from_stream",
+                                                    true,
+                                                    "child_call_count",
+                                                    replies.size(),
+                                                    "revision_count",
+                                                    revisions.size())));
+                            return Flux.empty();
+                        }),
                 Flux.just(supervisorSummaryEndEvent(supervisor, replies.size())));
+    }
+
+    private Flux<AgentEventEnvelope> supervisorDirectStream(
+            AgentDefinition supervisor, ChatRequest request, SupervisorPlan plan) {
+        PipelineStreamAccumulator accumulator = new PipelineStreamAccumulator();
+        Flux<AgentEventEnvelope> execution =
+                streamAgent(
+                                supervisor,
+                                request.message(),
+                                runtimeContext(request),
+                                request.taskContext(),
+                                request.images(),
+                                request.tenantId(),
+                                request.userId())
+                        .doOnNext(accumulator::accept);
+        return Flux.concat(
+                Flux.just(supervisorPlanEvent(supervisor, plan)),
+                capabilityEvents(supervisor, request.tenantId(), request.userId()),
+                execution,
+                Flux.defer(
+                        () -> {
+                            PipelineValue value = accumulator.value();
+                            checkpointSupervisor(
+                                    supervisor,
+                                    request,
+                                    "COMPLETED",
+                                    plan,
+                                    null,
+                                    List.of(),
+                                    List.of(),
+                                    List.of(),
+                                    false,
+                                    new RecoveredSupervisorResult(
+                                            value.text(),
+                                            value.result(),
+                                            Map.of("orchestration", "SUPERVISOR")));
+                            return Flux.empty();
+                        }));
     }
 
     private Flux<AgentEventEnvelope> pipelineAgentSummaryEvents(String agentId, String phase) {
@@ -1498,38 +1838,84 @@ public class AgentRuntimeService implements AgentRuntime {
             SupervisorStep current,
             List<SupervisorStep> remaining,
             List<SubagentReply> completed,
-            List<SupervisorRevision> revisions) {
+            List<SupervisorRevision> revisions,
+            boolean needsRevision,
+            SupervisorPlan plan) {
+        if (needsRevision) {
+            if (completed.size() >= supervisorStepBudget(supervisor)) {
+                return Mono.just(new SupervisorExecution(completed, revisions));
+            }
+            return reviseSupervisor(
+                            supervisor,
+                            request.message(),
+                            remaining,
+                            completed,
+                            request.taskContext().rootTaskId())
+                    .flatMap(
+                            revision -> {
+                                List<SupervisorRevision> revised = append(revisions, revision);
+                                checkpointSupervisor(
+                                        supervisor,
+                                        request,
+                                        revision.finish() || revision.next() == null
+                                                ? "DELEGATION_COMPLETED"
+                                                : "REVISION_COMMITTED",
+                                        plan,
+                                        revision.next(),
+                                        revision.remaining(),
+                                        completed,
+                                        revised,
+                                        false,
+                                        null);
+                                if (revision.finish() || revision.next() == null) {
+                                    return Mono.just(
+                                            new SupervisorExecution(completed, revised));
+                                }
+                                return runSupervisorSteps(
+                                        supervisor,
+                                        request,
+                                        revision.next(),
+                                        revision.remaining(),
+                                        completed,
+                                        revised,
+                                        false,
+                                        plan);
+                            });
+        }
+        if (current == null) {
+            return Mono.just(new SupervisorExecution(completed, revisions));
+        }
         List<SupervisorStep> batch = supervisorBatch(supervisor, current, remaining);
         List<SupervisorStep> afterBatch = remainingAfterBatch(remaining, batch);
         return runSupervisorBatch(supervisor, request, batch, completed)
                 .flatMap(
                         batchReplies -> {
                             List<SubagentReply> replies = appendAll(completed, batchReplies);
+                            boolean budgetReached =
+                                    replies.size() >= supervisorStepBudget(supervisor);
+                            checkpointSupervisor(
+                                    supervisor,
+                                    request,
+                                    budgetReached ? "DELEGATION_COMPLETED" : "BATCH_COMMITTED",
+                                    plan,
+                                    null,
+                                    afterBatch,
+                                    replies,
+                                    revisions,
+                                    !budgetReached,
+                                    null);
                             if (replies.size() >= supervisorStepBudget(supervisor)) {
                                 return Mono.just(new SupervisorExecution(replies, revisions));
                             }
-                            return reviseSupervisor(
-                                            supervisor,
-                                            request.message(),
-                                            afterBatch,
-                                            replies,
-                                            request.taskContext().rootTaskId())
-                                    .flatMap(
-                                            revision -> {
-                                                List<SupervisorRevision> revised =
-                                                        append(revisions, revision);
-                                                if (revision.finish() || revision.next() == null) {
-                                                    return Mono.just(
-                                                            new SupervisorExecution(replies, revised));
-                                                }
-                                                return runSupervisorSteps(
-                                                        supervisor,
-                                                        request,
-                                                        revision.next(),
-                                                        revision.remaining(),
-                                                        replies,
-                                                        revised);
-                                            });
+                            return runSupervisorSteps(
+                                    supervisor,
+                                    request,
+                                    null,
+                                    afterBatch,
+                                    replies,
+                                    revisions,
+                                    true,
+                                    plan);
                         });
     }
 
@@ -1597,12 +1983,21 @@ public class AgentRuntimeService implements AgentRuntime {
                 scopedSubagentDefinition(definition(binding.targetAgentId()), binding);
         AgentExecutionPolicy policy = AgentExecutionPolicy.from(supervisor);
         String message = supervisorStepMessage(step, request.message(), completed, stepIndex);
+        ChatRequest primaryRequest =
+                withOrchestrationMetadata(
+                        request,
+                        "supervisor:"
+                                + supervisor.agentId()
+                                + ":"
+                                + stepIndex
+                                + ":"
+                                + binding.bindingId());
         long timeoutMs =
                 binding.timeoutMs() == null ? policy.subagentTimeoutMs() : binding.timeoutMs();
         Mono<TaskExecution> primary =
                 callAgent(
                                 target,
-                                request,
+                                primaryRequest,
                                 message,
                                 subagentContext(request, binding, stepIndex))
                         .timeout(Duration.ofMillis(timeoutMs))
@@ -1640,9 +2035,19 @@ public class AgentRuntimeService implements AgentRuntime {
                                                 scopedSubagentDefinition(
                                                         definition(binding.fallbackAgentId()),
                                                         binding);
+                                        ChatRequest fallbackRequest =
+                                                withOrchestrationMetadata(
+                                                        request,
+                                                        "supervisor:"
+                                                                + supervisor.agentId()
+                                                                + ":"
+                                                                + stepIndex
+                                                                + ":"
+                                                                + binding.bindingId()
+                                                                + ":fallback");
                                         yield callAgent(
                                                         fallback,
-                                                        request,
+                                                        fallbackRequest,
                                                         message
                                                                 + "\n\nThe primary specialist failed. Execute this task as the configured fallback.",
                                                         subagentContext(
@@ -2650,6 +3055,505 @@ public class AgentRuntimeService implements AgentRuntime {
                 Map.copyOf(payload));
     }
 
+    private AgentEventEnvelope pipelineRecoveredResultEvent(
+            AgentDefinition definition, PipelineValue value) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("summary", "Recovered completed pipeline result");
+        payload.put("agent_pipeline", true);
+        payload.put("orchestration", "PIPELINE");
+        payload.put("recovered", true);
+        payload.put("pipeline_contract", PipelineValue.VERSION);
+        payload.put("transition_status", value.transitionStatus());
+        payload.put("pipeline_value", value.contract());
+        return new AgentEventEnvelope(
+                "pipeline_recovered_" + Instant.now().toEpochMilli(),
+                "pipeline_result",
+                Instant.now().toString(),
+                definition.agentId(),
+                value.text(),
+                Map.copyOf(payload));
+    }
+
+    private AgentEventEnvelope supervisorRecoveredResultEvent(
+            AgentDefinition definition, RecoveredSupervisorResult recovered) {
+        Map<String, Object> payload = new LinkedHashMap<>(recovered.metadata());
+        payload.put("summary", "Recovered completed supervisor result");
+        payload.put("orchestration", "SUPERVISOR");
+        payload.put("recovered", true);
+        payload.put("business_result", recovered.result().contract());
+        return new AgentEventEnvelope(
+                "supervisor_recovered_" + Instant.now().toEpochMilli(),
+                "supervisor_result",
+                Instant.now().toString(),
+                definition.agentId(),
+                recovered.text(),
+                Map.copyOf(payload));
+    }
+
+    private PipelineResume pipelineResume(
+            AgentDefinition definition, ChatRequest request) {
+        PipelineValue initial = PipelineValue.initial(request.message());
+        if (checkpointStore == null) {
+            return new PipelineResume(0, initial, java.util.Set.of());
+        }
+        return checkpointStore
+                .load(
+                        request.taskContext().rootTaskId(),
+                        checkpointScope(definition, request))
+                .map(
+                        checkpoint -> {
+                            Map<String, Object> payload = checkpoint.payload();
+                            PipelineValue value =
+                                    PipelineValue.fromContract(payload.get("value"));
+                            int nextIndex = integer(payload.get("next_index"), 0);
+                            java.util.Set<String> visited =
+                                    new java.util.LinkedHashSet<>(
+                                            stringValues(payload.get("visited")));
+                            return new PipelineResume(
+                                    Math.max(0, nextIndex),
+                                    value == null ? initial : value,
+                                    java.util.Set.copyOf(visited));
+                        })
+                .orElseGet(() -> new PipelineResume(0, initial, java.util.Set.of()));
+    }
+
+    private void checkpointPipeline(
+            AgentDefinition definition,
+            ChatRequest request,
+            int nextIndex,
+            PipelineValue value,
+            java.util.Set<String> visited,
+            boolean completed) {
+        if (checkpointStore == null) return;
+        checkpointStore.save(
+                request.taskContext().rootTaskId(),
+                checkpointScope(definition, request),
+                completed ? "COMPLETED" : "STEP_COMMITTED",
+                Map.of(
+                        "mode", "PIPELINE",
+                        "agent_id", definition.agentId(),
+                        "next_index", Math.max(0, nextIndex),
+                        "value", value.contract(),
+                        "visited", List.copyOf(visited),
+                        "completed", completed));
+    }
+
+    private SupervisorResume supervisorResume(
+            AgentDefinition definition, ChatRequest request) {
+        if (checkpointStore == null) {
+            return SupervisorResume.empty();
+        }
+        return checkpointStore
+                .load(request.taskContext().rootTaskId(), checkpointScope(definition, request))
+                .map(
+                        checkpoint -> {
+                            Map<String, Object> payload = checkpoint.payload();
+                            SupervisorPlan plan = supervisorPlanFromContract(definition, payload.get("plan"));
+                            if (plan == null) {
+                                return SupervisorResume.empty();
+                            }
+                            RecoveredSupervisorResult completed =
+                                    recoveredSupervisorResult(payload.get("completed"));
+                            return new SupervisorResume(
+                                    plan,
+                                    supervisorStepFromContract(definition, payload.get("current")),
+                                    supervisorStepsFromContract(definition, payload.get("remaining")),
+                                    supervisorRepliesFromContract(definition, request, payload.get("replies")),
+                                    supervisorRevisionsFromContract(
+                                            definition, payload.get("revisions")),
+                                    Boolean.TRUE.equals(payload.get("needs_revision")),
+                                    completed);
+                        })
+                .orElseGet(SupervisorResume::empty);
+    }
+
+    private void checkpointSupervisor(
+            AgentDefinition definition,
+            ChatRequest request,
+            String phase,
+            SupervisorPlan plan,
+            SupervisorStep current,
+            List<SupervisorStep> remaining,
+            List<SubagentReply> replies,
+            List<SupervisorRevision> revisions,
+            boolean needsRevision,
+            RecoveredSupervisorResult completed) {
+        if (checkpointStore == null) return;
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("mode", "SUPERVISOR");
+        payload.put("agent_id", definition.agentId());
+        payload.put("plan", supervisorPlanContract(plan));
+        payload.put("current", current == null ? Map.of() : supervisorStepContract(current));
+        payload.put(
+                "remaining",
+                remaining == null
+                        ? List.of()
+                        : remaining.stream().map(this::supervisorStepContract).toList());
+        payload.put(
+                "replies",
+                replies == null
+                        ? List.of()
+                        : replies.stream().map(this::supervisorReplyContract).toList());
+        payload.put(
+                "revisions",
+                revisions == null
+                        ? List.of()
+                        : revisions.stream().map(this::supervisorRevisionContract).toList());
+        payload.put("needs_revision", needsRevision);
+        if (completed != null) {
+            payload.put("completed", recoveredSupervisorResultContract(completed));
+        }
+        checkpointStore.save(
+                request.taskContext().rootTaskId(),
+                checkpointScope(definition, request),
+                phase,
+                Map.copyOf(payload));
+    }
+
+    private void checkpointSupervisorCompleted(
+            AgentDefinition definition,
+            ChatRequest request,
+            SupervisorPlan plan,
+            SupervisorExecution execution,
+            ChatResponse response) {
+        AgentBusinessResult result =
+                response != null
+                                && response.task() != null
+                                && response.task().result() != null
+                        ? response.task().result().businessResult()
+                        : AgentBusinessResult.fromText(response == null ? "" : response.text());
+        Map<String, Object> metadata =
+                response != null && response.task() != null
+                        ? response.task().metadata()
+                        : Map.of("orchestration", "SUPERVISOR");
+        RecoveredSupervisorResult completed =
+                new RecoveredSupervisorResult(
+                        response == null ? "" : response.text(), result, metadata);
+        checkpointSupervisor(
+                definition,
+                request,
+                "COMPLETED",
+                plan,
+                null,
+                List.of(),
+                execution.replies(),
+                execution.revisions(),
+                false,
+                completed);
+    }
+
+    private ChatResponse recoveredSupervisorResponse(
+            AgentDefinition definition,
+            ChatRequest request,
+            RecoveredSupervisorResult recovered) {
+        Instant finishedAt = Instant.now();
+        Instant startedAt = finishedAt;
+        TaskContext context =
+                request.taskContext()
+                        .child(
+                                request.taskContext().sourceAgentId(),
+                                definition.agentId(),
+                                "supervisor-recovery");
+        TaskRequest taskRequest =
+                new TaskRequest(context, Map.of("text", safe(request.message(), "")));
+        AgentBusinessResult business = recovered.result();
+        TaskResult result =
+                new TaskResult(
+                        context.taskId(),
+                        AgentBusinessResult.FAILED.equals(business.status())
+                                ? TaskStatus.FAILED
+                                : TaskStatus.COMPLETED,
+                        recovered.text(),
+                        businessData(business.data()),
+                        business.summary(),
+                        business.artifacts(),
+                        business.error(),
+                        Map.of("recovered", true, "duration_ms", 0));
+        Map<String, Object> metadata = new LinkedHashMap<>(recovered.metadata());
+        metadata.put("recovered", true);
+        metadata.put("orchestration", "SUPERVISOR");
+        AgentTaskEnvelope envelope =
+                AgentTaskEnvelope.completed(
+                        taskRequest, result, startedAt, finishedAt, Map.copyOf(metadata));
+        return response(
+                definition.agentId(), request, safe(recovered.text(), business.summary()), envelope);
+    }
+
+    private Map<String, Object> supervisorPlanContract(SupervisorPlan plan) {
+        if (plan == null) return Map.of();
+        return Map.of(
+                "steps", plan.steps().stream().map(this::supervisorStepContract).toList(),
+                "source", safe(plan.source(), ""),
+                "reason", safe(plan.reason(), ""),
+                "model_id", safe(plan.modelId(), ""),
+                "duration_ms", Math.max(0L, plan.durationMs()));
+    }
+
+    private Map<String, Object> supervisorStepContract(SupervisorStep step) {
+        if (step == null) return Map.of();
+        return Map.of(
+                "binding_id", step.binding().bindingId(),
+                "instruction", safe(step.instruction(), ""),
+                "parallel_group", safe(step.parallelGroup(), ""));
+    }
+
+    private Map<String, Object> supervisorReplyContract(SubagentReply reply) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("binding_id", reply.binding().bindingId());
+        value.put("target_agent_id", reply.target().agentId());
+        value.put("step_index", reply.stepIndex());
+        value.put("instruction", reply.instruction());
+        value.put("fallback_used", reply.fallbackUsed());
+        value.put("failure_reason", reply.failureReason());
+        value.put("business_result", reply.execution().businessResult().contract());
+        value.put("task_id", reply.execution().envelope().taskId());
+        value.put("duration_ms", reply.execution().envelope().durationMs());
+        return Map.copyOf(value);
+    }
+
+    private Map<String, Object> supervisorRevisionContract(SupervisorRevision revision) {
+        return Map.of(
+                "finish", revision.finish(),
+                "next", revision.next() == null ? Map.of() : supervisorStepContract(revision.next()),
+                "remaining", revision.remaining().stream().map(this::supervisorStepContract).toList(),
+                "source", safe(revision.source(), ""),
+                "reason", safe(revision.reason(), ""),
+                "model_id", safe(revision.modelId(), ""),
+                "duration_ms", Math.max(0L, revision.durationMs()));
+    }
+
+    private Map<String, Object> recoveredSupervisorResultContract(
+            RecoveredSupervisorResult recovered) {
+        return Map.of(
+                "text", safe(recovered.text(), ""),
+                "result", recovered.result().contract(),
+                "metadata", recovered.metadata());
+    }
+
+    private SupervisorPlan supervisorPlanFromContract(
+            AgentDefinition definition, Object value) {
+        if (!(value instanceof Map<?, ?> map)) return null;
+        List<SupervisorStep> steps = supervisorStepsFromContract(definition, map.get("steps"));
+        return new SupervisorPlan(
+                steps,
+                mapString(map, "source"),
+                mapString(map, "reason"),
+                mapString(map, "model_id"),
+                Math.max(0L, longValue(map.get("duration_ms"), 0L)));
+    }
+
+    private SupervisorStep supervisorStepFromContract(
+            AgentDefinition definition, Object value) {
+        if (!(value instanceof Map<?, ?> map) || map.isEmpty()) return null;
+        String bindingId = mapString(map, "binding_id");
+        SubagentBinding binding =
+                definition.orchestration().subagents().stream()
+                        .filter(candidate -> candidate.bindingId().equals(bindingId))
+                        .findFirst()
+                        .orElseThrow(
+                                () ->
+                                        new AgentRuntimeException(
+                                                "Supervisor checkpoint references missing binding: "
+                                                        + bindingId));
+        return new SupervisorStep(
+                binding,
+                mapString(map, "instruction"),
+                mapString(map, "parallel_group"));
+    }
+
+    private List<SupervisorStep> supervisorStepsFromContract(
+            AgentDefinition definition, Object value) {
+        if (!(value instanceof List<?> list)) return List.of();
+        List<SupervisorStep> steps = new ArrayList<>();
+        for (Object item : list) {
+            SupervisorStep step = supervisorStepFromContract(definition, item);
+            if (step != null) steps.add(step);
+        }
+        return List.copyOf(steps);
+    }
+
+    private List<SubagentReply> supervisorRepliesFromContract(
+            AgentDefinition supervisor, ChatRequest request, Object value) {
+        if (!(value instanceof List<?> list)) return List.of();
+        List<SubagentReply> replies = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) continue;
+            SupervisorStep step = supervisorStepFromContract(supervisor, map);
+            if (step == null) continue;
+            String targetAgentId = mapString(map, "target_agent_id");
+            AgentDefinition target =
+                    definition(
+                            targetAgentId.isBlank()
+                                    ? step.binding().targetAgentId()
+                                    : targetAgentId);
+            AgentBusinessResult business =
+                    AgentBusinessResult.fromContract(map.get("business_result"));
+            if (business == null) {
+                throw new AgentRuntimeException(
+                        "Supervisor checkpoint has an invalid business result for binding: "
+                                + step.binding().bindingId());
+            }
+            int stepIndex = Math.max(1, integer(map.get("step_index"), replies.size() + 1));
+            long durationMs = Math.max(0L, longValue(map.get("duration_ms"), 0L));
+            Instant finishedAt = Instant.now();
+            Instant startedAt = finishedAt.minusMillis(durationMs);
+            String taskId = mapString(map, "task_id");
+            TaskContext child =
+                    new TaskContext(
+                            taskId,
+                            request.taskContext().taskId(),
+                            request.taskContext().rootTaskId(),
+                            supervisor.agentId(),
+                            target.agentId(),
+                            step.binding().bindingId(),
+                            request.taskContext().depth() + 1,
+                            request.taskContext().deadlineAt(),
+                            Map.of("recovered", true));
+            TaskRequest taskRequest =
+                    new TaskRequest(child, Map.of("text", mapString(map, "instruction")));
+            TaskResult taskResult =
+                    new TaskResult(
+                            child.taskId(),
+                            AgentBusinessResult.FAILED.equals(business.status())
+                                    ? TaskStatus.FAILED
+                                    : TaskStatus.COMPLETED,
+                            business.summary(),
+                            businessData(business.data()),
+                            business.summary(),
+                            business.artifacts(),
+                            business.error(),
+                            Map.of("duration_ms", durationMs, "recovered", true));
+            AgentTaskEnvelope envelope =
+                    AgentTaskEnvelope.completed(
+                            taskRequest,
+                            taskResult,
+                            startedAt,
+                            finishedAt,
+                            Map.of("recovered", true));
+            Msg message =
+                    Msg.builder()
+                            .role(io.agentscope.core.message.MsgRole.ASSISTANT)
+                            .textContent(decisionJson(business.contract()))
+                            .build();
+            replies.add(
+                    new SubagentReply(
+                            step.binding(),
+                            target,
+                            new TaskExecution(message, envelope, business),
+                            stepIndex,
+                            mapString(map, "instruction"),
+                            Boolean.TRUE.equals(map.get("fallback_used")),
+                            mapString(map, "failure_reason")));
+        }
+        return List.copyOf(replies);
+    }
+
+    private List<SupervisorRevision> supervisorRevisionsFromContract(
+            AgentDefinition definition, Object value) {
+        if (!(value instanceof List<?> list)) return List.of();
+        List<SupervisorRevision> revisions = new ArrayList<>();
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) continue;
+            revisions.add(
+                    new SupervisorRevision(
+                            Boolean.TRUE.equals(map.get("finish")),
+                            supervisorStepFromContract(definition, map.get("next")),
+                            supervisorStepsFromContract(definition, map.get("remaining")),
+                            mapString(map, "source"),
+                            mapString(map, "reason"),
+                            mapString(map, "model_id"),
+                            Math.max(0L, longValue(map.get("duration_ms"), 0L))));
+        }
+        return List.copyOf(revisions);
+    }
+
+    private static RecoveredSupervisorResult recoveredSupervisorResult(Object value) {
+        if (!(value instanceof Map<?, ?> map)) return null;
+        AgentBusinessResult result = AgentBusinessResult.fromContract(map.get("result"));
+        if (result == null) return null;
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        if (map.get("metadata") instanceof Map<?, ?> raw) {
+            raw.forEach((key, item) -> metadata.put(String.valueOf(key), item));
+        }
+        return new RecoveredSupervisorResult(
+                mapString(map, "text"), result, Map.copyOf(metadata));
+    }
+
+    private static String mapString(Map<?, ?> map, String key) {
+        Object value = map.get(key);
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private static long longValue(Object value, long fallback) {
+        if (value instanceof Number number) return number.longValue();
+        try {
+            return value == null ? fallback : Long.parseLong(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static String checkpointScope(
+            AgentDefinition definition, ChatRequest request) {
+        String path =
+                request.taskContext().metadata().get("orchestration_path") == null
+                        ? "root"
+                        : String.valueOf(
+                                request.taskContext().metadata().get("orchestration_path"));
+        return path
+                + "::"
+                + definition.agentId()
+                + "::"
+                + definition.orchestration().mode().name();
+    }
+
+    private static TaskContext orchestrationChildContext(
+            TaskContext parent,
+            String sourceAgentId,
+            String targetAgentId,
+            String stepId,
+            String segment) {
+        TaskContext child = parent.child(sourceAgentId, targetAgentId, stepId);
+        return orchestrationMetadata(child, segment);
+    }
+
+    private static ChatRequest withOrchestrationMetadata(
+            ChatRequest request, String segment) {
+        return new ChatRequest(
+                request.tenantId(),
+                request.userId(),
+                request.sessionId(),
+                request.message(),
+                orchestrationMetadata(request.taskContext(), segment),
+                request.images());
+    }
+
+    private static TaskContext orchestrationMetadata(TaskContext context, String segment) {
+        String parentPath =
+                context.metadata().get("orchestration_path") == null
+                        ? "root"
+                        : String.valueOf(context.metadata().get("orchestration_path"));
+        String path = parentPath + "/" + safe(segment, "step");
+        return context.withMetadata("orchestration_path", path)
+                .withMetadata(
+                        "idempotency_key",
+                        context.rootTaskId() + "::" + path);
+    }
+
+    private static int integer(Object value, int fallback) {
+        if (value instanceof Number number) return number.intValue();
+        try {
+            return value == null ? fallback : Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private static List<String> stringValues(Object value) {
+        if (!(value instanceof List<?> list)) return List.of();
+        return list.stream().map(String::valueOf).filter(item -> !item.isBlank()).toList();
+    }
+
     private AgentEventEnvelope rootBudgetEvent(
             AgentDefinition definition, TaskContext taskContext) {
         Map<String, Object> snapshot =
@@ -3205,6 +4109,38 @@ public class AgentRuntimeService implements AgentRuntime {
     private record BranchResult(String joinNodeId, ContractValue value) {}
 
     private record PipelineStepExecution(PipelineValue value, AgentTaskEnvelope task) {}
+
+    private record PipelineResume(
+            int nextIndex, PipelineValue value, java.util.Set<String> visited) {}
+
+    private record SupervisorResume(
+            SupervisorPlan plan,
+            SupervisorStep current,
+            List<SupervisorStep> remaining,
+            List<SubagentReply> replies,
+            List<SupervisorRevision> revisions,
+            boolean needsRevision,
+            RecoveredSupervisorResult completed) {
+        private SupervisorResume {
+            remaining = remaining == null ? List.of() : List.copyOf(remaining);
+            replies = replies == null ? List.of() : List.copyOf(replies);
+            revisions = revisions == null ? List.of() : List.copyOf(revisions);
+        }
+
+        private static SupervisorResume empty() {
+            return new SupervisorResume(
+                    null, null, List.of(), List.of(), List.of(), false, null);
+        }
+    }
+
+    private record RecoveredSupervisorResult(
+            String text, AgentBusinessResult result, Map<String, Object> metadata) {
+        private RecoveredSupervisorResult {
+            text = text == null ? "" : text;
+            result = result == null ? AgentBusinessResult.fromText(text) : result;
+            metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+        }
+    }
 
     private static final class PipelineStreamAccumulator {
         private final StringBuilder text = new StringBuilder();

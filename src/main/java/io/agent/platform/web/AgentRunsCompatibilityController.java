@@ -4,7 +4,6 @@
 package io.agent.platform.web;
 
 import io.agent.platform.runtime.AgentEventEnvelope;
-import io.agent.platform.runtime.AgentRuntime;
 import io.agent.platform.runtime.ChatImage;
 import io.agent.platform.runtime.ChatRequest;
 import io.agent.platform.runtime.protocol.TaskContext;
@@ -17,6 +16,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.http.server.reactive.ServerHttpRequest;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -29,22 +29,22 @@ import reactor.core.publisher.Mono;
 public class AgentRunsCompatibilityController {
 
     private final PlatformCompatibilityState state;
-    private final AgentRuntime runtime;
     private final DocumentKnowledgeService documentKnowledgeService;
     private final PlatformAuthService auth;
     private final AgentAssetService agentAssetService;
+    private final DurableAgentRunService durableRuns;
 
     public AgentRunsCompatibilityController(
             PlatformCompatibilityState state,
-            AgentRuntime runtime,
             DocumentKnowledgeService documentKnowledgeService,
             PlatformAuthService auth,
-            AgentAssetService agentAssetService) {
+            AgentAssetService agentAssetService,
+            DurableAgentRunService durableRuns) {
         this.state = state;
-        this.runtime = runtime;
         this.documentKnowledgeService = documentKnowledgeService;
         this.auth = auth;
         this.agentAssetService = agentAssetService;
+        this.durableRuns = durableRuns;
     }
 
     @PostMapping(value = "/run/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -72,6 +72,15 @@ public class AgentRunsCompatibilityController {
         Map<String, Object> run = state.createRun(agentId, query, userId);
         String runId = string(run.get("run_id"), "");
         state.appendSessionMessage(agentId, sessionId, userId, "user", query);
+        ChatRequest chatRequest =
+                new ChatRequest(
+                        orgId,
+                        userId,
+                        sessionId,
+                        runtimeQuery,
+                        TaskContext.root(runId, agentId, agentId, null),
+                        images);
+        durableRuns.register(runId, agentId, chatRequest);
         AtomicReference<StringBuilder> answer = new AtomicReference<>(new StringBuilder());
         return Flux.concat(
                         Flux.just(
@@ -112,16 +121,7 @@ public class AgentRunsCompatibilityController {
                                                         retrieval.citations(),
                                                         "run_id",
                                                         runId))),
-                        runtime.stream(
-                                        agentId,
-                                        new ChatRequest(
-                                                orgId,
-                                                userId,
-                                                sessionId,
-                                                runtimeQuery,
-                                                TaskContext.root(
-                                                        runId, agentId, agentId, null),
-                                                images))
+                        durableRuns.stream(runId, agentId, chatRequest)
                                 .map(
                                         event -> {
                                             state.appendRunEventFromEnvelope(runId, event);
@@ -131,6 +131,7 @@ public class AgentRunsCompatibilityController {
                                 () -> {
                                     String text = answer.get().toString();
                                     Map<String, Object> finished = state.finishRun(runId, text);
+                                    durableRuns.succeeded(runId);
                                     state.appendSessionMessage(
                                             agentId, sessionId, userId, "assistant", text);
                                     return sse(
@@ -157,8 +158,23 @@ public class AgentRunsCompatibilityController {
                                 }))
                 .onErrorResume(
                         error -> {
-                            Map<String, Object> failed = state.failRun(runId, error);
                             String message = string(error.getMessage(), "执行失败");
+                            boolean cancelled = DurableAgentRunService.isCancellation(error);
+                            boolean leaseLost = DurableAgentRunService.isLeaseLost(error);
+                            Map<String, Object> failed;
+                            String status;
+                            if (cancelled) {
+                                failed = state.cancelRun(runId, message);
+                                durableRuns.cancelled(runId);
+                                status = "cancelled";
+                            } else if (leaseLost) {
+                                failed = state.markRunRecovering(runId);
+                                status = "recovering";
+                            } else {
+                                failed = state.failRun(runId, error);
+                                durableRuns.failed(runId);
+                                status = "failed";
+                            }
                             return Flux.just(
                                     sse(
                                             "activity",
@@ -170,7 +186,7 @@ public class AgentRunsCompatibilityController {
                                                     "title",
                                                     "AgentScope 调用失败",
                                                     "status",
-                                                    "failed",
+                                                    status,
                                                     "summary",
                                                     message)),
                                     sse(
@@ -181,12 +197,39 @@ public class AgentRunsCompatibilityController {
                                                     "run_id",
                                                     failed.get("run_id"),
                                                     "status",
-                                                    "failed",
+                                                    status,
                                                     "message",
                                                     message,
                                                     "error",
                                                     message)));
                         });
+    }
+
+    @PostMapping("/runs/{runId}/cancel")
+    public Map<String, Object> cancelRun(
+            @PathVariable("runId") String runId, ServerHttpRequest request) {
+        var cookie = request.getCookies().getFirst("platform_session");
+        var principal = auth.current(cookie == null ? "" : cookie.getValue());
+        if (principal == null) throw new PlatformAuthService.AuthException(401, "请先登录");
+        Map<String, Object> run = state.run(runId);
+        String owner = string(run.get("user_id"), "");
+        if ("unknown".equals(run.get("status"))
+                || (!"PLATFORM_ADMIN".equals(principal.role())
+                        && !principal.userId().equals(owner))) {
+            throw new PlatformAuthService.AuthException(404, "运行记录不存在或当前账号无权访问");
+        }
+        boolean accepted = durableRuns.requestCancellation(runId);
+        Map<String, Object> updated =
+                accepted ? state.requestRunCancellation(runId) : state.run(runId);
+        return map(
+                "ok",
+                accepted,
+                "run_id",
+                runId,
+                "status",
+                updated.getOrDefault("status", "unknown"),
+                "run",
+                updated);
     }
 
     private static ServerSentEvent<Map<String, Object>> toSseEvent(

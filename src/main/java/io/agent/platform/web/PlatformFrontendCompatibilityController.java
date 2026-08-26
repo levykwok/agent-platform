@@ -78,6 +78,7 @@ public class PlatformFrontendCompatibilityController {
     private final PlatformUserCapabilityService userCapabilities;
     private final RuntimeToolGovernance toolGovernance;
     private final Environment environment;
+    private final DurableAgentRunService durableRuns;
     private final WebClient webClient = WebClient.builder().build();
 
     public PlatformFrontendCompatibilityController(
@@ -97,7 +98,8 @@ public class PlatformFrontendCompatibilityController {
             PlatformAssetAccessService assetAccess,
             PlatformUserCapabilityService userCapabilities,
             RuntimeToolGovernance toolGovernance,
-            Environment environment) {
+            Environment environment,
+            DurableAgentRunService durableRuns) {
         this.state = state;
         this.artifactStore = artifactStore;
         this.runtime = runtime;
@@ -115,6 +117,7 @@ public class PlatformFrontendCompatibilityController {
         this.userCapabilities = userCapabilities;
         this.toolGovernance = toolGovernance;
         this.environment = environment;
+        this.durableRuns = durableRuns;
     }
 
     private PlatformAuthService.Principal principal(ServerHttpRequest request) {
@@ -316,46 +319,68 @@ public class PlatformFrontendCompatibilityController {
         Map<String, Object> run = state.createRun(agentId, query, userId);
         String runId = string(run.get("run_id"), "");
         state.appendSessionMessage(agentId, sessionId, userId, "user", query);
-        return runtime.chat(
-                        agentId,
-                        new ChatRequest(
-                                orgId,
-                                userId,
-                                sessionId,
-                                runtimeQuery,
-                                TaskContext.root(runId, agentId, agentId, null)))
+        ChatRequest chatRequest =
+                new ChatRequest(
+                        orgId,
+                        userId,
+                        sessionId,
+                        runtimeQuery,
+                        TaskContext.root(runId, agentId, agentId, null));
+        durableRuns.register(runId, agentId, chatRequest);
+        StringBuilder answerBuffer = new StringBuilder();
+        return durableRuns.stream(runId, agentId, chatRequest)
                 .subscribeOn(Schedulers.boundedElastic())
-                .map(
-                        response -> {
-                            String answer = string(response.text(), "");
-                            Map<String, Object> finished = state.finishRun(runId, answer);
-                            boolean succeeded = "succeeded".equals(finished.get("status"));
-                            state.appendSessionMessage(
-                                    agentId, sessionId, userId, "assistant", answer);
-                            return map(
-                                    "ok",
-                                    succeeded,
-                                    "run",
-                                    finished,
-                                    "run_id",
-                                    finished.get("run_id"),
-                                    "status",
-                                    finished.get("status"),
-                                    "answer",
-                                    answer,
-                                    "result",
-                                    map(
+                .doOnNext(
+                        event -> {
+                            state.appendRunEventFromEnvelope(runId, event);
+                            if (event.delta() != null) answerBuffer.append(event.delta());
+                        })
+                .then(
+                        Mono.fromSupplier(
+                                () -> {
+                                    String answer = answerBuffer.toString();
+                                    Map<String, Object> finished =
+                                            state.finishRun(runId, answer);
+                                    durableRuns.succeeded(runId);
+                                    boolean succeeded =
+                                            "succeeded".equals(finished.get("status"));
+                                    state.appendSessionMessage(
+                                            agentId, sessionId, userId, "assistant", answer);
+                                    return map(
+                                            "ok",
+                                            succeeded,
+                                            "run",
+                                            finished,
+                                            "run_id",
+                                            finished.get("run_id"),
+                                            "status",
+                                            finished.get("status"),
                                             "answer",
                                             answer,
-                                            "text",
-                                            answer,
-                                            "citations",
-                                            retrieval.citations()));
-                        })
+                                            "result",
+                                            map(
+                                                    "answer",
+                                                    answer,
+                                                    "text",
+                                                    answer,
+                                                    "citations",
+                                                    retrieval.citations()));
+                                }))
                 .onErrorResume(
                         error -> {
-                            Map<String, Object> failed = state.failRun(runId, error);
+                            boolean cancelled = DurableAgentRunService.isCancellation(error);
+                            boolean leaseLost = DurableAgentRunService.isLeaseLost(error);
                             String message = string(error.getMessage(), "执行失败");
+                            Map<String, Object> failed;
+                            if (cancelled) {
+                                failed = state.cancelRun(runId, message);
+                                durableRuns.cancelled(runId);
+                            } else if (leaseLost) {
+                                failed = state.markRunRecovering(runId);
+                            } else {
+                                failed = state.failRun(runId, error);
+                                durableRuns.failed(runId);
+                            }
                             return Mono.just(
                                     map(
                                             "ok",
@@ -2020,6 +2045,14 @@ public class PlatformFrontendCompatibilityController {
         Map<String, Object> run = state.createRun(agentId, query, userId);
         String runId = string(run.get("run_id"), "");
         state.appendSessionMessage(agentId, sessionId, userId, "user", query);
+        ChatRequest chatRequest =
+                new ChatRequest(
+                        domain,
+                        userId,
+                        sessionId,
+                        runtimeQuery,
+                        TaskContext.root(runId, agentId, agentId, null));
+        durableRuns.register(runId, agentId, chatRequest);
         AtomicReference<StringBuilder> answer = new AtomicReference<>(new StringBuilder());
         AtomicReference<Instant> agentStartedAt = new AtomicReference<>();
         AtomicReference<Instant> firstOutputAt = new AtomicReference<>();
@@ -2068,14 +2101,7 @@ public class PlatformFrontendCompatibilityController {
                                         "run_id",
                                         runId)));
         Flux<ServerSentEvent<Map<String, Object>>> events =
-                runtime.stream(
-                                agentId,
-                                new ChatRequest(
-                                        domain,
-                                        userId,
-                                        sessionId,
-                                        runtimeQuery,
-                                        TaskContext.root(runId, agentId, agentId, null)))
+                durableRuns.stream(runId, agentId, chatRequest)
                         .filter(PlatformFrontendCompatibilityController::visibleStreamEvent)
                         .doOnSubscribe(ignored -> agentStartedAt.set(Instant.now()))
                         .doOnNext(
@@ -2191,6 +2217,7 @@ public class PlatformFrontendCompatibilityController {
                         () -> {
                             String text = answer.get().toString();
                             Map<String, Object> finished = state.finishRun(runId, text);
+                            durableRuns.succeeded(runId);
                             state.appendSessionMessage(
                                     agentId, sessionId, userId, "assistant", text);
                             return sse(
@@ -2219,8 +2246,23 @@ public class PlatformFrontendCompatibilityController {
                         received, retrieved, agentStarted, events, agentTiming, totalTiming, done)
                 .onErrorResume(
                         error -> {
-                            Map<String, Object> failed = state.failRun(runId, error);
                             String message = string(error.getMessage(), "chat stream error");
+                            boolean cancelled = DurableAgentRunService.isCancellation(error);
+                            boolean leaseLost = DurableAgentRunService.isLeaseLost(error);
+                            Map<String, Object> failed;
+                            String status;
+                            if (cancelled) {
+                                failed = state.cancelRun(runId, message);
+                                durableRuns.cancelled(runId);
+                                status = "cancelled";
+                            } else if (leaseLost) {
+                                failed = state.markRunRecovering(runId);
+                                status = "recovering";
+                            } else {
+                                failed = state.failRun(runId, error);
+                                durableRuns.failed(runId);
+                                status = "failed";
+                            }
                             return Flux.just(
                                     sse(
                                             "error",
@@ -2230,7 +2272,7 @@ public class PlatformFrontendCompatibilityController {
                                                     "run_id",
                                                     failed.get("run_id"),
                                                     "status",
-                                                    "failed",
+                                                    status,
                                                     "message",
                                                     message,
                                                     "error",

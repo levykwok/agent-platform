@@ -64,6 +64,13 @@ agent:
         image: ${AGENT_PLATFORM_SANDBOX_IMAGE:python:3.12-slim}
       memory-size-bytes: ${AGENT_PLATFORM_SANDBOX_MEMORY_SIZE_BYTES:536870912}
       cpu-count: ${AGENT_PLATFORM_SANDBOX_CPU_COUNT:1}
+    orchestration:
+      # Every instance gets a random ID unless deployment supplies a stable pod/host ID.
+      instance-id: ${AGENT_PLATFORM_ORCHESTRATION_INSTANCE_ID:}
+      lease-ms: ${AGENT_PLATFORM_ORCHESTRATION_LEASE_MS:30000}
+      recovery-scan-ms: ${AGENT_PLATFORM_ORCHESTRATION_RECOVERY_SCAN_MS:5000}
+      recovery-initial-delay-ms: ${AGENT_PLATFORM_ORCHESTRATION_RECOVERY_INITIAL_DELAY_MS:5000}
+      recovery-batch-size: ${AGENT_PLATFORM_ORCHESTRATION_RECOVERY_BATCH_SIZE:10}
     mcp:
       discovery:
         enabled: ${AGENT_PLATFORM_MCP_DISCOVERY_ENABLED:true}

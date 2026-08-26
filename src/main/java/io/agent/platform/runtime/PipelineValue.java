@@ -65,8 +65,26 @@ record PipelineValue(
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("contract_version", contractVersion);
         value.put("transition_status", transitionStatus);
+        value.put("text", text);
         value.put("result", result.contract());
         return Map.copyOf(value);
+    }
+
+    static PipelineValue fromContract(Object value) {
+        if (!(value instanceof Map<?, ?> map)) return null;
+        AgentBusinessResult result = AgentBusinessResult.fromContract(map.get("result"));
+        if (result == null) return null;
+        return new PipelineValue(
+                String.valueOf(
+                        map.containsKey("contract_version")
+                                ? map.get("contract_version")
+                                : VERSION),
+                String.valueOf(
+                        map.containsKey("transition_status")
+                                ? map.get("transition_status")
+                                : result.status()),
+                result,
+                String.valueOf(map.containsKey("text") ? map.get("text") : result.summary()));
     }
 
     private static String transitionStatus(AgentBusinessResult result, String legacyStatus) {
