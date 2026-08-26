@@ -25,6 +25,7 @@ import io.agent.platform.control.PipelineTransition;
 import io.agent.platform.control.WorkflowValueValidationResult;
 import io.agent.platform.control.WorkflowValueValidator;
 import io.agent.platform.runtime.protocol.TaskContext;
+import io.agent.platform.runtime.protocol.TaskError;
 import io.agent.platform.runtime.protocol.AgentTaskEnvelope;
 import io.agent.platform.runtime.protocol.AgentBusinessResult;
 import io.agent.platform.runtime.protocol.AgentResultSchemaValidator;
@@ -401,17 +402,23 @@ public class AgentRuntimeService implements AgentRuntime {
             return Mono.error(new AgentRuntimeException("Pipeline agent has no steps: " + definition.agentId()));
         }
         Instant startedAt = Instant.now();
-        return runPipelineSteps(definition, request, steps, 0, request.message(), new java.util.HashSet<>())
+        return runPipelineSteps(
+                        definition,
+                        request,
+                        steps,
+                        0,
+                        PipelineValue.initial(request.message()),
+                        new java.util.HashSet<>())
                 .map(
                         execution ->
                                 response(
                                         definition.agentId(),
                                         request,
-                                        execution.text(),
-                                        completedEnvelope(
+                                        execution.value().text(),
+                                        completedPipelineEnvelope(
                                                 request,
                                                 definition.agentId(),
-                                                execution.text(),
+                                                execution.value(),
                                                 startedAt,
                                                 Map.of("orchestration", "PIPELINE", "steps", steps.size()))));
     }
@@ -421,7 +428,7 @@ public class AgentRuntimeService implements AgentRuntime {
             ChatRequest request,
             List<PipelineStep> steps,
             int index,
-            String input,
+            PipelineValue input,
             java.util.Set<String> visited) {
         if (index >= steps.size()) {
             return Mono.just(new PipelineStepExecution(input, null));
@@ -432,15 +439,21 @@ public class AgentRuntimeService implements AgentRuntime {
         }
         return runPipelineStep(step, request, input)
                 .flatMap(
-                        execution -> {
-                    PipelineStepOutput output = PipelineStepOutput.parse(execution.text());
-                    return runPipelineSteps(
-                            definition, request, steps, nextPipelineIndex(steps, index, output.status()),
-                            output.content(), visited);
-                });
+                        execution ->
+                                runPipelineSteps(
+                                        definition,
+                                        request,
+                                        steps,
+                                        nextPipelineIndex(
+                                                steps,
+                                                index,
+                                                execution.value().transitionStatus()),
+                                        execution.value(),
+                                        visited));
     }
 
-    private Mono<PipelineStepExecution> runPipelineStep(PipelineStep step, ChatRequest request, String input) {
+    private Mono<PipelineStepExecution> runPipelineStep(
+            PipelineStep step, ChatRequest request, PipelineValue input) {
         AgentDefinition target = definition(step.agentId());
         ChatRequest child =
                 new ChatRequest(
@@ -455,7 +468,7 @@ public class AgentRuntimeService implements AgentRuntime {
                         .map(
                                 response ->
                                         new PipelineStepExecution(
-                                                responseBusinessText(response), response.task()));
+                                                PipelineValue.fromResponse(response), response.task()));
         if (step.timeoutMs() != null) guarded = guarded.timeout(Duration.ofMillis(step.timeoutMs()));
         if (step.maxRetries() > 0) {
             guarded = guarded.retryWhen(Retry.fixedDelay(step.maxRetries(), Duration.ofMillis(100)));
@@ -503,11 +516,11 @@ public class AgentRuntimeService implements AgentRuntime {
         }
         return Flux.concat(
                 Flux.just(agentPipelineEvent(definition.agentId(), "pipeline_start", "Running Agent pipeline " + definition.agentId())),
-                streamPipelineStep(steps, 0, request, request.message()));
+                streamPipelineStep(steps, 0, request, PipelineValue.initial(request.message())));
     }
 
     private Flux<AgentEventEnvelope> streamPipelineStep(
-            List<PipelineStep> steps, int index, ChatRequest request, String input) {
+            List<PipelineStep> steps, int index, ChatRequest request, PipelineValue input) {
         if (index >= steps.size()) return Flux.empty();
         PipelineStep step = steps.get(index);
         if (index == steps.size() - 1 && step.transitions().isEmpty()) {
@@ -516,13 +529,24 @@ public class AgentRuntimeService implements AgentRuntime {
         return Flux.concat(
                 Flux.just(agentPipelineEvent(step.agentId(), "pipeline_step_start", "Start pipeline step " + safe(step.stepId(), "step") + " -> " + step.agentId())),
                 pipelineAgentSummaryEvents(step.agentId(), "start"),
-                runPipelineStep(step, request, input).flatMapMany(raw -> {
-                    PipelineStepOutput output = PipelineStepOutput.parse(raw.text());
-                    return Flux.concat(
-                            pipelineAgentSummaryEvents(step.agentId(), "end"),
-                            Flux.just(agentPipelineEvent(step.agentId(), "pipeline_step_end", "Finished pipeline step " + safe(step.stepId(), "step") + " -> " + step.agentId())),
-                            streamPipelineStep(steps, nextPipelineIndex(steps, index, output.status()), request, output.content()));
-                }));
+                runPipelineStep(step, request, input)
+                        .flatMapMany(
+                                execution ->
+                                        Flux.concat(
+                                                pipelineAgentSummaryEvents(step.agentId(), "end"),
+                                                Flux.just(
+                                                        pipelineStepResultEvent(
+                                                                step, execution.value(), false)),
+                                                streamPipelineStep(
+                                                        steps,
+                                                        nextPipelineIndex(
+                                                                steps,
+                                                                index,
+                                                                execution
+                                                                        .value()
+                                                                        .transitionStatus()),
+                                                        request,
+                                                        execution.value()))));
     }
 
     static int nextPipelineIndex(List<PipelineStep> steps, int index, String status) {
@@ -545,7 +569,7 @@ public class AgentRuntimeService implements AgentRuntime {
     }
 
     private Flux<AgentEventEnvelope> streamPipelineFinalStep(
-            PipelineStep step, ChatRequest request, String input) {
+            PipelineStep step, ChatRequest request, PipelineValue input) {
         AgentDefinition target = definition(step.agentId());
         ChatRequest child =
                 new ChatRequest(
@@ -553,9 +577,18 @@ public class AgentRuntimeService implements AgentRuntime {
                         pipelineStepMessage(step, input),
                         request.taskContext().child(request.taskContext().targetAgentId(), target.agentId(), step.stepId()),
                         request.images());
+        PipelineStreamAccumulator accumulator = new PipelineStreamAccumulator();
+        Flux<AgentEventEnvelope> execution =
+                withFluxStepPolicy(step, input.text(), streamDefinition(target, child))
+                        .doOnNext(accumulator::accept);
         return Flux.concat(
                 Flux.just(agentPipelineEvent(target.agentId(), "pipeline_final_step", "Streaming final pipeline step " + safe(step.stepId(), "step") + " -> " + target.agentId())),
-                withFluxStepPolicy(step, input, streamDefinition(target, child)));
+                execution,
+                Flux.defer(
+                        () ->
+                                Flux.just(
+                                        pipelineStepResultEvent(
+                                                step, accumulator.value(), true))));
     }
 
     /** Executes the independent Workflow graph; nodes and edges are the only execution model. */
@@ -1028,12 +1061,17 @@ public class AgentRuntimeService implements AgentRuntime {
         return value.replace("{{input}}", safeInput).replace("${input}", safeInput);
     }
 
-    private String pipelineStepMessage(PipelineStep step, String input) {
+    private String pipelineStepMessage(PipelineStep step, PipelineValue input) {
+        String text = safe(input.text(), "");
         String message =
                 step.instruction() == null || step.instruction().isBlank()
-                        ? input
-                        : step.instruction() + "\n\nInput:\n" + input;
-        return resolveWorkflowTemplate(message, input);
+                        ? text
+                        : step.instruction() + "\n\nInput summary:\n" + text;
+        return resolveWorkflowTemplate(message, text)
+                + "\n\nStructured pipeline input ("
+                + PipelineValue.VERSION
+                + "):\n"
+                + decisionJson(input.contract());
     }
 
     private Flux<AgentEventEnvelope> streamSupervisor(
@@ -1116,7 +1154,9 @@ public class AgentRuntimeService implements AgentRuntime {
                                                                     reply.execution().envelope(),
                                                                     reply.execution().businessResult(),
                                                                     reply.stepIndex(),
-                                                                    reply.instruction()));
+                                                                    reply.instruction(),
+                                                                    reply.fallbackUsed(),
+                                                                    reply.failureReason()));
                                                 }
                                                 Flux<AgentEventEnvelope> resultEvents =
                                                         Flux.fromIterable(completedEvents);
@@ -1556,31 +1596,147 @@ public class AgentRuntimeService implements AgentRuntime {
         AgentDefinition target =
                 scopedSubagentDefinition(definition(binding.targetAgentId()), binding);
         AgentExecutionPolicy policy = AgentExecutionPolicy.from(supervisor);
-        return callAgent(
-                        target,
-                        request,
-                        supervisorStepMessage(step, request.message(), completed, stepIndex),
-                        subagentContext(request, binding, stepIndex))
-                .timeout(Duration.ofMillis(policy.subagentTimeoutMs()))
+        String message = supervisorStepMessage(step, request.message(), completed, stepIndex);
+        long timeoutMs =
+                binding.timeoutMs() == null ? policy.subagentTimeoutMs() : binding.timeoutMs();
+        Mono<TaskExecution> primary =
+                callAgent(
+                                target,
+                                request,
+                                message,
+                                subagentContext(request, binding, stepIndex))
+                        .timeout(Duration.ofMillis(timeoutMs))
+                        .map(execution -> validateSubagentResult(binding, execution));
+        if (binding.maxRetries() > 0) {
+            primary =
+                    primary.retryWhen(
+                            Retry.fixedDelay(
+                                    binding.maxRetries(), Duration.ofMillis(100)));
+        }
+        return primary
                 .map(
-                        execution -> {
-                            List<String> errors =
-                                    AgentResultSchemaValidator.validate(
-                                            execution.businessResult().data(), binding.outputSchema());
-                            if (!errors.isEmpty()) {
-                                throw new AgentRuntimeException(
-                                        "Subagent output schema validation failed for binding "
-                                                + binding.bindingId()
-                                                + ": "
-                                                + String.join("; ", errors));
-                            }
-                            return new SubagentReply(
-                                    binding,
-                                    target,
-                                    execution,
-                                    stepIndex,
-                                    step.instruction());
-                        });
+                        execution ->
+                                new SubagentReply(
+                                        binding,
+                                        target,
+                                        execution,
+                                        stepIndex,
+                                        step.instruction()))
+                .onErrorResume(
+                        error ->
+                                switch (binding.failurePolicy()) {
+                                    case FAIL_FAST -> Mono.error(error);
+                                    case SKIP ->
+                                            Mono.just(
+                                                    skippedSubagentReply(
+                                                            supervisor,
+                                                            request,
+                                                            step,
+                                                            target,
+                                                            stepIndex,
+                                                            error));
+                                    case FALLBACK -> {
+                                        AgentDefinition fallback =
+                                                scopedSubagentDefinition(
+                                                        definition(binding.fallbackAgentId()),
+                                                        binding);
+                                        yield callAgent(
+                                                        fallback,
+                                                        request,
+                                                        message
+                                                                + "\n\nThe primary specialist failed. Execute this task as the configured fallback.",
+                                                        subagentContext(
+                                                                request, binding, stepIndex))
+                                                .timeout(Duration.ofMillis(timeoutMs))
+                                                .map(
+                                                        execution ->
+                                                                validateSubagentResult(
+                                                                        binding, execution))
+                                                .map(
+                                                        execution ->
+                                                                new SubagentReply(
+                                                                        binding,
+                                                                        fallback,
+                                                                        execution,
+                                                                        stepIndex,
+                                                                        step.instruction(),
+                                                                        true,
+                                                                        failureMessage(error)));
+                                    }
+                                });
+    }
+
+    private TaskExecution validateSubagentResult(
+            SubagentBinding binding, TaskExecution execution) {
+        List<String> errors =
+                AgentResultSchemaValidator.validate(
+                        execution.businessResult().data(), binding.outputSchema());
+        if (!errors.isEmpty()) {
+            throw new AgentRuntimeException(
+                    "Subagent output schema validation failed for binding "
+                            + binding.bindingId()
+                            + ": "
+                            + String.join("; ", errors));
+        }
+        return execution;
+    }
+
+    private SubagentReply skippedSubagentReply(
+            AgentDefinition supervisor,
+            ChatRequest request,
+            SupervisorStep step,
+            AgentDefinition target,
+            int stepIndex,
+            Throwable error) {
+        Instant now = Instant.now();
+        String message = failureMessage(error);
+        TaskError taskError =
+                new TaskError(
+                        "SUBAGENT_SKIPPED",
+                        message,
+                        false,
+                        Map.of(
+                                "binding_id", step.binding().bindingId(),
+                                "target_agent_id", target.agentId()));
+        AgentBusinessResult result = AgentBusinessResult.failed(taskError);
+        TaskContext context =
+                request.taskContext()
+                        .child(
+                                supervisor.agentId(),
+                                target.agentId(),
+                                step.binding().bindingId());
+        TaskRequest taskRequest =
+                new TaskRequest(context, Map.of("text", safe(step.instruction(), "")));
+        AgentTaskEnvelope envelope =
+                AgentTaskEnvelope.failed(
+                        taskRequest,
+                        TaskStatus.FAILED,
+                        error,
+                        now,
+                        now,
+                        Map.of(
+                                "binding_id", step.binding().bindingId(),
+                                "skipped", true));
+        Msg msg =
+                Msg.builder()
+                        .role(io.agentscope.core.message.MsgRole.ASSISTANT)
+                        .textContent(decisionJson(result.contract()))
+                        .build();
+        return new SubagentReply(
+                step.binding(),
+                target,
+                new TaskExecution(msg, envelope, result),
+                stepIndex,
+                step.instruction(),
+                false,
+                message);
+    }
+
+    private static String failureMessage(Throwable error) {
+        if (error == null) return "Subagent failed";
+        Throwable current = error;
+        while (current.getCause() != null) current = current.getCause();
+        return safe(current.getMessage(), current.getClass().getSimpleName());
     }
 
     private Mono<SupervisorRevision> reviseSupervisor(
@@ -1803,6 +1959,8 @@ public class AgentRuntimeService implements AgentRuntime {
                             result.put("binding_id", reply.binding().bindingId());
                             result.put("target_agent_id", reply.target().agentId());
                             result.put("instruction", safe(reply.instruction(), ""));
+                            result.put("fallback_used", reply.fallbackUsed());
+                            result.put("failure_reason", safe(reply.failureReason(), ""));
                             result.put("result", reply.execution().businessResult().contract());
                             return result;
                         })
@@ -1929,6 +2087,12 @@ public class AgentRuntimeService implements AgentRuntime {
             summary.append("- instruction: ")
                     .append(safe(reply.instruction(), ""))
                     .append("\n");
+            summary.append("- fallback_used: ").append(reply.fallbackUsed()).append("\n");
+            if (!reply.failureReason().isBlank()) {
+                summary.append("- primary_failure: ")
+                        .append(reply.failureReason())
+                        .append("\n");
+            }
             summary.append("- task_id: ")
                     .append(reply.execution().envelope().taskId())
                     .append("\n");
@@ -2240,6 +2404,53 @@ public class AgentRuntimeService implements AgentRuntime {
                 taskRequest, taskResult, startedAt, finishedAt, metadata);
     }
 
+    private AgentTaskEnvelope completedPipelineEnvelope(
+            ChatRequest request,
+            String targetAgentId,
+            PipelineValue value,
+            Instant startedAt,
+            Map<String, Object> metadata) {
+        Instant finishedAt = Instant.now();
+        TaskRequest taskRequest =
+                new TaskRequest(
+                        request.taskContext().child(
+                                request.taskContext().sourceAgentId(), targetAgentId, "pipeline"),
+                        value.contract());
+        AgentBusinessResult business = value.result();
+        Map<String, Object> data = businessData(business.data());
+        TaskStatus status =
+                AgentBusinessResult.FAILED.equals(business.status())
+                        ? TaskStatus.FAILED
+                        : TaskStatus.COMPLETED;
+        TaskResult taskResult =
+                new TaskResult(
+                        taskRequest.context().taskId(),
+                        status,
+                        safe(value.text(), ""),
+                        data,
+                        safe(business.summary(), value.text()),
+                        business.artifacts(),
+                        business.error(),
+                        Map.of(
+                                "duration_ms",
+                                Duration.between(startedAt, finishedAt).toMillis()));
+        Map<String, Object> envelopeMetadata = new LinkedHashMap<>(metadata);
+        envelopeMetadata.put("business_contract", AgentBusinessResult.VERSION);
+        envelopeMetadata.put("pipeline_contract", PipelineValue.VERSION);
+        envelopeMetadata.put("transition_status", value.transitionStatus());
+        return AgentTaskEnvelope.completed(
+                taskRequest, taskResult, startedAt, finishedAt, envelopeMetadata);
+    }
+
+    private static Map<String, Object> businessData(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> copy = new LinkedHashMap<>();
+            map.forEach((key, item) -> copy.put(String.valueOf(key), item));
+            return Map.copyOf(copy);
+        }
+        return value == null ? Map.of() : Map.of("value", value);
+    }
+
     private Flux<AgentEventEnvelope> streamAgent(
             AgentDefinition definition, String message, RuntimeContext context) {
         return streamAgent(definition, message, context, null, List.of(), "", "");
@@ -2286,7 +2497,9 @@ public class AgentRuntimeService implements AgentRuntime {
                                                             "task_id",
                                                             execution.envelope().taskId(),
                                                             "business_contract",
-                                                            "agent.result.v1")),
+                                                            AgentBusinessResult.VERSION,
+                                                            "business_result",
+                                                            execution.businessResult().contract())),
                                             new AgentEventEnvelope(
                                                     "text_block_delta_"
                                                             + UUID.randomUUID()
@@ -2410,6 +2623,33 @@ public class AgentRuntimeService implements AgentRuntime {
                         "orchestration", "PIPELINE"));
     }
 
+    private AgentEventEnvelope pipelineStepResultEvent(
+            PipelineStep step, PipelineValue value, boolean finalResult) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put(
+                "summary",
+                (finalResult ? "Finished final pipeline step " : "Finished pipeline step ")
+                        + safe(step.stepId(), "step")
+                        + " -> "
+                        + step.agentId());
+        payload.put("agent_pipeline", true);
+        payload.put("orchestration", "PIPELINE");
+        payload.put("step_id", safe(step.stepId(), "step"));
+        payload.put("agent_id", step.agentId());
+        payload.put("final", finalResult);
+        payload.put("pipeline_contract", PipelineValue.VERSION);
+        payload.put("transition_status", value.transitionStatus());
+        payload.put("pipeline_value", value.contract());
+        return new AgentEventEnvelope(
+                (finalResult ? "pipeline_result_" : "pipeline_step_end_")
+                        + Instant.now().toEpochMilli(),
+                finalResult ? "pipeline_result" : "pipeline_step_end",
+                Instant.now().toString(),
+                step.agentId(),
+                null,
+                Map.copyOf(payload));
+    }
+
     private AgentEventEnvelope rootBudgetEvent(
             AgentDefinition definition, TaskContext taskContext) {
         Map<String, Object> snapshot =
@@ -2466,6 +2706,8 @@ public class AgentRuntimeService implements AgentRuntime {
                         definition.orchestration().subagents().size(),
                         "max_steps",
                         supervisorStepBudget(definition),
+                        "thinking_disabled",
+                        definition.orchestration().supervisorDisableThinking(),
                         "decision_source",
                         "llm"));
     }
@@ -2479,6 +2721,8 @@ public class AgentRuntimeService implements AgentRuntime {
         payload.put("reason", plan.reason());
         payload.put("model_id", plan.modelId());
         payload.put("duration_ms", plan.durationMs());
+        payload.put(
+                "thinking_disabled", definition.orchestration().supervisorDisableThinking());
         payload.put("steps", supervisorStepPayloads(plan.steps()));
         payload.put(
                 "parallel_enabled",
@@ -2544,7 +2788,9 @@ public class AgentRuntimeService implements AgentRuntime {
             AgentTaskEnvelope task,
             AgentBusinessResult businessResult,
             int stepIndex,
-            String instruction) {
+            String instruction,
+            boolean fallbackUsed,
+            String failureReason) {
         String text = subagentReply == null ? "" : safe(subagentReply.getTextContent(), "");
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("agent_id", definition.agentId());
@@ -2552,6 +2798,8 @@ public class AgentRuntimeService implements AgentRuntime {
         payload.put("binding_id", safe(binding.bindingId(), ""));
         payload.put("step", stepIndex);
         payload.put("instruction", safe(instruction, ""));
+        payload.put("fallback_used", fallbackUsed);
+        payload.put("failure_reason", safe(failureReason, ""));
         payload.put("result_preview", abbreviate(text, 500));
         if (businessResult != null) {
             payload.put("business_result", businessResult.contract());
@@ -2581,6 +2829,8 @@ public class AgentRuntimeService implements AgentRuntime {
                         "agent_id", definition.agentId(),
                         "completed_steps", completedSteps,
                         "remaining_budget", Math.max(0, supervisorStepBudget(definition) - completedSteps),
+                        "thinking_disabled",
+                        definition.orchestration().supervisorDisableThinking(),
                         "decision_source", "llm"));
     }
 
@@ -2594,6 +2844,8 @@ public class AgentRuntimeService implements AgentRuntime {
         payload.put("reason", revision.reason());
         payload.put("model_id", revision.modelId());
         payload.put("duration_ms", revision.durationMs());
+        payload.put(
+                "thinking_disabled", definition.orchestration().supervisorDisableThinking());
         if (revision.next() != null) {
             payload.put("next_binding_id", revision.next().binding().bindingId());
             payload.put("next_instruction", safe(revision.next().instruction(), ""));
@@ -2932,15 +3184,49 @@ public class AgentRuntimeService implements AgentRuntime {
             AgentDefinition target,
             TaskExecution execution,
             int stepIndex,
-            String instruction) {
+            String instruction,
+            boolean fallbackUsed,
+            String failureReason) {
+        private SubagentReply(
+                SubagentBinding binding,
+                AgentDefinition target,
+                TaskExecution execution,
+                int stepIndex,
+                String instruction) {
+            this(binding, target, execution, stepIndex, instruction, false, "");
+        }
+
         private SubagentReply {
             instruction = instruction == null ? "" : instruction;
+            failureReason = failureReason == null ? "" : failureReason;
         }
     }
 
     private record BranchResult(String joinNodeId, ContractValue value) {}
 
-    private record PipelineStepExecution(String text, AgentTaskEnvelope task) {}
+    private record PipelineStepExecution(PipelineValue value, AgentTaskEnvelope task) {}
+
+    private static final class PipelineStreamAccumulator {
+        private final StringBuilder text = new StringBuilder();
+        private AgentBusinessResult structured;
+
+        private void accept(AgentEventEnvelope event) {
+            if (event.delta() != null) {
+                text.append(event.delta());
+            }
+            if (event.payload() != null) {
+                AgentBusinessResult candidate =
+                        AgentBusinessResult.fromContract(event.payload().get("business_result"));
+                if (candidate != null) {
+                    structured = candidate;
+                }
+            }
+        }
+
+        private PipelineValue value() {
+            return PipelineValue.fromStream(text.toString(), structured);
+        }
+    }
 
     private AgentDefinition definition(String agentId) {
         AgentDefinition definition =

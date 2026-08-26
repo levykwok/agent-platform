@@ -25,7 +25,7 @@ public final class AgentScopeOrchestrationDecisionModel implements Orchestration
     private static final long MAX_DECISION_TIMEOUT_MS = 30_000L;
     private static final GenerateOptions DECISION_OPTIONS =
             GenerateOptions.builder().temperature(0.0).maxTokens(512).build();
-    private static final GenerateOptions ROUTER_NO_THINKING_OPTIONS =
+    private static final GenerateOptions NO_THINKING_OPTIONS =
             GenerateOptions.builder()
                     .temperature(0.0)
                     .maxTokens(512)
@@ -87,9 +87,11 @@ public final class AgentScopeOrchestrationDecisionModel implements Orchestration
 
     static GenerateOptions decisionOptions(AgentDefinition definition) {
         if (definition != null
-                && definition.orchestration().mode() == OrchestrationMode.ROUTER
-                && definition.orchestration().routerDisableThinking()) {
-            return ROUTER_NO_THINKING_OPTIONS;
+                && ((definition.orchestration().mode() == OrchestrationMode.ROUTER
+                                && definition.orchestration().routerDisableThinking())
+                        || (definition.orchestration().mode() == OrchestrationMode.SUPERVISOR
+                                && definition.orchestration().supervisorDisableThinking()))) {
+            return NO_THINKING_OPTIONS;
         }
         return DECISION_OPTIONS;
     }

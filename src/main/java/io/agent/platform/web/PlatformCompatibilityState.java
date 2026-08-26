@@ -517,7 +517,12 @@ public class PlatformCompatibilityState {
                         map,
                         fallback.routerDisableThinking(),
                         "routerDisableThinking",
-                        "router_disable_thinking"));
+                        "router_disable_thinking"),
+                booleanAny(
+                        map,
+                        fallback.supervisorDisableThinking(),
+                        "supervisorDisableThinking",
+                        "supervisor_disable_thinking"));
     }
 
     private OrchestrationMode mode(String value) {
@@ -553,7 +558,23 @@ public class PlatformCompatibilityState {
                 objectMap(
                         map.get("outputSchema") == null
                                 ? map.get("output_schema")
-                                : map.get("outputSchema")));
+                                : map.get("outputSchema")),
+                numberLong(map.get("timeoutMs"), map.get("timeout_ms")),
+                numberInt(map.get("maxRetries"), map.get("max_retries")),
+                subagentFailurePolicy(map),
+                stringAny(map, "fallbackAgentId", "fallback_agent_id"));
+    }
+
+    private SubagentBinding.FailurePolicy subagentFailurePolicy(Map<String, Object> map) {
+        String value = stringAny(map, "failurePolicy", "failure_policy");
+        if (value.isBlank()) {
+            return SubagentBinding.FailurePolicy.FAIL_FAST;
+        }
+        try {
+            return SubagentBinding.FailurePolicy.valueOf(value.toUpperCase());
+        } catch (IllegalArgumentException ignored) {
+            return SubagentBinding.FailurePolicy.FAIL_FAST;
+        }
     }
 
     private List<RouteRule> routes(Object value) {

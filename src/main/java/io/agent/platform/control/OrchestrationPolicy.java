@@ -16,11 +16,13 @@ public record OrchestrationPolicy(
         int maxSupervisorSteps,
         boolean supervisorParallelEnabled,
         int maxSupervisorParallelism,
-        boolean routerDisableThinking) {
+        boolean routerDisableThinking,
+        boolean supervisorDisableThinking) {
 
     public static final int DEFAULT_MAX_SUPERVISOR_STEPS = 5;
     public static final int MAX_SUPERVISOR_STEPS = 10;
     public static final boolean DEFAULT_ROUTER_DISABLE_THINKING = true;
+    public static final boolean DEFAULT_SUPERVISOR_DISABLE_THINKING = true;
 
     @JsonCreator
     public OrchestrationPolicy(
@@ -32,7 +34,9 @@ public record OrchestrationPolicy(
             @JsonProperty("supervisorParallelEnabled") boolean supervisorParallelEnabled,
             @JsonProperty("maxSupervisorParallelism") int maxSupervisorParallelism,
             @JsonProperty("routerDisableThinking") @JsonAlias("router_disable_thinking")
-                    Boolean routerDisableThinking) {
+                    Boolean routerDisableThinking,
+            @JsonProperty("supervisorDisableThinking") @JsonAlias("supervisor_disable_thinking")
+                    Boolean supervisorDisableThinking) {
         this(
                 mode,
                 subagents,
@@ -43,7 +47,10 @@ public record OrchestrationPolicy(
                 maxSupervisorParallelism,
                 routerDisableThinking == null
                         ? DEFAULT_ROUTER_DISABLE_THINKING
-                        : routerDisableThinking);
+                        : routerDisableThinking,
+                supervisorDisableThinking == null
+                        ? DEFAULT_SUPERVISOR_DISABLE_THINKING
+                        : supervisorDisableThinking);
     }
 
     public OrchestrationPolicy(
@@ -86,7 +93,29 @@ public record OrchestrationPolicy(
                 maxSupervisorSteps,
                 supervisorParallelEnabled,
                 maxSupervisorParallelism,
-                DEFAULT_ROUTER_DISABLE_THINKING);
+                DEFAULT_ROUTER_DISABLE_THINKING,
+                DEFAULT_SUPERVISOR_DISABLE_THINKING);
+    }
+
+    public OrchestrationPolicy(
+            OrchestrationMode mode,
+            List<SubagentBinding> subagents,
+            List<RouteRule> routes,
+            List<PipelineStep> pipeline,
+            int maxSupervisorSteps,
+            boolean supervisorParallelEnabled,
+            int maxSupervisorParallelism,
+            boolean routerDisableThinking) {
+        this(
+                mode,
+                subagents,
+                routes,
+                pipeline,
+                maxSupervisorSteps,
+                supervisorParallelEnabled,
+                maxSupervisorParallelism,
+                routerDisableThinking,
+                DEFAULT_SUPERVISOR_DISABLE_THINKING);
     }
 
     public static OrchestrationPolicy single() {
@@ -98,7 +127,8 @@ public record OrchestrationPolicy(
                 DEFAULT_MAX_SUPERVISOR_STEPS,
                 false,
                 2,
-                DEFAULT_ROUTER_DISABLE_THINKING);
+                DEFAULT_ROUTER_DISABLE_THINKING,
+                DEFAULT_SUPERVISOR_DISABLE_THINKING);
     }
 
     public OrchestrationPolicy {

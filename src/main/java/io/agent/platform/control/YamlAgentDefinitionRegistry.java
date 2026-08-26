@@ -148,7 +148,11 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                                 resolve(s.description()),
                                                 s.exposeToUser(),
                                                 s.toolRefs(),
-                                                s.outputSchema()))
+                                                s.outputSchema(),
+                                                s.timeoutMs(),
+                                                s.maxRetries(),
+                                                s.failurePolicy(),
+                                                resolve(s.fallbackAgentId())))
                         .toList();
         List<RouteRule> routes =
                 policy.routes().stream()
@@ -189,7 +193,8 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                 policy.maxSupervisorSteps(),
                 policy.supervisorParallelEnabled(),
                 policy.maxSupervisorParallelism(),
-                policy.routerDisableThinking());
+                policy.routerDisableThinking(),
+                policy.supervisorDisableThinking());
     }
 
     private String safe(String value, String fallback) {
@@ -274,6 +279,25 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                 + binding.bindingId()
                                 + ": "
                                 + binding.targetAgentId());
+            }
+            if (binding.timeoutMs() != null && binding.timeoutMs() <= 0) {
+                throw new IllegalStateException(
+                        "Subagent timeout must be positive for binding " + binding.bindingId());
+            }
+            if (binding.maxRetries() < 0) {
+                throw new IllegalStateException(
+                        "Subagent maxRetries cannot be negative for binding "
+                                + binding.bindingId());
+            }
+            if (binding.failurePolicy() == SubagentBinding.FailurePolicy.FALLBACK) {
+                if (binding.fallbackAgentId().isBlank()
+                        || !loaded.containsKey(binding.fallbackAgentId())) {
+                    throw new IllegalStateException(
+                            "Subagent fallback target not found for binding "
+                                    + binding.bindingId()
+                                    + ": "
+                                    + binding.fallbackAgentId());
+                }
             }
         }
     }

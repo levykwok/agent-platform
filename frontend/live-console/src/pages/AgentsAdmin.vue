@@ -75,6 +75,7 @@ const form = reactive({
   orchestration_mode: 'SINGLE',
   orchestration_routes: [] as JsonMap[],
   router_disable_thinking: true,
+  supervisor_disable_thinking: true,
   pipeline_steps: [] as JsonMap[],
   subagents: [] as JsonMap[],
   max_supervisor_steps: 5,
@@ -276,6 +277,7 @@ async function selectAgent(id: string) {
         defaultRoute: r.defaultRoute ?? r.default_route ?? false,
       })),
       router_disable_thinking: orchestration.routerDisableThinking !== false && orchestration.router_disable_thinking !== false,
+      supervisor_disable_thinking: orchestration.supervisorDisableThinking !== false && orchestration.supervisor_disable_thinking !== false,
       pipeline_steps: (((orchestration.pipeline || orchestration.workflow) as JsonMap[]) || []).map((s) => ({
         stepId: s.stepId || s.step_id || '',
         agentId: s.agentId || s.agent_id || '',
@@ -293,6 +295,10 @@ async function selectAgent(id: string) {
         description: s.description || '',
         exposeToUser: s.exposeToUser ?? s.expose_to_user ?? true,
         toolRefs: [...(((s.toolRefs || s.tool_refs) as string[]) || [])],
+        timeoutMs: Number(s.timeoutMs || s.timeout_ms || 0),
+        maxRetries: Number(s.maxRetries || s.max_retries || 0),
+        failurePolicy: String(s.failurePolicy || s.failure_policy || 'FAIL_FAST').toUpperCase(),
+        fallbackAgentId: s.fallbackAgentId || s.fallback_agent_id || '',
         outputSchemaText: Object.keys(((s.outputSchema || s.output_schema) as JsonMap) || {}).length
           ? JSON.stringify((s.outputSchema || s.output_schema) as JsonMap, null, 2)
           : '',
@@ -322,7 +328,7 @@ function newAgent() {
     agent_id: '', display_name: '', description: '', domain: domainFilter.value || 'platform', enabled: true,
     role: '', planner_rules: '', require_structured_plan: true,
     included_skills: [], included_mcps: [], included_tools: [], restrict_tools: false, router_rules: [],
-    orchestration_mode: 'SINGLE', orchestration_routes: [], router_disable_thinking: true, pipeline_steps: [], subagents: [], max_supervisor_steps: 5,
+    orchestration_mode: 'SINGLE', orchestration_routes: [], router_disable_thinking: true, supervisor_disable_thinking: true, pipeline_steps: [], subagents: [], max_supervisor_steps: 5,
     supervisor_parallel_enabled: false, max_supervisor_parallelism: 2,
     root_timeout_ms: 180000, root_max_agent_calls: 20, root_max_tokens: 100000, root_max_depth: 6,
     output_schema_text: '',
@@ -385,7 +391,7 @@ function addPipelineTransition(step: JsonMap) {
 function removePipelineTransition(step: JsonMap, index: number) {
   ;((step.transitions || []) as JsonMap[]).splice(index, 1)
 }
-function addSubagent() { form.subagents.push({ bindingId: `subagent_${form.subagents.length + 1}`, targetAgentId: '', role: '', description: '', exposeToUser: true, toolRefs: [], outputSchemaText: '' }) }
+function addSubagent() { form.subagents.push({ bindingId: `subagent_${form.subagents.length + 1}`, targetAgentId: '', role: '', description: '', exposeToUser: true, toolRefs: [], timeoutMs: 0, maxRetries: 0, failurePolicy: 'FAIL_FAST', fallbackAgentId: '', outputSchemaText: '' }) }
 function removeSubagent(i: number) { form.subagents.splice(i, 1) }
 function toggleModelPolicy(key: string) {
   if (key in form.model_policy) delete form.model_policy[key]
@@ -585,7 +591,20 @@ async function saveAgent() {
           return
         }
       }
-      subagents.push({ bindingId, targetAgentId, role: String(s.role || '').trim(), description: String(s.description || '').trim(), exposeToUser: s.exposeToUser !== false, toolRefs: [...(((s.toolRefs as string[]) || []))], ...(Object.keys(outputSchema).length ? { outputSchema } : {}) })
+      const timeoutMs = Math.trunc(Number(s.timeoutMs || 0))
+      const maxRetries = Math.trunc(Number(s.maxRetries || 0))
+      const failurePolicy = String(s.failurePolicy || 'FAIL_FAST').toUpperCase()
+      const fallbackAgentId = String(s.fallbackAgentId || '').trim()
+      if (timeoutMs < 0 || maxRetries < 0) { notifyError(`子代理 ${bindingId} 的超时和重试次数不能为负数`); step.value = 1; return }
+      if (failurePolicy === 'FALLBACK' && !fallbackAgentId) { notifyError(`子代理 ${bindingId} 选择 FALLBACK 时必须指定备用 Agent`); step.value = 1; return }
+      subagents.push({
+        bindingId, targetAgentId,
+        role: String(s.role || '').trim(), description: String(s.description || '').trim(),
+        exposeToUser: s.exposeToUser !== false, toolRefs: [...(((s.toolRefs as string[]) || []))],
+        ...(timeoutMs > 0 ? { timeoutMs } : {}), maxRetries, failurePolicy,
+        ...(fallbackAgentId ? { fallbackAgentId } : {}),
+        ...(Object.keys(outputSchema).length ? { outputSchema } : {}),
+      })
     }
   if (!subagents.length) { notifyError('SUPERVISOR 至少需要一个子代理'); step.value = 1; return }
     orchestration.subagents = subagents
@@ -594,6 +613,7 @@ async function saveAgent() {
     orchestration.maxSupervisorSteps = maxSteps
     orchestration.supervisorParallelEnabled = form.supervisor_parallel_enabled
     orchestration.maxSupervisorParallelism = Math.max(1, Math.min(8, Math.trunc(Number(form.max_supervisor_parallelism || 2))))
+    orchestration.supervisorDisableThinking = form.supervisor_disable_thinking
   }
   const skillScope = { include: form.included_skills }
   const mcpScope = { include: form.included_mcps }
@@ -909,12 +929,13 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
           <p class="pick-hint">Supervisor 默认串行执行。启用可选并行后，只有 PLAN 明确给出同一 parallel_group 的相邻独立任务才会并行；组结束后再统一 REVISE。</p>
           <div class="supervisor-policy-grid">
             <div class="field supervisor-step-budget"><label>最大调用步骤数（1–10）</label><input v-model.number="form.max_supervisor_steps" type="number" min="1" max="10" /></div>
+            <div class="field"><label>关闭 PLAN/REVISE Thinking</label><label class="switch-row"><span>{{ form.supervisor_disable_thinking ? '已强制关闭' : '跟随模型默认' }}</span><span class="toggle"><input type="checkbox" v-model="form.supervisor_disable_thinking" /><span class="toggle-slider"></span></span></label></div>
             <div class="field"><label>允许 PLAN 并行组</label><label class="switch-row"><span>{{ form.supervisor_parallel_enabled ? '已启用' : '串行默认' }}</span><span class="toggle"><input type="checkbox" v-model="form.supervisor_parallel_enabled" /><span class="toggle-slider"></span></span></label></div>
             <div v-if="form.supervisor_parallel_enabled" class="field"><label>最大并行度（1–8）</label><input v-model.number="form.max_supervisor_parallelism" type="number" min="1" max="8" /></div>
           </div>
 <div class="actions"><button class="btn btn-ghost btn-sm" @click="addSubagent">添加子代理</button></div>
           <table>
-<thead><tr><th>绑定名</th><th>目标代理</th><th>说明</th><th>data 输出 Schema（可选）</th><th>允许工具（空 = 无）</th><th>暴露</th><th></th></tr></thead>
+<thead><tr><th>绑定名</th><th>目标代理</th><th>说明</th><th>执行策略</th><th>data 输出 Schema（可选）</th><th>允许工具（空 = 无）</th><th>暴露</th><th></th></tr></thead>
             <tbody>
               <tr v-for="(s,i) in form.subagents" :key="'sub'+i">
                 <td><input v-model="s.bindingId" placeholder="researcher"/></td>
@@ -925,6 +946,7 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
                   </select>
                 </td>
                 <td><input v-model="s.description" placeholder="这个子代理负责什么"/></td>
+                <td><div class="subagent-policy"><label>超时 ms（0=继承）<input v-model.number="s.timeoutMs" type="number" min="0" /></label><label>重试次数<input v-model.number="s.maxRetries" type="number" min="0" max="10" /></label><select v-model="s.failurePolicy"><option value="FAIL_FAST">失败即终止</option><option value="SKIP">记录失败并继续</option><option value="FALLBACK">调用备用 Agent</option></select><select v-if="s.failurePolicy === 'FALLBACK'" v-model="s.fallbackAgentId"><option value="">选择备用 Agent</option><option v-for="a in agents" :key="`fallback-${a.agent_id}`" :value="a.agent_id">{{ agentOptionLabel(a) }}</option></select></div></td>
                 <td><textarea v-model="s.outputSchemaText" rows="3" placeholder='{"type":"object","required":["answer"]}'></textarea></td>
                 <td>
                   <select v-model="s.toolRefs" multiple class="subagent-tool-select" title="按住 Ctrl / Command 多选；不选表示子 Agent 无工具">
@@ -934,7 +956,7 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         <td><select v-model="s.exposeToUser"><option :value="true">是</option><option :value="false">否</option></select></td>
                 <td><button class="btn small danger" @click="removeSubagent(i)">删除</button></td>
               </tr>
-<tr v-if="!form.subagents.length"><td colspan="7" class="empty">暂无子代理，保存 SUPERVISOR 前至少添加一个。</td></tr>
+<tr v-if="!form.subagents.length"><td colspan="8" class="empty">暂无子代理，保存 SUPERVISOR 前至少添加一个。</td></tr>
             </tbody>
           </table>
         </div>
@@ -1084,6 +1106,9 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
 .runtime-tool-item .risk.high, .runtime-tool-item .risk.medium_high { background: #fee2e2; color: #b91c1c; }
 .runtime-tool-item .tag.danger { background: #fff1f2; color: #be123c; }
 .subagent-tool-select { min-width: 190px; min-height: 78px; }
+.subagent-policy { display: grid; gap: 6px; min-width: 175px; }
+.subagent-policy label { display: grid; gap: 3px; color: var(--muted); font-size: 11px; }
+.subagent-policy input, .subagent-policy select { min-width: 0; }
 .runtime-budget-grid, .supervisor-policy-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 12px 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #f8fafc; }
 .output-schema-field { grid-column: 1 / -1; }
 .output-schema-field textarea { width: 100%; }

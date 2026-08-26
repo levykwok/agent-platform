@@ -25,6 +25,7 @@ class OrchestrationPolicyTest {
         assertFalse(policy.supervisorParallelEnabled());
         assertEquals(2, policy.maxSupervisorParallelism());
         assertTrue(policy.routerDisableThinking());
+        assertTrue(policy.supervisorDisableThinking());
     }
 
     @Test
@@ -49,6 +50,16 @@ class OrchestrationPolicyTest {
                         OrchestrationPolicy.class);
 
         assertFalse(policy.routerDisableThinking());
+    }
+
+    @Test
+    void supervisorThinkingCanBeExplicitlyRestoredToModelDefault() throws Exception {
+        OrchestrationPolicy policy =
+                objectMapper.readValue(
+                        "{\"mode\":\"SUPERVISOR\",\"supervisorDisableThinking\":false}",
+                        OrchestrationPolicy.class);
+
+        assertFalse(policy.supervisorDisableThinking());
     }
 
     @Test

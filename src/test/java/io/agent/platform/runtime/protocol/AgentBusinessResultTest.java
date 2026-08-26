@@ -34,6 +34,8 @@ class AgentBusinessResultTest {
         assertEquals("partial", result.status());
         assertEquals(42, ((Map<?, ?>) result.data()).get("answer"));
         assertEquals("report.md", result.artifacts().get(0).get("name"));
+        assertEquals(AgentBusinessResult.VERSION, result.contract().get("contract_version"));
+        assertEquals(result, AgentBusinessResult.fromContract(result.contract()));
     }
 
     @Test

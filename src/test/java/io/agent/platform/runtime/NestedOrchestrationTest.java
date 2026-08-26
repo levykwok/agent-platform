@@ -246,6 +246,33 @@ class NestedOrchestrationTest {
     }
 
     @Test
+    void pipelinePreservesStructuredBusinessResultBetweenAgents() {
+        addSingle(
+                "structured-producer",
+                "{\"status\":\"succeeded\",\"data\":{\"answer\":42,\"pipeline_status\":\"ready\"},"
+                        + "\"summary\":\"structured result\",\"artifacts\":[{\"name\":\"report.md\"}],\"error\":null}");
+        addSingle("structured-consumer", "final result");
+        addPipeline(
+                "typed-pipeline",
+                List.of(
+                        new PipelineStep("produce", "structured-producer", "produce data"),
+                        new PipelineStep("consume", "structured-consumer", "consume data")));
+
+        ChatResponse response = runtime.chat("typed-pipeline", request("start")).block();
+
+        ArgumentCaptor<UserMessage> prompt = ArgumentCaptor.forClass(UserMessage.class);
+        verify(agents.get("structured-consumer"))
+                .call(prompt.capture(), any(RuntimeContext.class));
+        String text = prompt.getValue().getTextContent();
+        assertTrue(text.contains("agent.pipeline.value.v1"));
+        assertTrue(text.contains("\"answer\":42"));
+        assertTrue(text.contains("\"name\":\"report.md\""));
+        assertEquals("final result", response.text());
+        assertEquals("agent.pipeline.value.v1", response.task().metadata().get("pipeline_contract"));
+        assertEquals("final result", response.task().result().data().get("text"));
+    }
+
+    @Test
     void supervisorRunsAllSpecialistsAndReturnsTaskEnvelope() {
         addSingle("researcher", "research result");
         addSingle("writer", "writer result");
@@ -439,6 +466,96 @@ class NestedOrchestrationTest {
                         org.mockito.ArgumentMatchers.argThat(
                                 item -> item.agentId().equals("budgeted-supervisor")),
                         anyString());
+    }
+
+    @Test
+    void supervisorRetriesPrimaryThenUsesConfiguredFallbackAgent() {
+        addDefinition("unavailable-primary", OrchestrationPolicy.single());
+        HarnessAgent primary = mock(HarnessAgent.class);
+        doReturn(reactor.core.publisher.Mono.error(new IllegalStateException("primary down")))
+                .when(primary)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("unavailable-primary", primary);
+        addSingle("fallback-specialist", "fallback result");
+        HarnessAgent supervisor = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("supervisor final"))
+                .when(supervisor)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("resilient-supervisor", supervisor);
+        addDefinition(
+                "resilient-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding(
+                                        "specialist",
+                                        "unavailable-primary",
+                                        "specialist",
+                                        "",
+                                        true,
+                                        List.of(),
+                                        Map.of(),
+                                        5_000L,
+                                        1,
+                                        SubagentBinding.FailurePolicy.FALLBACK,
+                                        "fallback-specialist")),
+                        List.of(),
+                        List.of()));
+
+        ChatResponse response =
+                runtime.chat("resilient-supervisor", request("complete the task")).block();
+
+        assertEquals("supervisor final", response.text());
+        verify(primary, times(2)).call(any(UserMessage.class), any(RuntimeContext.class));
+        verify(agents.get("fallback-specialist"))
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        ArgumentCaptor<UserMessage> summary = ArgumentCaptor.forClass(UserMessage.class);
+        verify(supervisor).call(summary.capture(), any(RuntimeContext.class));
+        assertTrue(summary.getValue().getTextContent().contains("fallback_used: true"));
+        assertTrue(summary.getValue().getTextContent().contains("primary down"));
+    }
+
+    @Test
+    void supervisorCanRecordFailedBindingAndContinueToSummary() {
+        addDefinition("skipped-primary", OrchestrationPolicy.single());
+        HarnessAgent primary = mock(HarnessAgent.class);
+        doReturn(reactor.core.publisher.Mono.error(new IllegalStateException("optional failure")))
+                .when(primary)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("skipped-primary", primary);
+        HarnessAgent supervisor = mock(HarnessAgent.class);
+        doReturn(MonoFactory.message("partial supervisor final"))
+                .when(supervisor)
+                .call(any(UserMessage.class), any(RuntimeContext.class));
+        agents.put("skip-supervisor", supervisor);
+        addDefinition(
+                "skip-supervisor",
+                new OrchestrationPolicy(
+                        OrchestrationMode.SUPERVISOR,
+                        List.of(
+                                new SubagentBinding(
+                                        "optional",
+                                        "skipped-primary",
+                                        "optional",
+                                        "",
+                                        true,
+                                        List.of(),
+                                        Map.of(),
+                                        null,
+                                        0,
+                                        SubagentBinding.FailurePolicy.SKIP,
+                                        "")),
+                        List.of(),
+                        List.of()));
+
+        ChatResponse response =
+                runtime.chat("skip-supervisor", request("use optional data if available")).block();
+
+        assertEquals("partial supervisor final", response.text());
+        ArgumentCaptor<UserMessage> summary = ArgumentCaptor.forClass(UserMessage.class);
+        verify(supervisor).call(summary.capture(), any(RuntimeContext.class));
+        assertTrue(summary.getValue().getTextContent().contains("SUBAGENT_SKIPPED"));
+        assertTrue(summary.getValue().getTextContent().contains("optional failure"));
     }
 
     @Test

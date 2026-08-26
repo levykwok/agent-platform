@@ -18,7 +18,7 @@ class AgentScopeOrchestrationDecisionModelTest {
 
     @Test
     void forcedRouterPolicyAddsDashScopeThinkingOverride() {
-        AgentDefinition router = definition(OrchestrationMode.ROUTER, true);
+        AgentDefinition router = definition(OrchestrationMode.ROUTER, true, false);
 
         Object value =
                 AgentScopeOrchestrationDecisionModel.decisionOptions(router)
@@ -29,21 +29,29 @@ class AgentScopeOrchestrationDecisionModelTest {
     }
 
     @Test
-    void modelDefaultAndNonRouterCallsDoNotReceiveThinkingOverride() {
-        AgentDefinition defaultRouter = definition(OrchestrationMode.ROUTER, false);
-        AgentDefinition supervisor = definition(OrchestrationMode.SUPERVISOR, true);
+    void supervisorPolicyAlsoDisablesThinkingWhileExplicitOptOutRestoresModelDefault() {
+        AgentDefinition defaultRouter = definition(OrchestrationMode.ROUTER, false, true);
+        AgentDefinition supervisor = definition(OrchestrationMode.SUPERVISOR, false, true);
+        AgentDefinition defaultSupervisor =
+                definition(OrchestrationMode.SUPERVISOR, true, false);
 
         assertFalse(
                 AgentScopeOrchestrationDecisionModel.decisionOptions(defaultRouter)
                         .getAdditionalBodyParams()
                         .containsKey("enable_thinking"));
-        assertFalse(
+        assertEquals(
+                Boolean.FALSE,
                 AgentScopeOrchestrationDecisionModel.decisionOptions(supervisor)
+                        .getAdditionalBodyParams()
+                        .get("enable_thinking"));
+        assertFalse(
+                AgentScopeOrchestrationDecisionModel.decisionOptions(defaultSupervisor)
                         .getAdditionalBodyParams()
                         .containsKey("enable_thinking"));
     }
 
-    private static AgentDefinition definition(OrchestrationMode mode, boolean disableThinking) {
+    private static AgentDefinition definition(
+            OrchestrationMode mode, boolean routerDisableThinking, boolean supervisorDisableThinking) {
         return new AgentDefinition(
                 "decision-test",
                 "v1",
@@ -64,6 +72,7 @@ class AgentScopeOrchestrationDecisionModelTest {
                         OrchestrationPolicy.DEFAULT_MAX_SUPERVISOR_STEPS,
                         false,
                         2,
-                        disableThinking));
+                        routerDisableThinking,
+                        supervisorDisableThinking));
     }
 }

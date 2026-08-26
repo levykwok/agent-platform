@@ -18,6 +18,7 @@ public record AgentBusinessResult(
         List<Map<String, Object>> artifacts,
         TaskError error) {
 
+    public static final String VERSION = "agent.result.v1";
     public static final String SUCCEEDED = "succeeded";
     public static final String FAILED = "failed";
     public static final String PARTIAL = "partial";
@@ -45,12 +46,44 @@ public record AgentBusinessResult(
 
     public Map<String, Object> contract() {
         Map<String, Object> value = new LinkedHashMap<>();
+        value.put("contract_version", VERSION);
         value.put("status", status);
         value.put("data", data);
         value.put("summary", summary);
         value.put("artifacts", artifacts);
         value.put("error", error);
         return value;
+    }
+
+    public static AgentBusinessResult fromContract(Object value) {
+        if (!(value instanceof Map<?, ?> map)) {
+            return null;
+        }
+        try {
+            Object data = map.get("data");
+            List<Map<String, Object>> artifacts = new ArrayList<>();
+            if (map.get("artifacts") instanceof List<?> rows) {
+                for (Object row : rows) {
+                    if (row instanceof Map<?, ?> artifact) {
+                        Map<String, Object> copy = new LinkedHashMap<>();
+                        artifact.forEach((key, item) -> copy.put(String.valueOf(key), item));
+                        artifacts.add(java.util.Collections.unmodifiableMap(copy));
+                    }
+                }
+            }
+            TaskError error =
+                    map.get("error") instanceof Map<?, ?> rawError
+                            ? JSON.convertValue(rawError, TaskError.class)
+                            : null;
+            return new AgentBusinessResult(
+                    String.valueOf(map.containsKey("status") ? map.get("status") : SUCCEEDED),
+                    data,
+                    String.valueOf(map.containsKey("summary") ? map.get("summary") : ""),
+                    artifacts,
+                    error);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
     }
 
     private static AgentBusinessResult parseStructured(String text) {

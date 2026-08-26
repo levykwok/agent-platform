@@ -54,7 +54,11 @@ final class OrchestrationCycleValidator {
         switch (policy.mode()) {
             case ROUTER -> policy.routes().forEach(route -> targets.add(route.targetAgentId()));
             case SUPERVISOR ->
-                    policy.subagents().forEach(binding -> targets.add(binding.targetAgentId()));
+                    policy.subagents().forEach(
+                            binding -> {
+                                targets.add(binding.targetAgentId());
+                                targets.add(binding.fallbackAgentId());
+                            });
             case PIPELINE -> policy.pipeline().forEach(step -> targets.add(step.agentId()));
             case SINGLE -> {}
         }
