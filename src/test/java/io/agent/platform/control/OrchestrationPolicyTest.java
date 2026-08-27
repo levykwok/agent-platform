@@ -26,6 +26,31 @@ class OrchestrationPolicyTest {
         assertEquals(2, policy.maxSupervisorParallelism());
         assertTrue(policy.routerDisableThinking());
         assertTrue(policy.supervisorDisableThinking());
+        assertEquals(
+                OrchestrationPolicy.DEFAULT_MAX_PIPELINE_PARALLELISM,
+                policy.maxPipelineParallelism());
+    }
+
+    @Test
+    void pipelineParallelismRoundTripsAndIsClamped() throws Exception {
+        OrchestrationPolicy configured =
+                objectMapper.readValue(
+                        "{\"mode\":\"PIPELINE\",\"maxPipelineParallelism\":6}",
+                        OrchestrationPolicy.class);
+        OrchestrationPolicy excessive =
+                objectMapper.readValue(
+                        "{\"mode\":\"PIPELINE\",\"max_pipeline_parallelism\":99}",
+                        OrchestrationPolicy.class);
+
+        assertEquals(6, configured.maxPipelineParallelism());
+        assertEquals(8, excessive.maxPipelineParallelism());
+        assertEquals(
+                6,
+                objectMapper
+                        .readValue(
+                                objectMapper.writeValueAsString(configured),
+                                OrchestrationPolicy.class)
+                        .maxPipelineParallelism());
     }
 
     @Test

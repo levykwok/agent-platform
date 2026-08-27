@@ -79,6 +79,59 @@ class OrchestrationRecoveryTest {
     }
 
     @Test
+    void pipelineRecoveryDoesNotRepeatCommittedParallelGroup() {
+        Fixture fixture = new Fixture(tempDir);
+        HarnessAgent facts = fixture.single("facts", "facts-result");
+        HarnessAgent risks = fixture.single("risks", "risks-result");
+        HarnessAgent join = fixture.single("join", "joined-result");
+        fixture.definition(
+                "parallel-pipeline",
+                new OrchestrationPolicy(
+                        OrchestrationMode.PIPELINE,
+                        List.of(),
+                        List.of(),
+                        List.of(
+                                new PipelineStep(
+                                        "facts-step",
+                                        "facts",
+                                        "facts",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "gather"),
+                                new PipelineStep(
+                                        "risks-step",
+                                        "risks",
+                                        "risks",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "gather"),
+                                new PipelineStep("join-step", "join", "join"))));
+        ChatRequest request =
+                fixture.request("run-parallel-pipeline", "parallel-pipeline", "start");
+        fixture.register("run-parallel-pipeline", "parallel-pipeline");
+
+        fixture.runtime(fixture.decisionModel)
+                .stream("parallel-pipeline", request)
+                .takeUntil(event -> "pipeline_parallel_end".equals(event.type()))
+                .collectList()
+                .block();
+
+        ChatResponse recovered =
+                fixture.runtime(fixture.decisionModel)
+                        .chat("parallel-pipeline", request)
+                        .block();
+
+        assertEquals("joined-result", recovered.text());
+        verify(facts, times(1)).call(any(UserMessage.class), any(RuntimeContext.class));
+        verify(risks, times(1)).call(any(UserMessage.class), any(RuntimeContext.class));
+        verify(join, times(1)).call(any(UserMessage.class), any(RuntimeContext.class));
+    }
+
+    @Test
     void supervisorRecoveryDoesNotRepeatCommittedSubagentBatch() {
         Fixture fixture = new Fixture(tempDir);
         HarnessAgent researcher = fixture.single("researcher", "facts");

@@ -195,7 +195,7 @@ function Invoke-StreamingRun {
 try {
     $cases = @(
         @{ label = 'single'; agent = 'orchestration-e2e-single-analysis'; query = 'Run the single-agent orchestration acceptance test.' },
-        @{ label = 'pipeline'; agent = 'orchestration-e2e-workflow'; query = 'Run the two-step Pipeline orchestration acceptance test.' },
+        @{ label = 'pipeline'; agent = 'orchestration-e2e-workflow'; query = 'Run the parallel fan-out and join Pipeline orchestration acceptance test.' },
         @{ label = 'router'; agent = 'orchestration-e2e-router'; query = 'First inspect the acceptance request carefully, then transform that analysis into the required concise output.' },
         @{ label = 'supervisor'; agent = 'orchestration-e2e-supervisor'; query = 'Run the combined orchestration acceptance test and summarize every declared child result.' }
     )
@@ -240,6 +240,17 @@ try {
         -or $pipelineProperties -notcontains 'pipeline' `
         -or $pipelineProperties -contains 'workflow') {
         throw 'Agent PIPELINE run snapshot did not use the canonical orchestration.pipeline schema.'
+    }
+    $parallelStarts = @($pipelineResult.persisted_events | Where-Object { $_.event_type -eq 'pipeline_parallel_start' })
+    $parallelEnds = @($pipelineResult.persisted_events | Where-Object { $_.event_type -eq 'pipeline_parallel_end' })
+    $parallelStepEnds = @($pipelineResult.persisted_events | Where-Object { $_.event_type -eq 'pipeline_step_end' -and $_.payload.parallel_group -eq 'acceptance-fanout' })
+    if ($parallelStarts.Count -ne 1 -or $parallelEnds.Count -ne 1 -or $parallelStepEnds.Count -ne 2) {
+        throw 'Agent PIPELINE did not persist one complete two-step parallel fan-out group.'
+    }
+    if ([string]$parallelStarts[0].payload.max_parallelism -ne '2' `
+        -or [string]$pipelineSnapshot.maxPipelineParallelism -ne '2' `
+        -or [string]$pipelineResult.answer -notmatch 'E2E_PIPELINE_PARALLEL_OK') {
+        throw 'Agent PIPELINE parallel policy, joined output, or acceptance marker was not preserved.'
     }
     $supervisorResult = @($results | Where-Object { $_.label -eq 'supervisor' } | Select-Object -First 1)
     $supervisorSteps = @($supervisorResult.persisted_events | Where-Object { $_.event_type -eq 'supervisor_step_start' })

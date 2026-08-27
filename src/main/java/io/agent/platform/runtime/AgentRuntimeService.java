@@ -528,6 +528,39 @@ public class AgentRuntimeService implements AgentRuntime {
             return Mono.just(new PipelineStepExecution(input, null));
         }
         PipelineStep step = steps.get(index);
+        if (!step.parallelGroup().isBlank()) {
+            List<PipelineStep> group = pipelineParallelGroup(steps, index);
+            for (PipelineStep member : group) {
+                if (!visited.add(member.stepId())) {
+                    return Mono.error(
+                            new AgentRuntimeException(
+                                    "Pipeline cycle detected at step: " + member.stepId()));
+                }
+            }
+            return runPipelineParallelGroup(
+                            group,
+                            request,
+                            input,
+                            definition.orchestration().maxPipelineParallelism())
+                    .flatMap(
+                            execution -> {
+                                int next = index + group.size();
+                                checkpointPipeline(
+                                        definition,
+                                        request,
+                                        next,
+                                        execution.value(),
+                                        visited,
+                                        false);
+                                return runPipelineSteps(
+                                        definition,
+                                        request,
+                                        steps,
+                                        next,
+                                        execution.value(),
+                                        visited);
+                            });
+        }
         if (!visited.add(step.stepId())) {
             return Mono.error(new AgentRuntimeException("Pipeline cycle detected at step: " + step.stepId()));
         }
@@ -593,6 +626,83 @@ public class AgentRuntimeService implements AgentRuntime {
                         });
     }
 
+    private Mono<PipelineParallelExecution> runPipelineParallelGroup(
+            List<PipelineStep> group,
+            ChatRequest request,
+            PipelineValue input,
+            int maxParallelism) {
+        int concurrency = Math.max(1, Math.min(maxParallelism, group.size()));
+        return Flux.fromIterable(group)
+                .flatMapSequential(
+                        step ->
+                                runPipelineStep(step, request, input)
+                                        .map(execution -> new PipelineParallelStep(step, execution)),
+                        concurrency,
+                        1)
+                .collectList()
+                .map(
+                        results ->
+                                new PipelineParallelExecution(
+                                        joinPipelineValues(group.get(0).parallelGroup(), results),
+                                        results));
+    }
+
+    static List<PipelineStep> pipelineParallelGroup(List<PipelineStep> steps, int index) {
+        if (index < 0 || index >= steps.size()) return List.of();
+        String group = safe(steps.get(index).parallelGroup(), "");
+        if (group.isBlank()) return List.of(steps.get(index));
+        List<PipelineStep> members = new ArrayList<>();
+        for (int current = index; current < steps.size(); current++) {
+            PipelineStep step = steps.get(current);
+            if (!group.equals(step.parallelGroup())) break;
+            members.add(step);
+        }
+        return List.copyOf(members);
+    }
+
+    private static PipelineValue joinPipelineValues(
+            String parallelGroup, List<PipelineParallelStep> results) {
+        List<Map<String, Object>> outputs = new ArrayList<>();
+        List<Map<String, Object>> artifacts = new ArrayList<>();
+        StringBuilder summary = new StringBuilder();
+        int failed = 0;
+        int partial = 0;
+        for (PipelineParallelStep item : results) {
+            PipelineValue value = item.execution().value();
+            AgentBusinessResult result = value.result();
+            if (AgentBusinessResult.FAILED.equals(result.status())) failed++;
+            if (AgentBusinessResult.PARTIAL.equals(result.status())) partial++;
+            artifacts.addAll(result.artifacts());
+            Map<String, Object> output = new LinkedHashMap<>();
+            output.put("step_id", item.step().stepId());
+            output.put("agent_id", item.step().agentId());
+            output.put("transition_status", value.transitionStatus());
+            output.put("result", result.contract());
+            outputs.add(Map.copyOf(output));
+            if (!summary.isEmpty()) summary.append('\n');
+            summary.append(item.step().stepId()).append(": ").append(value.text());
+        }
+        String status =
+                failed == results.size()
+                        ? AgentBusinessResult.FAILED
+                        : failed > 0 || partial > 0
+                                ? AgentBusinessResult.PARTIAL
+                                : AgentBusinessResult.SUCCEEDED;
+        AgentBusinessResult joined =
+                new AgentBusinessResult(
+                        status,
+                        Map.of(
+                                "parallel_group",
+                                parallelGroup,
+                                "results",
+                                List.copyOf(outputs)),
+                        summary.toString(),
+                        List.copyOf(artifacts),
+                        null);
+        return new PipelineValue(
+                PipelineValue.VERSION, status, joined, summary.toString());
+    }
+
     static Mono<String> withStepPolicy(PipelineStep step, String input, Mono<String> action) {
         Mono<String> guarded = action;
         if (step.timeoutMs() != null) guarded = guarded.timeout(Duration.ofMillis(step.timeoutMs()));
@@ -635,7 +745,8 @@ public class AgentRuntimeService implements AgentRuntime {
                         resume.nextIndex(),
                         request,
                         resume.value(),
-                        new java.util.HashSet<>(resume.visited())));
+                        new java.util.HashSet<>(resume.visited()),
+                        resume.recovered() && resume.nextIndex() >= steps.size()));
     }
 
     private Flux<AgentEventEnvelope> streamPipelineStep(
@@ -644,13 +755,96 @@ public class AgentRuntimeService implements AgentRuntime {
             int index,
             ChatRequest request,
             PipelineValue input,
-            java.util.Set<String> visited) {
+            java.util.Set<String> visited,
+            boolean recoveredCompletion) {
         if (index >= steps.size()) {
             checkpointPipeline(definition, request, index, input, visited, true);
-            return Flux.just(
-                    pipelineRecoveredResultEvent(definition, input));
+            return Flux.just(pipelineCompletedResultEvent(definition, input, recoveredCompletion));
         }
         PipelineStep step = steps.get(index);
+        if (!step.parallelGroup().isBlank()) {
+            List<PipelineStep> group = pipelineParallelGroup(steps, index);
+            for (PipelineStep member : group) {
+                if (!visited.add(member.stepId())) {
+                    return Flux.error(
+                            new AgentRuntimeException(
+                                    "Pipeline cycle detected at step: " + member.stepId()));
+                }
+            }
+            int concurrency =
+                    Math.max(
+                            1,
+                            Math.min(
+                                    definition.orchestration().maxPipelineParallelism(),
+                                    group.size()));
+            long startedAt = System.nanoTime();
+            List<AgentEventEnvelope> starts = new ArrayList<>();
+            starts.add(pipelineParallelEvent(definition, group, concurrency, true, 0L));
+            for (PipelineStep member : group) {
+                starts.add(
+                        agentPipelineEvent(
+                                member.agentId(),
+                                "pipeline_step_start",
+                                "Start parallel pipeline step "
+                                        + safe(member.stepId(), "step")
+                                        + " -> "
+                                        + member.agentId()));
+            }
+            return Flux.concat(
+                    Flux.fromIterable(starts),
+                    Flux.merge(
+                            group.stream()
+                                    .map(member -> pipelineAgentSummaryEvents(member.agentId(), "start"))
+                                    .toList()),
+                    runPipelineParallelGroup(group, request, input, concurrency)
+                            .flatMapMany(
+                                    execution -> {
+                                        int next = index + group.size();
+                                        checkpointPipeline(
+                                                definition,
+                                                request,
+                                                next,
+                                                execution.value(),
+                                                visited,
+                                                false);
+                                        List<AgentEventEnvelope> finished = new ArrayList<>();
+                                        for (PipelineParallelStep result : execution.results()) {
+                                            finished.add(
+                                                    pipelineStepResultEvent(
+                                                            result.step(),
+                                                            result.execution().value(),
+                                                            false));
+                                        }
+                                        finished.add(
+                                                pipelineParallelEvent(
+                                                        definition,
+                                                        group,
+                                                        concurrency,
+                                                        false,
+                                                        Duration.ofNanos(
+                                                                        System.nanoTime()
+                                                                                - startedAt)
+                                                                .toMillis()));
+                                        return Flux.concat(
+                                                Flux.merge(
+                                                        group.stream()
+                                                                .map(
+                                                                        member ->
+                                                                                pipelineAgentSummaryEvents(
+                                                                                        member.agentId(),
+                                                                                        "end"))
+                                                                .toList()),
+                                                Flux.fromIterable(finished),
+                                                streamPipelineStep(
+                                                        definition,
+                                                        steps,
+                                                        next,
+                                                        request,
+                                                        execution.value(),
+                                                        visited,
+                                                        false));
+                                    }));
+        }
         if (!visited.add(step.stepId())) {
             return Flux.error(
                     new AgentRuntimeException(
@@ -694,7 +888,8 @@ public class AgentRuntimeService implements AgentRuntime {
                                                             next,
                                                             request,
                                                             execution.value(),
-                                                            visited));
+                                                            visited,
+                                                            false));
                                         }));
     }
 
@@ -3028,6 +3223,39 @@ public class AgentRuntimeService implements AgentRuntime {
                         "orchestration", "PIPELINE"));
     }
 
+    private AgentEventEnvelope pipelineParallelEvent(
+            AgentDefinition definition,
+            List<PipelineStep> group,
+            int maxParallelism,
+            boolean start,
+            long durationMs) {
+        String parallelGroup = group.isEmpty() ? "" : group.get(0).parallelGroup();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put(
+                "summary",
+                (start ? "Start" : "Finished")
+                        + " Pipeline parallel group "
+                        + parallelGroup
+                        + " ("
+                        + group.size()
+                        + " steps)");
+        payload.put("agent_pipeline", true);
+        payload.put("orchestration", "PIPELINE");
+        payload.put("parallel", true);
+        payload.put("parallel_group", parallelGroup);
+        payload.put("step_ids", group.stream().map(PipelineStep::stepId).toList());
+        payload.put("max_parallelism", maxParallelism);
+        if (!start) payload.put("duration_ms", Math.max(0L, durationMs));
+        String type = start ? "pipeline_parallel_start" : "pipeline_parallel_end";
+        return new AgentEventEnvelope(
+                type + "_" + Instant.now().toEpochMilli(),
+                type,
+                Instant.now().toString(),
+                definition.agentId(),
+                null,
+                Map.copyOf(payload));
+    }
+
     private AgentEventEnvelope pipelineStepResultEvent(
             PipelineStep step, PipelineValue value, boolean finalResult) {
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -3041,6 +3269,10 @@ public class AgentRuntimeService implements AgentRuntime {
         payload.put("orchestration", "PIPELINE");
         payload.put("step_id", safe(step.stepId(), "step"));
         payload.put("agent_id", step.agentId());
+        if (!step.parallelGroup().isBlank()) {
+            payload.put("parallel", true);
+            payload.put("parallel_group", step.parallelGroup());
+        }
         payload.put("final", finalResult);
         payload.put("pipeline_contract", PipelineValue.VERSION);
         payload.put("transition_status", value.transitionStatus());
@@ -3055,18 +3287,21 @@ public class AgentRuntimeService implements AgentRuntime {
                 Map.copyOf(payload));
     }
 
-    private AgentEventEnvelope pipelineRecoveredResultEvent(
-            AgentDefinition definition, PipelineValue value) {
+    private AgentEventEnvelope pipelineCompletedResultEvent(
+            AgentDefinition definition, PipelineValue value, boolean recovered) {
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("summary", "Recovered completed pipeline result");
+        payload.put(
+                "summary",
+                recovered ? "Recovered completed pipeline result" : "Completed pipeline result");
         payload.put("agent_pipeline", true);
         payload.put("orchestration", "PIPELINE");
-        payload.put("recovered", true);
+        payload.put("recovered", recovered);
         payload.put("pipeline_contract", PipelineValue.VERSION);
         payload.put("transition_status", value.transitionStatus());
         payload.put("pipeline_value", value.contract());
         return new AgentEventEnvelope(
-                "pipeline_recovered_" + Instant.now().toEpochMilli(),
+                (recovered ? "pipeline_recovered_" : "pipeline_result_")
+                        + Instant.now().toEpochMilli(),
                 "pipeline_result",
                 Instant.now().toString(),
                 definition.agentId(),
@@ -3094,7 +3329,7 @@ public class AgentRuntimeService implements AgentRuntime {
             AgentDefinition definition, ChatRequest request) {
         PipelineValue initial = PipelineValue.initial(request.message());
         if (checkpointStore == null) {
-            return new PipelineResume(0, initial, java.util.Set.of());
+            return new PipelineResume(0, initial, java.util.Set.of(), false);
         }
         return checkpointStore
                 .load(
@@ -3112,9 +3347,10 @@ public class AgentRuntimeService implements AgentRuntime {
                             return new PipelineResume(
                                     Math.max(0, nextIndex),
                                     value == null ? initial : value,
-                                    java.util.Set.copyOf(visited));
+                                    java.util.Set.copyOf(visited),
+                                    true);
                         })
-                .orElseGet(() -> new PipelineResume(0, initial, java.util.Set.of()));
+                .orElseGet(() -> new PipelineResume(0, initial, java.util.Set.of(), false));
     }
 
     private void checkpointPipeline(
@@ -4110,8 +4346,21 @@ public class AgentRuntimeService implements AgentRuntime {
 
     private record PipelineStepExecution(PipelineValue value, AgentTaskEnvelope task) {}
 
+    private record PipelineParallelStep(
+            PipelineStep step, PipelineStepExecution execution) {}
+
+    private record PipelineParallelExecution(
+            PipelineValue value, List<PipelineParallelStep> results) {
+        private PipelineParallelExecution {
+            results = results == null ? List.of() : List.copyOf(results);
+        }
+    }
+
     private record PipelineResume(
-            int nextIndex, PipelineValue value, java.util.Set<String> visited) {}
+            int nextIndex,
+            PipelineValue value,
+            java.util.Set<String> visited,
+            boolean recovered) {}
 
     private record SupervisorResume(
             SupervisorPlan plan,

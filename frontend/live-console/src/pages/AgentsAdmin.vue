@@ -81,6 +81,7 @@ const form = reactive({
   max_supervisor_steps: 5,
   supervisor_parallel_enabled: false,
   max_supervisor_parallelism: 2,
+  max_pipeline_parallelism: 4,
   root_timeout_ms: 180000,
   root_max_agent_calls: 20,
   root_max_tokens: 100000,
@@ -282,6 +283,7 @@ async function selectAgent(id: string) {
         stepId: s.stepId || s.step_id || '',
         agentId: s.agentId || s.agent_id || '',
         instruction: s.instruction || '',
+        parallelGroup: s.parallelGroup || s.parallel_group || '',
         transitions: ((s.transitions as JsonMap[]) || []).map((t) => ({
           when: t.when || '',
           nextStepId: t.nextStepId || t.next_step_id || t.next || '',
@@ -306,6 +308,7 @@ async function selectAgent(id: string) {
       max_supervisor_steps: Number(orchestration.maxSupervisorSteps || orchestration.max_supervisor_steps || 5),
       supervisor_parallel_enabled: orchestration.supervisorParallelEnabled === true || orchestration.supervisor_parallel_enabled === true,
       max_supervisor_parallelism: Number(orchestration.maxSupervisorParallelism || orchestration.max_supervisor_parallelism || 2),
+      max_pipeline_parallelism: Number(orchestration.maxPipelineParallelism || orchestration.max_pipeline_parallelism || 4),
       root_timeout_ms: Number((((cfg.model_policy as JsonMap)?.runtime as JsonMap)?.root_timeout_ms) || 180000),
       root_max_agent_calls: Number((((cfg.model_policy as JsonMap)?.runtime as JsonMap)?.root_max_agent_calls) || 20),
       root_max_tokens: Number((((cfg.model_policy as JsonMap)?.runtime as JsonMap)?.root_max_tokens) || 100000),
@@ -329,7 +332,7 @@ function newAgent() {
     role: '', planner_rules: '', require_structured_plan: true,
     included_skills: [], included_mcps: [], included_tools: [], restrict_tools: false, router_rules: [],
     orchestration_mode: 'SINGLE', orchestration_routes: [], router_disable_thinking: true, supervisor_disable_thinking: true, pipeline_steps: [], subagents: [], max_supervisor_steps: 5,
-    supervisor_parallel_enabled: false, max_supervisor_parallelism: 2,
+    supervisor_parallel_enabled: false, max_supervisor_parallelism: 2, max_pipeline_parallelism: 4,
     root_timeout_ms: 180000, root_max_agent_calls: 20, root_max_tokens: 100000, root_max_depth: 6,
     output_schema_text: '',
     model_policy: {},
@@ -382,7 +385,7 @@ function addRouterRule() { form.router_rules.push({ intent: '', keywords: '' }) 
 function removeRouterRule(i: number) { form.router_rules.splice(i, 1) }
 function addOrchestrationRoute() { form.orchestration_routes.push({ ruleId: `route_${form.orchestration_routes.length + 1}`, targetAgentId: '', contains: '', keywords: '', defaultRoute: false }) }
 function removeOrchestrationRoute(i: number) { form.orchestration_routes.splice(i, 1) }
-function addPipelineStep() { form.pipeline_steps.push({ stepId: `step_${form.pipeline_steps.length + 1}`, agentId: '', instruction: '', transitions: [] }) }
+function addPipelineStep() { form.pipeline_steps.push({ stepId: `step_${form.pipeline_steps.length + 1}`, agentId: '', instruction: '', parallelGroup: '', transitions: [] }) }
 function removePipelineStep(i: number) { form.pipeline_steps.splice(i, 1) }
 function addPipelineTransition(step: JsonMap) {
   if (!Array.isArray(step.transitions)) step.transitions = []
@@ -560,6 +563,7 @@ async function saveAgent() {
         stepId: String(s.stepId || '').trim(),
         agentId: String(s.agentId || '').trim(),
         instruction: String(s.instruction || '').trim(),
+        parallelGroup: String(s.parallelGroup || '').trim(),
         transitions: ((s.transitions || []) as JsonMap[])
           .map((t) => ({
             when: String(t.when || '').trim(),
@@ -570,7 +574,20 @@ async function saveAgent() {
       }))
       .filter((s) => s.stepId && s.agentId)
     if (!pipeline.length) { notifyError('PIPELINE 至少需要一个有效步骤'); step.value = 1; return }
+    const parallelGroups = new Map<string, number[]>()
+    pipeline.forEach((item, index) => {
+      if (!item.parallelGroup) return
+      const indices = parallelGroups.get(item.parallelGroup) || []
+      indices.push(index)
+      parallelGroups.set(item.parallelGroup, indices)
+    })
+    for (const [group, indices] of parallelGroups) {
+      const contiguous = indices.every((value, offset) => value === indices[0] + offset)
+      if (indices.length < 2 || !contiguous) { notifyError(`并行组 ${group} 必须包含至少两个相邻步骤`); step.value = 1; return }
+      if (indices.some((index) => pipeline[index].transitions.length > 0)) { notifyError(`并行组 ${group} 内的步骤不能配置条件分支，请在 join 后的步骤分支`); step.value = 1; return }
+    }
     orchestration.pipeline = pipeline
+    orchestration.maxPipelineParallelism = Math.max(1, Math.min(8, Math.trunc(Number(form.max_pipeline_parallelism || 4))))
   }
   if (mode === 'SUPERVISOR') {
     const subagents: JsonMap[] = []
@@ -740,7 +757,7 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         <div v-if="form.orchestration_mode === 'PIPELINE' && form.pipeline_steps.length" class="orch-flow">
           <div v-for="(s, i) in form.pipeline_steps" :key="`${s.stepId}-${i}`" class="orch-step">
             <div class="orch-index">{{ i + 1 }}</div>
-            <div class="orch-main"><div class="orch-title">{{ s.stepId || `step_${i + 1}` }} <span>→ {{ s.agentId ? agentDisplayLabel(String(s.agentId)) : '未选择代理' }}</span></div><div class="orch-desc">{{ s.instruction || '无额外指令' }}</div></div>
+            <div class="orch-main"><div class="orch-title">{{ s.stepId || `step_${i + 1}` }} <span>→ {{ s.agentId ? agentDisplayLabel(String(s.agentId)) : '未选择代理' }}</span><span v-if="s.parallelGroup" class="mini-badge">并行 · {{ s.parallelGroup }}</span></div><div class="orch-desc">{{ s.instruction || '无额外指令' }}</div></div>
           </div>
         </div>
         <div v-else-if="form.orchestration_mode === 'ROUTER' && form.orchestration_routes.length" class="ov-rows">
@@ -909,18 +926,20 @@ onMounted(async () => { await loadDomains(); await loadDeps(); await loadAgents(
         </div>
 
         <div v-else-if="form.orchestration_mode === 'PIPELINE'">
-          <div class="actions"><button class="btn btn-ghost btn-sm" @click="addPipelineStep">添加步骤</button></div>
+          <p class="pick-hint">相邻步骤填写相同并行组后会共享上一步输入并发执行，整组完成并 join 后再进入下一步；并行组内不配置条件分支。</p>
+          <div class="actions"><div class="field inline-number"><label>最大并行度（1–8）</label><input v-model.number="form.max_pipeline_parallelism" type="number" min="1" max="8" /></div><button class="btn btn-ghost btn-sm" @click="addPipelineStep">添加步骤</button></div>
           <table>
-            <thead><tr><th>步骤 ID</th><th>执行代理</th><th>指令</th><th>条件分支</th><th></th></tr></thead>
+            <thead><tr><th>步骤 ID</th><th>执行代理</th><th>指令</th><th>并行组</th><th>条件分支</th><th></th></tr></thead>
             <tbody>
               <tr v-for="(s, i) in form.pipeline_steps" :key="`step${i}`">
                 <td><input v-model="s.stepId" placeholder="research" /></td>
                 <td><select v-model="s.agentId"><option value="">选择代理</option><option v-for="a in agents" :key="String(a.agent_id)" :value="a.agent_id">{{ agentOptionLabel(a) }}</option></select></td>
                 <td><input v-model="s.instruction" placeholder="传给该代理的步骤指令" /></td>
+                <td><input v-model="s.parallelGroup" placeholder="留空串行，例如 gather" /></td>
                 <td class="pipeline-branch-cell"><button class="btn btn-ghost btn-sm" @click="addPipelineTransition(s)">添加分支</button><div v-for="(t, ti) in (s.transitions || [])" :key="`${i}-${ti}`" class="pipeline-branch-row"><input v-model="t.when" placeholder="状态" :disabled="t.defaultTransition === true" /><span>→</span><select v-model="t.nextStepId"><option value="">选择后续步骤</option><option v-for="target in form.pipeline_steps.slice(i + 1)" :key="String(target.stepId)" :value="String(target.stepId)">{{ target.stepId || '未命名步骤' }}</option></select><label class="pipeline-default"><input type="checkbox" v-model="t.defaultTransition" /> 默认</label><button class="btn small danger" @click="removePipelineTransition(s, ti)">删除</button></div><div v-if="!(s.transitions || []).length" class="branch-empty">无分支，按顺序执行</div></td>
                 <td><button class="btn small danger" @click="removePipelineStep(i)">删除</button></td>
               </tr>
-              <tr v-if="!form.pipeline_steps.length"><td colspan="5" class="empty">暂无步骤，保存 PIPELINE 前至少添加一个。</td></tr>
+              <tr v-if="!form.pipeline_steps.length"><td colspan="6" class="empty">暂无步骤，保存 PIPELINE 前至少添加一个。</td></tr>
             </tbody>
           </table>
         </div>
@@ -1119,6 +1138,9 @@ td textarea { min-width: 230px; width: 100%; resize: vertical; font-family: ui-m
 .pipeline-branch-row input, .pipeline-branch-row select { min-width: 0; }
 .pipeline-default { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 11px; color: var(--muted); }
 .branch-empty { color: var(--muted); font-size: 11px; margin-top: 7px; }
+.inline-number { display: flex; align-items: center; gap: 8px; margin: 0; }
+.inline-number label { white-space: nowrap; }
+.inline-number input { width: 76px; }
 .tool-pick .tool-card { cursor: pointer; }
 .tool-pick .tool-card.pick { transition: border-color .15s, box-shadow .15s, transform .15s; }
 .tool-pick .tool-card.pick:hover { transform: translateY(-2px); }
@@ -1193,6 +1215,7 @@ td textarea { min-width: 230px; width: 100%; resize: vertical; font-family: ui-m
 .orch-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .orch-title { font-size: 13px; font-weight: 800; color: var(--text); font-family: ui-monospace, Menlo, Consolas, monospace; }
 .orch-title span { color: #1d4ed8; }
+.orch-title .mini-badge { display: inline-flex; margin-left: 8px; padding: 2px 7px; border-radius: 99px; background: #ede9fe; color: #6d28d9; font-family: inherit; font-size: 10px; }
 .orch-desc { font-size: 12px; color: var(--muted); line-height: 1.5; }
 .ov-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
 .ov-cols .ov-section { margin-top: 0; }

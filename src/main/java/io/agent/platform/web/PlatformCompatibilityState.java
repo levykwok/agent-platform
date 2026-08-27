@@ -522,7 +522,12 @@ public class PlatformCompatibilityState {
                         map,
                         fallback.supervisorDisableThinking(),
                         "supervisorDisableThinking",
-                        "supervisor_disable_thinking"));
+                        "supervisor_disable_thinking"),
+                integerAny(
+                        map,
+                        fallback.maxPipelineParallelism(),
+                        "maxPipelineParallelism",
+                        "max_pipeline_parallelism"));
     }
 
     private OrchestrationMode mode(String value) {
@@ -619,7 +624,8 @@ public class PlatformCompatibilityState {
                 numberLong(map.get("timeoutMs"), map.get("timeout_ms")),
                 numberInt(map.get("maxRetries"), map.get("max_retries")),
                 pipelineFailurePolicy(map),
-                pipelineTransitions(map.get("transitions")));
+                pipelineTransitions(map.get("transitions")),
+                stringAny(map, "parallelGroup", "parallel_group"));
     }
 
     private List<PipelineTransition> pipelineTransitions(Object value) {
@@ -2976,7 +2982,9 @@ public class PlatformCompatibilityState {
         long supervisorFallbacks = 0;
         long supervisorPlans = 0;
         long supervisorChildCalls = 0;
+        long pipelineParallelGroups = 0;
         List<Long> decisionDurations = new ArrayList<>();
+        List<Long> pipelineParallelDurations = new ArrayList<>();
         for (String runId : selectedRunIds) {
             for (Map<String, Object> event : runEvents(runId)) {
                 String type = String.valueOf(event.getOrDefault("event_type", "")).toLowerCase();
@@ -2996,6 +3004,12 @@ public class PlatformCompatibilityState {
                     }
                 }
                 if ("supervisor_subagent_result".equals(type)) supervisorChildCalls++;
+                if ("pipeline_parallel_end".equals(type)) {
+                    pipelineParallelGroups++;
+                    if (payload.get("duration_ms") instanceof Number duration) {
+                        pipelineParallelDurations.add(duration.longValue());
+                    }
+                }
                 if (("router_decision".equals(type)
                                 || "supervisor_plan".equals(type)
                                 || "supervisor_revise".equals(type))
@@ -3080,6 +3094,8 @@ public class PlatformCompatibilityState {
         metrics.put("run_count_by_mode", Map.copyOf(runCountByMode));
         metrics.put("pipeline_runs", runCountByMode.getOrDefault("PIPELINE", 0L));
         metrics.put("pipeline_p95_ms", percentile95(pipelineDurations));
+        metrics.put("pipeline_parallel_groups", pipelineParallelGroups);
+        metrics.put("pipeline_parallel_p95_ms", percentile95(pipelineParallelDurations));
         metrics.put("input_tokens", inputTokens);
         metrics.put("output_tokens", outputTokens);
         metrics.put("total_tokens", inputTokens + outputTokens);

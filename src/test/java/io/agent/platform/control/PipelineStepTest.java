@@ -25,6 +25,17 @@ class PipelineStepTest {
         assertNull(step.timeoutMs());
         assertEquals(0, step.maxRetries());
         assertEquals(PipelineStep.FailurePolicy.FAIL_FAST, step.failurePolicy());
+        assertEquals("", step.parallelGroup());
+    }
+
+    @Test
+    void parallelGroupSupportsSnakeCaseAlias() throws Exception {
+        PipelineStep step =
+                yaml.readValue(
+                        "stepId: facts\nagentId: researcher\nparallel_group: gather\n",
+                        PipelineStep.class);
+
+        assertEquals("gather", step.parallelGroup());
     }
 
     @Test

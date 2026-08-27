@@ -322,12 +322,12 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
       <div class="metric"><span>Supervisor fallback</span><strong>{{ percent(orchestrationMetrics.supervisor_fallback_rate) }}</strong><small>{{ orchestrationMetrics.supervisor_fallbacks || 0 }} / {{ orchestrationMetrics.supervisor_decisions || 0 }}</small></div>
       <div class="metric"><span>平均子 Agent 调用</span><strong>{{ metricNumber(orchestrationMetrics.supervisor_average_agent_calls) }}</strong><small>每个 Supervisor PLAN</small></div>
       <div class="metric"><span>编排决策 P95</span><strong>{{ metricNumber(orchestrationMetrics.decision_p95_ms, ' ms') }}</strong><small>Router / PLAN / REVISE</small></div>
-      <div class="metric"><span>运行 P95</span><strong>{{ metricNumber(orchestrationMetrics.run_p95_ms, ' ms') }}</strong><small>{{ orchestrationMetrics.run_count || 0 }} 次 · Pipeline {{ orchestrationMetrics.pipeline_runs || 0 }} / {{ metricNumber(orchestrationMetrics.pipeline_p95_ms, ' ms') }}</small></div>
+      <div class="metric"><span>运行 P95</span><strong>{{ metricNumber(orchestrationMetrics.run_p95_ms, ' ms') }}</strong><small>{{ orchestrationMetrics.run_count || 0 }} 次 · Pipeline {{ orchestrationMetrics.pipeline_runs || 0 }} / {{ metricNumber(orchestrationMetrics.pipeline_p95_ms, ' ms') }} · 并行组 {{ orchestrationMetrics.pipeline_parallel_groups || 0 }} / {{ metricNumber(orchestrationMetrics.pipeline_parallel_p95_ms, ' ms') }}</small></div>
       <div class="metric"><span>Token / 成本</span><strong>{{ orchestrationMetrics.total_tokens || 0 }}</strong><small>{{ orchestrationMetrics.currency || 'USD' }} {{ metricNumber(orchestrationMetrics.estimated_cost) }}</small></div>
     </div>
 
     <section v-if="agentFilter" class="panel orchestration-eval-panel">
-      <div class="section-head"><div><div class="section-title">编排回归评测 · {{ agentName(agentFilter) }}</div><div class="section-sub">真实调用 Agent，并自动断言 route_id / target_agent_id、binding_ids、child_call_count、pipeline_step_ids、output_contains 与 max_duration_ms。</div></div><button class="btn btn-primary btn-sm" :disabled="evaluationRunning" @click="runOrchestrationEvaluation">{{ evaluationRunning ? '评测运行中…' : '运行评测' }}</button></div>
+      <div class="section-head"><div><div class="section-title">编排回归评测 · {{ agentName(agentFilter) }}</div><div class="section-sub">真实调用 Agent，并自动断言 route_id / target_agent_id、binding_ids、child_call_count、pipeline_step_ids、pipeline_parallel_groups、output_contains 与 max_duration_ms。</div></div><button class="btn btn-primary btn-sm" :disabled="evaluationRunning" @click="runOrchestrationEvaluation">{{ evaluationRunning ? '评测运行中…' : '运行评测' }}</button></div>
       <div class="eval-layout">
         <textarea v-model="evaluationSpec" class="eval-editor" spellcheck="false"></textarea>
         <div class="eval-history">

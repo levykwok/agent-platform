@@ -69,9 +69,29 @@ workflow:
 
 The first matching `when` substring wins; if none matches, `defaultTransition` wins; if no transition matches, execution falls through to the next list step. The initial implementation only allows forward jumps, so cycles are rejected during configuration validation.
 
+Adjacent steps with the same non-empty `parallelGroup` form an explicit fan-out group:
+
+```yaml
+maxPipelineParallelism: 4
+pipeline:
+  - stepId: facts
+    agentId: researcher
+    instruction: Collect facts independently.
+    parallelGroup: gather
+  - stepId: risks
+    agentId: risk-reviewer
+    instruction: Identify risks independently.
+    parallelGroup: gather
+  - stepId: write
+    agentId: writer
+    instruction: Join the structured facts and risks into the final answer.
+```
+
+Every member receives the same input value and executes concurrently up to `maxPipelineParallelism` (default 4, capped at 8). Results are joined in configuration order into one `agent.pipeline.value.v1` value whose `data.parallel_group` identifies the group and whose `data.results` contains each `step_id`, `agent_id`, transition status, and complete `agent.result.v1`. The next serial step receives that joined value. A parallel group must contain at least two contiguous steps; grouped steps cannot define competing transitions, so branching belongs on a later join/evaluation step.
+
 Current limits:
 
-- no parallel fan-out
+- no arbitrary DAG or nested parallel groups; fan-out groups are contiguous and use an implicit barrier join
 - final step streams to the client; intermediate steps run as blocking calls with summary events
 
 ### SUPERVISOR
@@ -88,7 +108,7 @@ Runs an adaptive platform-level supervisor flow:
 
 Each child still receives only the tools explicitly allowed by its binding. Harness-native subagent creation remains disabled for these scoped child calls.
 
-PLAN, child batches, REVISE decisions, and the final result are checkpointed. A recovered Supervisor restores its remaining plan and committed child results instead of repeating completed batches.
+PLAN, child batches, REVISE decisions, and the final result are checkpointed. A recovered Supervisor restores its remaining plan and committed child results instead of repeating completed batches. Pipeline parallel groups commit atomically after the barrier: a committed group is not repeated, while a process loss during the group may repeat its in-flight child calls under the root idempotency contract.
 
 ## Nested Agent business result contract
 
@@ -192,7 +212,8 @@ Example suite:
         "binding_ids": ["research", "write"],
         "child_call_count": 2,
         "allow_fallback": false,
-        "pipeline_step_ids": ["research", "write"],
+      "pipeline_step_ids": ["facts", "risks", "write"],
+      "pipeline_parallel_groups": ["gather"],
         "output_contains": ["summary"],
         "max_duration_ms": 30000
       }

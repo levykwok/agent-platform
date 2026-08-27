@@ -51,6 +51,10 @@ class OrchestrationEvaluationServiceTest {
                                 null,
                                 Map.of("step_id", "research")),
                         event(
+                                "pipeline_parallel_end",
+                                null,
+                                Map.of("parallel_group", "gather")),
+                        event(
                                 "pipeline_result", "final answer", Map.of("step_id", "write")));
         Map<String, Object> expected =
                 Map.of(
@@ -66,6 +70,8 @@ class OrchestrationEvaluationServiceTest {
                         false,
                         "pipeline_step_ids",
                         List.of("research", "write"),
+                        "pipeline_parallel_groups",
+                        List.of("gather"),
                         "output_contains",
                         List.of("final answer"),
                         "max_duration_ms",
@@ -95,7 +101,9 @@ class OrchestrationEvaluationServiceTest {
                                 "binding_ids",
                                 List.of("writer"),
                                 "pipeline_step_ids",
-                                List.of("one", "two")),
+                                List.of("one", "two"),
+                                "pipeline_parallel_groups",
+                                List.of("gather")),
                         List.of(event("router_decision", null, Map.of("route_id", "actual"))),
                         10);
 
@@ -104,6 +112,7 @@ class OrchestrationEvaluationServiceTest {
         assertTrue(failures.contains("route_id expected expected but was actual"));
         assertTrue(failures.contains("binding_ids"));
         assertTrue(failures.contains("pipeline_step_ids"));
+        assertTrue(failures.contains("pipeline_parallel_groups"));
     }
 
     @Test

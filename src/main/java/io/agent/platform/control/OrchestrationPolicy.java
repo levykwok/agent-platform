@@ -17,10 +17,12 @@ public record OrchestrationPolicy(
         boolean supervisorParallelEnabled,
         int maxSupervisorParallelism,
         boolean routerDisableThinking,
-        boolean supervisorDisableThinking) {
+        boolean supervisorDisableThinking,
+        int maxPipelineParallelism) {
 
     public static final int DEFAULT_MAX_SUPERVISOR_STEPS = 5;
     public static final int MAX_SUPERVISOR_STEPS = 10;
+    public static final int DEFAULT_MAX_PIPELINE_PARALLELISM = 4;
     public static final boolean DEFAULT_ROUTER_DISABLE_THINKING = true;
     public static final boolean DEFAULT_SUPERVISOR_DISABLE_THINKING = true;
 
@@ -36,7 +38,9 @@ public record OrchestrationPolicy(
             @JsonProperty("routerDisableThinking") @JsonAlias("router_disable_thinking")
                     Boolean routerDisableThinking,
             @JsonProperty("supervisorDisableThinking") @JsonAlias("supervisor_disable_thinking")
-                    Boolean supervisorDisableThinking) {
+                    Boolean supervisorDisableThinking,
+            @JsonProperty("maxPipelineParallelism") @JsonAlias("max_pipeline_parallelism")
+                    Integer maxPipelineParallelism) {
         this(
                 mode,
                 subagents,
@@ -50,7 +54,10 @@ public record OrchestrationPolicy(
                         : routerDisableThinking,
                 supervisorDisableThinking == null
                         ? DEFAULT_SUPERVISOR_DISABLE_THINKING
-                        : supervisorDisableThinking);
+                        : supervisorDisableThinking,
+                maxPipelineParallelism == null
+                        ? DEFAULT_MAX_PIPELINE_PARALLELISM
+                        : maxPipelineParallelism);
     }
 
     public OrchestrationPolicy(
@@ -94,7 +101,8 @@ public record OrchestrationPolicy(
                 supervisorParallelEnabled,
                 maxSupervisorParallelism,
                 DEFAULT_ROUTER_DISABLE_THINKING,
-                DEFAULT_SUPERVISOR_DISABLE_THINKING);
+                DEFAULT_SUPERVISOR_DISABLE_THINKING,
+                DEFAULT_MAX_PIPELINE_PARALLELISM);
     }
 
     public OrchestrationPolicy(
@@ -115,7 +123,31 @@ public record OrchestrationPolicy(
                 supervisorParallelEnabled,
                 maxSupervisorParallelism,
                 routerDisableThinking,
-                DEFAULT_SUPERVISOR_DISABLE_THINKING);
+                DEFAULT_SUPERVISOR_DISABLE_THINKING,
+                DEFAULT_MAX_PIPELINE_PARALLELISM);
+    }
+
+    public OrchestrationPolicy(
+            OrchestrationMode mode,
+            List<SubagentBinding> subagents,
+            List<RouteRule> routes,
+            List<PipelineStep> pipeline,
+            int maxSupervisorSteps,
+            boolean supervisorParallelEnabled,
+            int maxSupervisorParallelism,
+            boolean routerDisableThinking,
+            boolean supervisorDisableThinking) {
+        this(
+                mode,
+                subagents,
+                routes,
+                pipeline,
+                maxSupervisorSteps,
+                supervisorParallelEnabled,
+                maxSupervisorParallelism,
+                routerDisableThinking,
+                supervisorDisableThinking,
+                DEFAULT_MAX_PIPELINE_PARALLELISM);
     }
 
     public static OrchestrationPolicy single() {
@@ -128,7 +160,8 @@ public record OrchestrationPolicy(
                 false,
                 2,
                 DEFAULT_ROUTER_DISABLE_THINKING,
-                DEFAULT_SUPERVISOR_DISABLE_THINKING);
+                DEFAULT_SUPERVISOR_DISABLE_THINKING,
+                DEFAULT_MAX_PIPELINE_PARALLELISM);
     }
 
     public OrchestrationPolicy {
@@ -144,5 +177,9 @@ public record OrchestrationPolicy(
                 maxSupervisorParallelism <= 0
                         ? 2
                         : Math.max(1, Math.min(8, maxSupervisorParallelism));
+        maxPipelineParallelism =
+                maxPipelineParallelism <= 0
+                        ? DEFAULT_MAX_PIPELINE_PARALLELISM
+                        : Math.max(1, Math.min(8, maxPipelineParallelism));
     }
 }

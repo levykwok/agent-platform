@@ -45,7 +45,25 @@ class YamlAgentDefinitionRegistryTest {
                         List.of(
                                 research,
                                 new PipelineStep("reviewer", "reviewer", "Review"),
-                                new PipelineStep("writer", "writer", "Write")));
+                                new PipelineStep("writer", "writer", "Write"),
+                                new PipelineStep(
+                                        "facts",
+                                        "facts",
+                                        "Collect facts",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "gather"),
+                                new PipelineStep(
+                                        "risks",
+                                        "risks",
+                                        "Collect risks",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "gather")));
         YamlAgentDefinitionRegistry.AgentConfig flow =
                 new YamlAgentDefinitionRegistry.AgentConfig(
                         "research-flow",
@@ -62,7 +80,13 @@ class YamlAgentDefinitionRegistryTest {
                         workflow);
         YamlAgentDefinitionRegistry.AgentsConfig config =
                 new YamlAgentDefinitionRegistry.AgentsConfig(
-                        List.of(agent("researcher"), agent("reviewer"), agent("writer"), flow));
+                        List.of(
+                                agent("researcher"),
+                                agent("reviewer"),
+                                agent("writer"),
+                                agent("facts"),
+                                agent("risks"),
+                                flow));
         when(configStore.read(
                         any(PlatformConfigStore.ConfigFile.class),
                         any(Class.class)))
@@ -85,6 +109,10 @@ class YamlAgentDefinitionRegistryTest {
         assertEquals("reviewer", loaded.transitions().get(0).nextStepId());
         assertEquals("writer", loaded.transitions().get(1).nextStepId());
         assertEquals(true, loaded.transitions().get(1).defaultTransition());
+        List<PipelineStep> loadedPipeline =
+                registry.findPublished("research-flow").orElseThrow().orchestration().pipeline();
+        assertEquals("gather", loadedPipeline.get(3).parallelGroup());
+        assertEquals("gather", loadedPipeline.get(4).parallelGroup());
     }
 
     private static YamlAgentDefinitionRegistry.AgentConfig agent(String id) {

@@ -47,7 +47,25 @@ class PipelineBranchingTest {
         assertEquals(1, AgentRuntimeService.nextPipelineIndex(steps, 0, "ordinary result"));
     }
 
+    @Test
+    void adjacentParallelStepsAreCollectedAsOneGroup() {
+        List<PipelineStep> steps =
+                List.of(
+                        parallelStep("facts", "gather"),
+                        parallelStep("risks", "gather"),
+                        step("write"));
+
+        List<PipelineStep> group = AgentRuntimeService.pipelineParallelGroup(steps, 0);
+
+        assertEquals(List.of("facts", "risks"), group.stream().map(PipelineStep::stepId).toList());
+    }
+
     private static PipelineStep step(String id, PipelineTransition... transitions) {
         return new PipelineStep(id, "agent-" + id, null, null, 0, null, List.of(transitions));
+    }
+
+    private static PipelineStep parallelStep(String id, String group) {
+        return new PipelineStep(
+                id, "agent-" + id, null, null, 0, null, List.of(), group);
     }
 }

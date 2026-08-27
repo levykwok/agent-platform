@@ -207,6 +207,7 @@ public class OrchestrationEvaluationService {
         Map<String, Object> router = Map.of();
         List<Map<String, Object>> supervisorCalls = new ArrayList<>();
         List<String> pipelineSteps = new ArrayList<>();
+        List<String> pipelineParallelGroups = new ArrayList<>();
         for (AgentEventEnvelope event : events) {
             if (event.delta() != null) answer.append(event.delta());
             String type = safe(event.type()).toLowerCase().replace('.', '_');
@@ -218,6 +219,10 @@ public class OrchestrationEvaluationService {
             if ("pipeline_step_end".equals(type) || "pipeline_result".equals(type)) {
                 String stepId = string(payload.get("step_id"), "");
                 if (!stepId.isBlank()) pipelineSteps.add(stepId);
+            }
+            if ("pipeline_parallel_end".equals(type)) {
+                String parallelGroup = string(payload.get("parallel_group"), "");
+                if (!parallelGroup.isBlank()) pipelineParallelGroups.add(parallelGroup);
             }
         }
         expectText(expected, "route_id", router.get("route_id"), failures);
@@ -240,6 +245,16 @@ public class OrchestrationEvaluationService {
                             + expectedPipelineSteps
                             + " but was "
                             + pipelineSteps);
+        }
+        List<String> expectedParallelGroups =
+                strings(expected.get("pipeline_parallel_groups"));
+        if (!expectedParallelGroups.isEmpty()
+                && !expectedParallelGroups.equals(pipelineParallelGroups)) {
+            failures.add(
+                    "pipeline_parallel_groups expected "
+                            + expectedParallelGroups
+                            + " but was "
+                            + pipelineParallelGroups);
         }
         if (expected.containsKey("child_call_count")) {
             int expectedCount = (int) number(expected.get("child_call_count"), -1);
@@ -280,6 +295,7 @@ public class OrchestrationEvaluationService {
         observed.put("binding_ids", actualBindings);
         observed.put("child_call_count", supervisorCalls.size());
         observed.put("pipeline_step_ids", pipelineSteps);
+        observed.put("pipeline_parallel_groups", pipelineParallelGroups);
         observed.put("event_types", List.copyOf(new LinkedHashSet<>(eventTypes)));
         observed.put("output", answer.toString());
         Map<String, Object> result = new LinkedHashMap<>();

@@ -273,6 +273,130 @@ class NestedOrchestrationTest {
     }
 
     @Test
+    void pipelineRunsExplicitFanOutConcurrentlyAndJoinsBeforeNextStep() {
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maxActive = new AtomicInteger();
+        for (String id : List.of("facts-child", "risks-child")) {
+            addDefinition(id, OrchestrationPolicy.single());
+            HarnessAgent child = mock(HarnessAgent.class);
+            doReturn(
+                            reactor.core.publisher.Mono.defer(
+                                    () -> {
+                                        int current = active.incrementAndGet();
+                                        maxActive.accumulateAndGet(current, Math::max);
+                                        return reactor.core.publisher.Mono.delay(
+                                                        Duration.ofMillis(80))
+                                                .map(
+                                                        ignored ->
+                                                                Msg.builder()
+                                                                        .role(MsgRole.ASSISTANT)
+                                                                        .textContent(id + " result")
+                                                                        .build())
+                                                .doFinally(ignored -> active.decrementAndGet());
+                                    }))
+                    .when(child)
+                    .call(any(UserMessage.class), any(RuntimeContext.class));
+            agents.put(id, child);
+        }
+        addSingle("join-child", "joined final");
+        addDefinition(
+                "parallel-pipeline",
+                new OrchestrationPolicy(
+                        OrchestrationMode.PIPELINE,
+                        List.of(),
+                        List.of(),
+                        List.of(
+                                new PipelineStep(
+                                        "facts",
+                                        "facts-child",
+                                        "collect facts",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "gather"),
+                                new PipelineStep(
+                                        "risks",
+                                        "risks-child",
+                                        "collect risks",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "gather"),
+                                new PipelineStep("join", "join-child", "combine")),
+                        5,
+                        false,
+                        2,
+                        true,
+                        true,
+                        2));
+        addDefinition(
+                "parallel-only-pipeline",
+                new OrchestrationPolicy(
+                        OrchestrationMode.PIPELINE,
+                        List.of(),
+                        List.of(),
+                        List.of(
+                                new PipelineStep(
+                                        "facts",
+                                        "facts-child",
+                                        "collect facts",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "gather"),
+                                new PipelineStep(
+                                        "risks",
+                                        "risks-child",
+                                        "collect risks",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "gather"))));
+
+        ChatResponse response =
+                runtime.chat("parallel-pipeline", request("analyze in parallel")).block();
+        List<AgentEventEnvelope> events =
+                runtime.stream("parallel-only-pipeline", request("stream in parallel"))
+                        .collectList()
+                        .block();
+
+        assertEquals("joined final", response.text());
+        assertEquals(2, maxActive.get());
+        assertTrue(events.stream().anyMatch(event -> "pipeline_parallel_start".equals(event.type())));
+        assertTrue(events.stream().anyMatch(event -> "pipeline_parallel_end".equals(event.type())));
+        assertEquals(
+                2,
+                events.stream()
+                        .filter(event -> "pipeline_step_end".equals(event.type()))
+                        .filter(event -> Boolean.TRUE.equals(event.payload().get("parallel")))
+                        .count());
+        assertTrue(
+                events.stream()
+                        .anyMatch(
+                                event ->
+                                        "pipeline_result".equals(event.type())
+                                                && Boolean.FALSE.equals(
+                                                        event.payload().get("recovered"))
+                                                && event.delta() != null
+                                                && event.delta().contains("facts-child result")
+                                                && event.delta().contains("risks-child result")));
+        ArgumentCaptor<UserMessage> joinedInput = ArgumentCaptor.forClass(UserMessage.class);
+        verify(agents.get("join-child"), times(1))
+                .call(joinedInput.capture(), any(RuntimeContext.class));
+        assertTrue(
+                joinedInput.getAllValues().stream()
+                        .allMatch(
+                                message ->
+                                        message.getTextContent().contains("facts-child result")
+                                                && message.getTextContent().contains("risks-child result")
+                                                && message.getTextContent().contains("parallel_group")));
+    }
+
+    @Test
     void supervisorRunsAllSpecialistsAndReturnsTaskEnvelope() {
         addSingle("researcher", "research result");
         addSingle("writer", "writer result");

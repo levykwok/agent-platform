@@ -111,15 +111,26 @@ $definitions = @(
             -OutputSchema @{ type = 'object'; required = @('formatted'); properties = @{ formatted = @{ type = 'string' } } }
     },
     @{
+        id = 'orchestration-e2e-single-join'
+        name = 'Orchestration E2E - Parallel Join'
+        description = 'Tool-free Single Agent that joins deterministic Pipeline fan-out results.'
+        spec = New-AgentSpec `
+            -Name 'Orchestration E2E - Parallel Join' `
+            -Description 'Tool-free Single Agent that joins deterministic Pipeline fan-out results.' `
+            -Role 'You are the join node in a Pipeline parallel acceptance test. Do not call tools. Verify that the structured input contains both analyze and format results, then return exactly one line beginning with E2E_PIPELINE_PARALLEL_OK.' `
+            -Orchestration @{ mode = 'SINGLE'; subagents = @(); routes = @(); pipeline = @() }
+    },
+    @{
         id = 'orchestration-e2e-workflow'
         name = 'Orchestration E2E - Agent Pipeline'
-        description = 'Two-step Agent-owned Pipeline; this is not a standalone Workflow canvas asset.'
+        description = 'Parallel fan-out and serial join in an Agent-owned Pipeline; this is not a standalone Workflow canvas asset.'
         spec = New-AgentSpec `
             -Name 'Orchestration E2E - Agent Pipeline' `
-            -Description 'Two-step Agent-owned Pipeline; this is not a standalone Workflow canvas asset.' `
-            -Role 'Run the declared two-step Pipeline without calling tools.' `
+            -Description 'Parallel fan-out and serial join in an Agent-owned Pipeline; this is not a standalone Workflow canvas asset.' `
+            -Role 'Run the declared Pipeline fan-out and join without calling tools.' `
             -Orchestration @{
                 mode = 'PIPELINE'
+                maxPipelineParallelism = 2
                 subagents = @()
                 routes = @()
                 pipeline = @(
@@ -129,12 +140,22 @@ $definitions = @(
                         instruction = 'Analyze the input and produce the acceptance conclusion.'
                         maxRetries = 0
                         failurePolicy = 'FAIL_FAST'
+                        parallelGroup = 'acceptance-fanout'
                         transitions = @()
                     },
                     @{
                         stepId = 'format'
                         agentId = 'orchestration-e2e-single-format'
-                        instruction = 'Format the previous result and preserve its acceptance marker.'
+                        instruction = 'Independently produce the required concise format acceptance result.'
+                        maxRetries = 0
+                        failurePolicy = 'FAIL_FAST'
+                        parallelGroup = 'acceptance-fanout'
+                        transitions = @()
+                    },
+                    @{
+                        stepId = 'join'
+                        agentId = 'orchestration-e2e-single-join'
+                        instruction = 'Join the two structured parallel results and verify both are present.'
                         maxRetries = 0
                         failurePolicy = 'FAIL_FAST'
                         transitions = @()
@@ -145,10 +166,10 @@ $definitions = @(
     @{
         id = 'orchestration-e2e-router'
         name = 'Orchestration E2E - Router'
-        description = 'Router example that targets a Single Agent or Agent serial chain.'
+        description = 'Router example that targets a Single Agent or Agent Pipeline.'
         spec = New-AgentSpec `
             -Name 'Orchestration E2E - Router' `
-            -Description 'Router example that targets a Single Agent or Agent serial chain.' `
+            -Description 'Router example that targets a Single Agent or Agent Pipeline.' `
             -Role 'Forward the request using only the declared routing rules.' `
             -Orchestration @{
                 mode = 'ROUTER'
@@ -158,8 +179,8 @@ $definitions = @(
                     @{
                         ruleId = 'pipeline-route'
                         targetAgentId = 'orchestration-e2e-workflow'
-                        contains = 'serial validation'
-                        keywords = @('pipeline', 'serial')
+                        contains = 'parallel pipeline validation'
+                        keywords = @('pipeline', 'parallel')
                         defaultRoute = $false
                     },
                     @{

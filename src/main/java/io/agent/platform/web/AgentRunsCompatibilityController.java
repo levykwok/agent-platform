@@ -276,6 +276,8 @@ public class AgentRunsCompatibilityController {
             case "pipeline_start" -> "Pipeline 开始";
             case "pipeline_step_start" -> "Pipeline 步骤开始";
             case "pipeline_step_end" -> "Pipeline 步骤完成";
+            case "pipeline_parallel_start" -> "Pipeline 并行组开始";
+            case "pipeline_parallel_end" -> "Pipeline 并行组完成";
             case "pipeline_final_step" -> "Pipeline 最终步骤";
             case "pipeline_step_fallback" -> "Pipeline 步骤降级";
             case "workflow_start" -> legacyAgentWorkflow ? "Pipeline 开始" : "Workflow 开始";

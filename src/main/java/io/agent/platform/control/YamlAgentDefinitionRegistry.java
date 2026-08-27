@@ -183,7 +183,8 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                                                                                 resolve(transition.when()),
                                                                                 resolve(transition.nextStepId()),
                                                                                 transition.defaultTransition()))
-                                                        .toList()))
+                                                        .toList(),
+                                                resolve(step.parallelGroup())))
                         .toList();
         return new OrchestrationPolicy(
                 policy.mode(),
@@ -194,7 +195,8 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                 policy.supervisorParallelEnabled(),
                 policy.maxSupervisorParallelism(),
                 policy.routerDisableThinking(),
-                policy.supervisorDisableThinking());
+                policy.supervisorDisableThinking(),
+                policy.maxPipelineParallelism());
     }
 
     private String safe(String value, String fallback) {
@@ -310,6 +312,9 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                     "PIPELINE agent requires at least one step: " + definition.agentId());
         }
         Set<String> stepIds = new java.util.LinkedHashSet<>();
+        Map<String, Integer> parallelGroupCounts = new java.util.LinkedHashMap<>();
+        Set<String> closedParallelGroups = new java.util.LinkedHashSet<>();
+        String activeParallelGroup = "";
         for (PipelineStep step : steps) {
             if (step.stepId() == null || step.stepId().isBlank() || !stepIds.add(step.stepId())) {
                 throw new IllegalStateException(
@@ -325,6 +330,32 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
             if (step.maxRetries() != null && step.maxRetries() < 0) {
                 throw new IllegalStateException("Pipeline step maxRetries cannot be negative: " + step.stepId());
             }
+            String parallelGroup = step.parallelGroup();
+            if (!parallelGroup.isBlank()) {
+                if (!step.transitions().isEmpty()) {
+                    throw new IllegalStateException(
+                            "Parallel Pipeline steps cannot define transitions: " + step.stepId());
+                }
+                if (!parallelGroup.equals(activeParallelGroup)) {
+                    if (!activeParallelGroup.isBlank()) closedParallelGroups.add(activeParallelGroup);
+                    if (closedParallelGroups.contains(parallelGroup)) {
+                        throw new IllegalStateException(
+                                "Pipeline parallel group must be contiguous: " + parallelGroup);
+                    }
+                    activeParallelGroup = parallelGroup;
+                }
+                parallelGroupCounts.merge(parallelGroup, 1, Integer::sum);
+            } else if (!activeParallelGroup.isBlank()) {
+                closedParallelGroups.add(activeParallelGroup);
+                activeParallelGroup = "";
+            }
+        }
+        for (Map.Entry<String, Integer> entry : parallelGroupCounts.entrySet()) {
+            if (entry.getValue() < 2) {
+                throw new IllegalStateException(
+                        "Pipeline parallel group requires at least two adjacent steps: "
+                                + entry.getKey());
+            }
         }
         for (int index = 0; index < steps.size(); index++) {
             PipelineStep step = steps.get(index);
@@ -332,6 +363,18 @@ public class YamlAgentDefinitionRegistry implements AgentDefinitionRegistry {
                 if (!stepIds.contains(transition.nextStepId())) {
                     throw new IllegalStateException(
                             "Pipeline transition target not found: " + transition.nextStepId());
+                }
+                int targetIndex = steps.stream()
+                        .map(PipelineStep::stepId)
+                        .toList()
+                        .indexOf(transition.nextStepId());
+                PipelineStep target = steps.get(targetIndex);
+                if (!target.parallelGroup().isBlank()
+                        && targetIndex > 0
+                        && target.parallelGroup().equals(steps.get(targetIndex - 1).parallelGroup())) {
+                    throw new IllegalStateException(
+                            "Pipeline transition must target the first step of parallel group: "
+                                    + transition.nextStepId());
                 }
                 if (steps.indexOf(step) >= steps.stream()
                         .map(PipelineStep::stepId)

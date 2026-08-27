@@ -89,6 +89,10 @@ class PlatformRunPersistenceTest {
                 Map.of("decision_source", "llm", "duration_ms", 30));
         state.appendRunEvent(runId, "supervisor_subagent_result", Map.of());
         state.appendRunEvent(runId, "supervisor_subagent_result", Map.of());
+        state.appendRunEvent(
+                runId,
+                "pipeline_parallel_end",
+                Map.of("parallel_group", "gather", "duration_ms", 15));
         state.recordOrchestrationEvaluation(runId, "router", true, "correct route");
 
         Map<String, Object> metrics = state.orchestrationMetrics("metrics-agent", "user-1");
@@ -96,6 +100,8 @@ class PlatformRunPersistenceTest {
         assertEquals(1.0D, metrics.get("router_accuracy"));
         assertEquals(0.5D, metrics.get("supervisor_fallback_rate"));
         assertEquals(2.0D, metrics.get("supervisor_average_agent_calls"));
+        assertEquals(1L, metrics.get("pipeline_parallel_groups"));
+        assertEquals(15L, metrics.get("pipeline_parallel_p95_ms"));
         assertEquals(30L, metrics.get("decision_p95_ms"));
     }
 
