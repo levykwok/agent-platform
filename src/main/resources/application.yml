@@ -47,8 +47,20 @@ agent:
       bootstrap-admin-password: ${AGENT_PLATFORM_AUTH_BOOTSTRAP_ADMIN_PASSWORD:}
       base-url: ${AGENT_PLATFORM_AUTH_BASE_URL:http://localhost:8080}
       secure-cookie: ${AGENT_PLATFORM_AUTH_SECURE_COOKIE:false}
+      trust-forwarded-for: ${AGENT_PLATFORM_AUTH_TRUST_FORWARDED_FOR:false}
+      allowed-origins: ${AGENT_PLATFORM_AUTH_ALLOWED_ORIGINS:}
+      login:
+        max-failed-attempts: ${AGENT_PLATFORM_AUTH_LOGIN_MAX_FAILED_ATTEMPTS:5}
+        lock-minutes: ${AGENT_PLATFORM_AUTH_LOGIN_LOCK_MINUTES:15}
+        ip-attempts-per-window: ${AGENT_PLATFORM_AUTH_LOGIN_IP_ATTEMPTS_PER_WINDOW:30}
+        ip-window-minutes: ${AGENT_PLATFORM_AUTH_LOGIN_IP_WINDOW_MINUTES:15}
+      apply:
+        ip-attempts-per-hour: ${AGENT_PLATFORM_AUTH_APPLY_IP_ATTEMPTS_PER_HOUR:10}
+        email-attempts-per-day: ${AGENT_PLATFORM_AUTH_APPLY_EMAIL_ATTEMPTS_PER_DAY:3}
       mail:
         enabled: ${AGENT_PLATFORM_AUTH_MAIL_ENABLED:false}
+        from: ${AGENT_PLATFORM_AUTH_MAIL_FROM:}
+        max-attempts: ${AGENT_PLATFORM_AUTH_MAIL_MAX_ATTEMPTS:5}
         retry-delay-ms: ${AGENT_PLATFORM_AUTH_MAIL_RETRY_DELAY_MS:60000}
     persistence:
       mode: ${AGENT_PLATFORM_PERSISTENCE_MODE:sqlite}

@@ -133,6 +133,12 @@ public class PlatformFrontendCompatibilityController {
         return current;
     }
 
+    private PlatformAuthService.Principal requireBuilder(ServerHttpRequest request) {
+        PlatformAuthService.Principal current = requirePrincipal(request);
+        PlatformRolePolicy.requireBuilder(current);
+        return current;
+    }
+
     private Map<String, Object> readableRun(
             String runId, PlatformAuthService.Principal current) {
         Map<String, Object> run = state.run(runId);
@@ -2341,7 +2347,7 @@ public class PlatformFrontendCompatibilityController {
             @RequestPart(value = "domain", required = false) String formDomain,
             @RequestPart(value = "collection_id", required = false) String formCollectionId,
             ServerHttpRequest request) {
-        PlatformAuthService.Principal current = requirePrincipal(request);
+        PlatformAuthService.Principal current = requireBuilder(request);
         String orgId = current.orgId();
         if (!documentKnowledgeService.supports(file.filename())) {
             return Mono.error(
@@ -2394,7 +2400,7 @@ public class PlatformFrontendCompatibilityController {
     public Map<String, Object> createCollection(
             @RequestBody Map<String, Object> payload,
             ServerHttpRequest request) {
-        String orgId = requirePrincipal(request).orgId();
+        String orgId = requireBuilder(request).orgId();
         Map<String, Object> collection = knowledgeCollectionService.create(payload, orgId);
         return map("item", collection, "collection_id", collection.get("collection_id"));
     }
@@ -2403,7 +2409,7 @@ public class PlatformFrontendCompatibilityController {
     public Map<String, Object> deleteCollection(
             @PathVariable("id") String id,
             ServerHttpRequest request) {
-        String orgId = requirePrincipal(request).orgId();
+        String orgId = requireBuilder(request).orgId();
         knowledgeCollectionService.delete(id, orgId);
         return map("ok", true, "collection_id", id);
     }
@@ -2413,7 +2419,7 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable("id") String id,
             @RequestBody Map<String, Object> payload,
             ServerHttpRequest request) {
-        String orgId = requirePrincipal(request).orgId();
+        String orgId = requireBuilder(request).orgId();
         documentKnowledgeService.document(
                 string(payload.get("item_id"), string(payload.get("doc_id"), "")),
                 requirePrincipal(request));
@@ -2432,7 +2438,7 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable("versionId") String versionId,
             @RequestBody Map<String, Object> payload,
             ServerHttpRequest request) {
-        String orgId = requirePrincipal(request).orgId();
+        String orgId = requireBuilder(request).orgId();
         documentKnowledgeService.document(docId, requirePrincipal(request));
         String targetCollectionId = string(payload.get("collection_id"), "");
         Map<String, Object> result =
@@ -2457,8 +2463,9 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable("docId") String docId,
             @RequestParam(value = "item_version_id", defaultValue = "") String versionId,
             ServerHttpRequest request) {
-        String orgId = requirePrincipal(request).orgId();
-        documentKnowledgeService.document(docId, requirePrincipal(request));
+        PlatformAuthService.Principal current = requireBuilder(request);
+        String orgId = current.orgId();
+        documentKnowledgeService.document(docId, current);
         Map<String, Object> collection =
                 knowledgeCollectionService.removeDocument(id, docId, versionId, orgId);
         return map("ok", true, "collection_id", id, "doc_id", docId, "item", collection);
@@ -2470,7 +2477,7 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable("versionId") String versionId,
             ServerHttpRequest request) {
         Map<String, Object> result =
-                documentKnowledgeService.reindex(docId, requirePrincipal(request));
+                documentKnowledgeService.reindex(docId, requireBuilder(request));
         return map(
                 "ok",
                 true,
@@ -2549,7 +2556,7 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable("docId") String docId,
             @PathVariable("versionId") String versionId,
             ServerHttpRequest request) {
-        PlatformAuthService.Principal current = requirePrincipal(request);
+        PlatformAuthService.Principal current = requireBuilder(request);
         documentKnowledgeService.delete(docId, current);
         knowledgeCollectionService.removeDocumentEverywhere(docId);
         return map("ok", true, "doc_id", docId, "version_id", versionId);

@@ -18,12 +18,13 @@ import InfraStatus from './pages/InfraStatus.vue'
 import Documentation from './pages/Documentation.vue'
 import ScheduledTasks from './pages/ScheduledTasks.vue'
 import AccountCenter from './pages/AccountCenter.vue'
+import AccountReviewPage from './pages/AccountReviewPage.vue'
 import Icon from './components/Icon.vue'
 import ToastHost from './components/ToastHost.vue'
 import DialogHost from './components/DialogHost.vue'
 import { clearAuthContext, contextHref, currentDomain, currentOrgId, currentUser, makeHeaders, readJson, setAuthContext } from './lib/platformApi'
 
-type PageKey = 'home' | 'knowledge' | 'qa' | 'kg' | 'skills' | 'tools' | 'mcp' | 'models' | 'agents' | 'orchestration' | 'workbench' | 'external-test' | 'memory' | 'scheduled' | 'runs' | 'infra' | 'docs'
+type PageKey = 'home' | 'knowledge' | 'qa' | 'kg' | 'skills' | 'tools' | 'mcp' | 'models' | 'agents' | 'orchestration' | 'workbench' | 'external-test' | 'memory' | 'scheduled' | 'runs' | 'infra' | 'docs' | 'accounts'
 
 const navItems = [
   { key: 'home', href: '/platform/live', icon: 'home', label: '平台概览', section: '核心能力', native: true },
@@ -40,6 +41,7 @@ const navItems = [
   { key: 'memory', href: '/platform/live/memory', icon: 'memory', label: '记忆管理', section: '核心能力', native: true },
   { key: 'scheduled', href: '/platform/live/scheduled', icon: 'memory', label: '定时任务', section: '核心能力', native: true },
   { key: 'runs', href: '/platform/live/runs', icon: 'memory', label: '运行观测', section: '运维', native: true },
+  { key: 'accounts', href: '/platform/live/accounts', icon: 'agents', label: '账号审核', section: '运维', native: true, adminOnly: true },
   { key: 'docs', href: '/platform/live/docs', icon: 'docs', label: '使用文档', section: '帮助', native: true },
 ]
 
@@ -57,13 +59,14 @@ const authenticatedUser = ref<{ user_id?: string; org_id?: string; display_name?
 const notifications = ref<{ notification_id?: string; title?: string; body?: string; created_at?: string; read_at?: string }[]>([])
 const unreadNotifications = ref(0)
 const notificationsOpen = ref(false)
-const title = computed(() => ({ home: '平台概览', knowledge: '知识库（Beta）', qa: '交互问答', kg: '知识图谱', skills: 'Skills 中心', tools: 'Tools 目录', mcp: 'MCP 服务器', models: '模型接入', agents: 'Agent 管理', orchestration: '编排中心', workbench: 'Agent 工作台', 'external-test': '外部接入测试', memory: '记忆管理', scheduled: '定时任务', runs: '运行观测', infra: '平台状态', docs: '使用文档' }[activePage.value]))
-const coreItems = computed(() => navItems.filter((item) => item.section === '核心能力'))
-const opsItems = computed(() => navItems.filter((item) => item.section === '运维'))
-const helpItems = computed(() => navItems.filter((item) => item.section === '帮助'))
+const title = computed(() => ({ home: '平台概览', knowledge: '知识库（Beta）', qa: '交互问答', kg: '知识图谱', skills: 'Skills 中心', tools: 'Tools 目录', mcp: 'MCP 服务器', models: '模型接入', agents: 'Agent 管理', orchestration: '编排中心', workbench: 'Agent 工作台', 'external-test': '外部接入测试', memory: '记忆管理', scheduled: '定时任务', runs: '运行观测', infra: '平台状态', docs: '使用文档', accounts: '账号审核' }[activePage.value]))
+const visibleNavItems = computed(() => navItems.filter((item) => !item.adminOnly || authenticatedUser.value?.role === 'PLATFORM_ADMIN'))
+const coreItems = computed(() => visibleNavItems.value.filter((item) => item.section === '核心能力'))
+const opsItems = computed(() => visibleNavItems.value.filter((item) => item.section === '运维'))
+const helpItems = computed(() => visibleNavItems.value.filter((item) => item.section === '帮助'))
 
 function navigate(key: string, href: string, native = false) {
-  if (native && ['home', 'knowledge', 'qa', 'kg', 'skills', 'tools', 'mcp', 'models', 'agents', 'orchestration', 'workbench', 'external-test', 'memory', 'scheduled', 'runs', 'infra', 'docs'].includes(key)) {
+  if (native && ['home', 'knowledge', 'qa', 'kg', 'skills', 'tools', 'mcp', 'models', 'agents', 'orchestration', 'workbench', 'external-test', 'memory', 'scheduled', 'runs', 'infra', 'docs', 'accounts'].includes(key)) {
     activePage.value = key as PageKey
     const target = contextHref(href, currentDomain(), currentOrgId())
     if (`${location.pathname}${location.search}` !== target) {
@@ -88,8 +91,19 @@ async function loadAuthContext() {
       const data = await readJson<{ user_id?: string; org_id?: string; display_name?: string; role?: string }>(response)
       authenticatedUser.value = data
       if (data.user_id) setAuthContext(String(data.user_id), String(data.org_id || 'platform'))
+      if (activePage.value === 'accounts' && data.role !== 'PLATFORM_ADMIN') {
+        activePage.value = 'home'
+        history.replaceState(null, '', contextHref('/platform/live', currentDomain(), currentOrgId()))
+      }
     } else {
       clearAuthContext()
+      if (response.status === 401) {
+        const redirect = `${location.pathname}${location.search}${location.hash}`
+        const loginUrl = new URL('/platform/live/access', location.origin)
+        loginUrl.searchParams.set('redirect', redirect)
+        location.replace(`${loginUrl.pathname}${loginUrl.search}`)
+        return
+      }
     }
   } catch {
     clearAuthContext()
@@ -192,6 +206,7 @@ onUnmounted(() => {
       <ExternalAgentWorkbench v-else-if="activePage === 'external-test'" />
       <MemoryManagement v-else-if="activePage === 'memory'" />
       <ScheduledTasks v-else-if="activePage === 'scheduled'" />
+      <AccountReviewPage v-else-if="activePage === 'accounts'" />
       <RunsObserve v-else-if="activePage === 'runs'" />
       <Documentation v-else-if="activePage === 'docs'" />
       <InfraStatus v-else />

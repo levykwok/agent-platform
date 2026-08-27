@@ -28,6 +28,9 @@ class PlatformUserCapabilityServiceTest {
         PlatformAuthService.Principal other =
                 new PlatformAuthService.Principal(
                         "user_b", "b@example.com", "B", "org_b", "BUILDER");
+        PlatformAuthService.Principal viewer =
+                new PlatformAuthService.Principal(
+                        "user_v", "v@example.com", "V", "org_a", "VIEWER");
 
         service.createMcp(
                 Map.of("mcp_id", "private_mcp", "endpoint", "https://example.com/mcp"), owner);
@@ -56,6 +59,12 @@ class PlatformUserCapabilityServiceTest {
                                         "transport", "stdio",
                                         "command", "sh"),
                                 owner));
+        assertThrows(
+                PlatformAuthService.AuthException.class,
+                () ->
+                        service.createSkill(
+                                Map.of("skill_id", "viewer_skill", "content", "answer"),
+                                viewer));
 
         PlatformUserCapabilityService reloaded =
                 new PlatformUserCapabilityService(storage, new PlatformAssetAccessService(storage));

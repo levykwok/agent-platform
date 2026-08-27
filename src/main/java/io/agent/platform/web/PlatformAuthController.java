@@ -5,6 +5,7 @@ package io.agent.platform.web;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
@@ -24,21 +25,34 @@ public class PlatformAuthController {
 
     private static final String COOKIE = "platform_session";
     private final PlatformAuthService auth;
+    private final boolean trustForwardedFor;
 
-    public PlatformAuthController(PlatformAuthService auth) {
+    public PlatformAuthController(
+            PlatformAuthService auth,
+            @Value("${agent.platform.auth.trust-forwarded-for:false}")
+                    boolean trustForwardedFor) {
         this.auth = auth;
+        this.trustForwardedFor = trustForwardedFor;
     }
 
     @PostMapping("/apply")
-    public ResponseEntity<Map<String, Object>> apply(@RequestBody Map<String, Object> payload) {
-        return execute(() -> auth.apply(payload));
+    public ResponseEntity<Map<String, Object>> apply(
+            @RequestBody Map<String, Object> payload, ServerHttpRequest request) {
+        return execute(() -> auth.apply(payload, clientAddress(request)));
     }
 
     @PostMapping("/login")
     public ResponseEntity<Map<String, Object>> login(
-            @RequestBody Map<String, Object> payload, ServerHttpResponse response) {
+            @RequestBody Map<String, Object> payload,
+            ServerHttpRequest request,
+            ServerHttpResponse response) {
         ResponseEntity<Map<String, Object>> result =
-                execute(() -> auth.login(value(payload, "email"), value(payload, "password")));
+                execute(
+                        () ->
+                                auth.login(
+                                        value(payload, "email"),
+                                        value(payload, "password"),
+                                        clientAddress(request)));
         if (result.getStatusCode().is2xxSuccessful()) {
             String token = String.valueOf(result.getBody().get("session_token"));
             addSessionCookie(response, token);
@@ -86,7 +100,14 @@ public class PlatformAuthController {
     @PostMapping("/logout")
     public ResponseEntity<Map<String, Object>> logout(ServerHttpRequest request, ServerHttpResponse response) {
         auth.logout(cookie(request));
-        response.addCookie(ResponseCookie.from(COOKIE, "").path("/").maxAge(0).httpOnly(true).build());
+        response.addCookie(
+                ResponseCookie.from(COOKIE, "")
+                        .path("/")
+                        .maxAge(0)
+                        .httpOnly(true)
+                        .secure(auth.secureCookie())
+                        .sameSite("Lax")
+                        .build());
         return ResponseEntity.ok(map("ok", true));
     }
 
@@ -104,6 +125,18 @@ public class PlatformAuthController {
     static String cookie(ServerHttpRequest request) {
         var cookie = request.getCookies().getFirst(COOKIE);
         return cookie == null ? "" : cookie.getValue();
+    }
+
+    private String clientAddress(ServerHttpRequest request) {
+        if (trustForwardedFor) {
+            String forwarded = request.getHeaders().getFirst("X-Forwarded-For");
+            if (forwarded != null && !forwarded.isBlank()) {
+                return forwarded.split(",", 2)[0].trim();
+            }
+        }
+        return request.getRemoteAddress() == null
+                ? "unknown"
+                : request.getRemoteAddress().getAddress().getHostAddress();
     }
 
     private ResponseEntity<Map<String, Object>> execute(java.util.function.Supplier<Map<String, Object>> action) {

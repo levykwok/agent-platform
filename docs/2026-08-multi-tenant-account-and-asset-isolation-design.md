@@ -2,8 +2,8 @@
 
 ## 1. 文档信息
 
-- 状态：MVP 已实现，生产加固待办
-- 日期：2026-08-14
+- 状态：账号与租户隔离生产加固已实现；执行沙箱和配额仍独立推进
+- 日期：2026-08-27
 - 适用范围：平台用户、组织、Agent、Workflow、MCP、Skill、Tool、知识库、文件和运行数据
 - 当前结论：账号申请、管理员审核、一次性密码设置、Session 身份和主要平台资产的用户/组织隔离已形成闭环；普通用户可创建私有远程 MCP、HTTP Tool 和 Skill。stdio MCP、Python Tool、公共资产治理及执行沙箱仍保持管理员控制。
 
@@ -89,7 +89,7 @@ audit_events
 - result, metadata, created_at
 ```
 
-密码只保存 Argon2id 或 BCrypt 哈希。一次性链接只保存哈希后的 Token。
+当前实现使用 PBKDF2-HMAC-SHA256（210,000 次迭代、每个密码独立随机盐）保存密码哈希。一次性链接只保存 SHA-256 后的 Token，明文 Token 只在发送或开发环境人工交付时短暂出现。
 
 ### 5.2 申请与审核流程
 
@@ -388,6 +388,7 @@ AGENT_PLATFORM_SMTP_STARTTLS=true
 对话中由用户上传的 PDF、Office、Markdown、TXT、CSV 文件现在按以下方式处理：
 
 1. 文件本体写入 `workspace/documents/{doc_id}/v1/`，文档解析结果、原始字节和来源元数据写入 SQLite 的 `platform_knowledge_documents`；服务重启后会重新加载。
+
 2. 文档记录带有 `source_type=conversation_attachment` 和 `source_session_id`，知识库页面提供系统虚拟文件夹“对话文件”，默认打开并按当前账号可见范围展示。
 3. 会话与附件的关系写入 `platform_session_attachments`，因此重启后仍能在原对话恢复附件列表；删除会话/附件时同步清理关系记录。知识库中的文档本体不会因会话关系删除而丢失。
 4. “对话文件”是自动归档视图，不是用户可上传的普通知识库分组；普通上传仍只能选择“全部文档”“未分组”或实际分组。
@@ -401,3 +402,55 @@ AGENT_PLATFORM_SMTP_STARTTLS=true
 - Agent 工作台和交互问答统一读取上述范围字段；工作台切换或刷新会话时恢复已持久化附件。
 - 同一用户、组织和来源类型的相同内容按 SHA-256 去重；从会话移除附件只删除会话关系，知识库文件保留。
 - 上传附件前必须确认 `session_id` 属于当前用户和组织；无法确认归属时返回 404，不允许仅凭猜测的会话 ID 写入关系。
+
+## 18. 2026-08-27 生产账号管理加固
+
+本轮将账号管理从 MVP 补齐为可运维闭环：
+
+- 账号审批在单个 SQLite 事务中完成申请状态预占、用户/组织/Membership 创建、一次性 Token 和邮件 outbox 写入；并发审批只能有一个成功。
+- 申请按 IP/邮箱持久限流，登录按 IP 持久限流；连续密码失败会锁定账号，管理员重新启用账号时可解除锁定。
+- 密码设置 Token 24 小时有效且原子单次消费；管理员重置密码会撤销旧 Token、全部 Session 和旧密码，并签发新链接。
+- 邮件 outbox 支持自动重试、最大尝试次数、`DEAD` 终态、人工重试和可选 From 地址；SMTP 未启用时明确返回人工初始化状态。
+- 管理员页面支持申请筛选/分页、用户搜索/启停、角色与组织迁移、资产/运行用量、全部 Session 下线、单个 Session 查看与撤销、密码重置、组织创建/重命名/启停和邮件队列运维。
+- 平台公共空间不可停用；有活跃成员的组织必须先迁移成员后才能停用；平台始终至少保留一个启用管理员。
+- `PLATFORM_ADMIN`、`ORG_ADMIN`、`BUILDER` 可以创建或修改资产；`TESTER`、`VIEWER` 只能使用授权资产，后端对 Agent、Workflow、MCP、Tool、Skill 和知识库写操作统一校验。
+- Cookie 认证的 `/platform/**` 非只读请求执行 Origin/Sec-Fetch-Site 同源校验；无 Origin 的受控服务端客户端仍可使用原有接口。
+
+管理接口统一位于 `/platform/admin/accounts`：
+
+```text
+GET/POST/PATCH  /organizations
+GET/PATCH       /users, /users/{userId}
+PUT             /users/{userId}/membership
+GET/DELETE      /users/{userId}/sessions[/sessionId]
+POST            /users/{userId}/revoke-sessions
+POST            /users/{userId}/reset-password
+GET/POST        /email-outbox, /email-outbox/{emailId}/retry
+```
+
+生产环境至少配置：
+
+```text
+AGENT_PLATFORM_AUTH_BASE_URL=https://agent.example.com
+AGENT_PLATFORM_AUTH_SECURE_COOKIE=true
+AGENT_PLATFORM_AUTH_ALLOWED_ORIGINS=https://agent.example.com
+AGENT_PLATFORM_AUTH_TRUST_FORWARDED_FOR=true   # 仅当反向代理会清洗并重写 X-Forwarded-For
+AGENT_PLATFORM_AUTH_LOGIN_MAX_FAILED_ATTEMPTS=5
+AGENT_PLATFORM_AUTH_LOGIN_LOCK_MINUTES=15
+AGENT_PLATFORM_AUTH_LOGIN_IP_ATTEMPTS_PER_WINDOW=30
+AGENT_PLATFORM_AUTH_APPLY_IP_ATTEMPTS_PER_HOUR=10
+AGENT_PLATFORM_AUTH_APPLY_EMAIL_ATTEMPTS_PER_DAY=3
+AGENT_PLATFORM_AUTH_MAIL_MAX_ATTEMPTS=5
+AGENT_PLATFORM_AUTH_MAIL_FROM=no-reply@example.com
+```
+
+旧 SQLite 数据库无需手工迁移：服务启动时通过 `CREATE TABLE/INDEX IF NOT EXISTS` 补齐账号表和限流表。跨服务器迁移时应在停止旧、新服务后复制数据库，避免 WAL 中未 checkpoint 的写入遗漏；`scripts/reset-platform-admin.ps1` 会先检测数据库锁、校验目标账号为启用的平台管理员，再更新 PBKDF2 哈希并撤销历史 Session。
+
+### 18.1 验证记录
+
+- 后端全量：`mvn -o test`，123 个测试全部通过，0 failures / 0 errors / 0 skipped。
+- 前端：`frontend/live-console/npm run build` 通过；仅保留既有的 bundle 体积提示。
+- Playwright：`scripts/account-management-playwright.cjs` 在独立 SQLite、独立 Workspace 和独立端口上验证公开申请、管理员审批、一次性设密、非管理员路由拦截、组织创建、单 Session 撤销、撤销后访问失效、角色修改和邮件队列，共 9 个节点全部通过。截图和 JSON 结果保存在 `output/playwright/account-management-final/runner-v4/`。
+- 运维脚本：使用临时 SQLite 验证 `scripts/reset-platform-admin.ps1` 生成的哈希格式与后端一致，并确认锁定状态清除和历史 Session 撤销语句可执行。
+
+Playwright runner 默认从本地 `playwright` 包加载；未在项目依赖中安装时，可通过 `PLAYWRIGHT_MODULE` 指向受控的 Playwright 安装目录，并可通过 `ACCOUNT_E2E_BROWSER` 指定企业 Chrome/Chromium。管理员密码必须通过 `ACCOUNT_E2E_ADMIN_PASSWORD` 环境变量注入，不能写进脚本或提交到仓库。

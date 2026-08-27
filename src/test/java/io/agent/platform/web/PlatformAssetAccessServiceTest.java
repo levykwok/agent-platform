@@ -34,6 +34,9 @@ class PlatformAssetAccessServiceTest {
         PlatformAuthService.Principal other =
                 new PlatformAuthService.Principal(
                         "user_b", "b@example.com", "B", "org_b", "BUILDER");
+        PlatformAuthService.Principal tester =
+                new PlatformAuthService.Principal(
+                        "user_t", "t@example.com", "T", "org_a", "TESTER");
 
         access.ensurePublic("MCP", "legacy");
         access.registerNew("SKILL", "private_skill", owner, "PUBLIC", "PUBLISHED");
@@ -58,5 +61,8 @@ class PlatformAssetAccessServiceTest {
         assertThrows(
                 PlatformAuthService.AuthException.class,
                 () -> access.requireReadable("SKILL", "private_skill", other));
+        assertThrows(
+                PlatformAuthService.AuthException.class,
+                () -> access.registerNew("MCP", "tester_mcp", tester, "PRIVATE", "DRAFT"));
     }
 }

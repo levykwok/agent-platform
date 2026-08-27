@@ -100,6 +100,7 @@ public class PlatformAssetAccessService {
         if (principal == null) {
             throw new PlatformAuthService.AuthException(401, "请先登录后创建资产");
         }
+        PlatformRolePolicy.requireBuilder(principal);
         String type = normalize(assetType);
         String id = normalize(assetId);
         String visibility = normalizeVisibility(requestedVisibility, principal);
@@ -186,6 +187,7 @@ public class PlatformAssetAccessService {
         if (metadata == null) {
             throw new PlatformAuthService.AuthException(404, "资产不存在");
         }
+        PlatformRolePolicy.requireBuilder(principal);
         if ("PLATFORM_ADMIN".equals(principal.role())) return;
         if ("ORGANIZATION".equals(metadata.ownerType())
                 && "ORG_ADMIN".equals(principal.role())

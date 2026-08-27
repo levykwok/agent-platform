@@ -455,6 +455,7 @@ public class PlatformUserCapabilityService {
     private PersonalAsset writable(
             String type, String id, PlatformAuthService.Principal principal) {
         requirePrincipal(principal);
+        PlatformRolePolicy.requireBuilder(principal);
         PersonalAsset asset = assets.get(key(type, id));
         if (asset == null) {
             throw new PlatformAuthService.AuthException(404, "个人资产不存在");
@@ -481,6 +482,7 @@ public class PlatformUserCapabilityService {
             Map<String, Object> payload,
             PlatformAuthService.Principal principal,
             String requestedVisibility) {
+        PlatformRolePolicy.requireBuilder(principal);
         String visibility = normalizeVisibility(requestedVisibility, principal);
         PersonalAsset existing = assets.get(key(type, id));
         String now = Instant.now().toString();

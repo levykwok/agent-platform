@@ -137,6 +137,7 @@ public class AgentAssetService {
         if (metadata == null) {
             throw new PlatformAuthService.AuthException(404, "Agent 不存在");
         }
+        PlatformRolePolicy.requireBuilder(principal);
         if ("PLATFORM_ADMIN".equals(principal.role())) return;
         if ("ORGANIZATION".equals(metadata.ownerType())
                 && "ORG_ADMIN".equals(principal.role())
@@ -150,6 +151,7 @@ public class AgentAssetService {
         if (principal == null) {
             throw new PlatformAuthService.AuthException(401, "请先登录后创建 Agent");
         }
+        PlatformRolePolicy.requireBuilder(principal);
         if (assets.containsKey(agentId)) {
             throw new PlatformAuthService.AuthException(409, "Agent 已存在");
         }

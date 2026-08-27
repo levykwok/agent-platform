@@ -175,6 +175,7 @@ public class WorkflowAssetService {
         if (workflowId == null || workflowId.isBlank()) {
             throw new IllegalArgumentException("workflow_id is required");
         }
+        if (principal != null) PlatformRolePolicy.requireBuilder(principal);
         WorkflowAsset existing = workflows.get(workflowId);
         if (existing != null) requireWritable(existing, principal);
         WorkflowAsset asset =
@@ -669,6 +670,7 @@ public class WorkflowAssetService {
     private void requireWritable(WorkflowAsset asset, PlatformAuthService.Principal principal) {
         // A null principal is the explicit compatibility path for internal runtime calls.
         if (principal == null) return;
+        PlatformRolePolicy.requireBuilder(principal);
         if (!canWrite(asset, principal)) {
             throw new PlatformAuthService.AuthException(403, "没有权限修改该 Workflow");
         }

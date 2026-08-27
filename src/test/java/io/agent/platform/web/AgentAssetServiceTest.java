@@ -44,6 +44,8 @@ class AgentAssetServiceTest {
                 new PlatformAuthService.Principal("user_a", "a@example.com", "A", "org_a", "BUILDER");
         PlatformAuthService.Principal other =
                 new PlatformAuthService.Principal("user_b", "b@example.com", "B", "org_b", "BUILDER");
+        PlatformAuthService.Principal viewer =
+                new PlatformAuthService.Principal("user_v", "v@example.com", "V", "org_a", "VIEWER");
 
         assets.registerNew("private_agent", owner, Map.of());
         assertEquals("PRIVATE", assets.metadata("private_agent").visibility());
@@ -53,5 +55,11 @@ class AgentAssetServiceTest {
         assertThrows(PlatformAuthService.AuthException.class, () -> assets.requireReadable("private_agent", other));
         assertDoesNotThrow(() -> assets.requireWritable("private_agent", owner));
         assertThrows(PlatformAuthService.AuthException.class, () -> assets.requireWritable("private_agent", other));
+        assertThrows(
+                PlatformAuthService.AuthException.class,
+                () -> assets.registerNew("viewer_agent", viewer, Map.of()));
+        assertThrows(
+                PlatformAuthService.AuthException.class,
+                () -> assets.requireWritable("private_agent", viewer));
     }
 }
