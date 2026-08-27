@@ -781,20 +781,13 @@ public class AgentRuntimeService implements AgentRuntime {
             List<AgentEventEnvelope> starts = new ArrayList<>();
             starts.add(pipelineParallelEvent(definition, group, concurrency, true, 0L));
             for (PipelineStep member : group) {
-                starts.add(
-                        agentPipelineEvent(
-                                member.agentId(),
-                                "pipeline_step_start",
-                                "Start parallel pipeline step "
-                                        + safe(member.stepId(), "step")
-                                        + " -> "
-                                        + member.agentId()));
+                starts.add(pipelineStepStartEvent(member, false));
             }
             return Flux.concat(
                     Flux.fromIterable(starts),
                     Flux.merge(
                             group.stream()
-                                    .map(member -> pipelineAgentSummaryEvents(member.agentId(), "start"))
+                                    .map(member -> pipelineAgentSummaryEvents(member, "start"))
                                     .toList()),
                     runPipelineParallelGroup(group, request, input, concurrency)
                             .flatMapMany(
@@ -831,8 +824,7 @@ public class AgentRuntimeService implements AgentRuntime {
                                                                 .map(
                                                                         member ->
                                                                                 pipelineAgentSummaryEvents(
-                                                                                        member.agentId(),
-                                                                                        "end"))
+                                                                                        member, "end"))
                                                                 .toList()),
                                                 Flux.fromIterable(finished),
                                                 streamPipelineStep(
@@ -854,8 +846,8 @@ public class AgentRuntimeService implements AgentRuntime {
             return streamPipelineFinalStep(definition, step, request, input, visited);
         }
         return Flux.concat(
-                Flux.just(agentPipelineEvent(step.agentId(), "pipeline_step_start", "Start pipeline step " + safe(step.stepId(), "step") + " -> " + step.agentId())),
-                pipelineAgentSummaryEvents(step.agentId(), "start"),
+                Flux.just(pipelineStepStartEvent(step, false)),
+                pipelineAgentSummaryEvents(step, "start"),
                 runPipelineStep(step, request, input)
                         .flatMapMany(
                                 execution ->
@@ -876,7 +868,7 @@ public class AgentRuntimeService implements AgentRuntime {
                                                     false);
                                             return Flux.concat(
                                                     pipelineAgentSummaryEvents(
-                                                            step.agentId(), "end"),
+                                                            step, "end"),
                                                     Flux.just(
                                                             pipelineStepResultEvent(
                                                                     step,
@@ -937,7 +929,7 @@ public class AgentRuntimeService implements AgentRuntime {
                 withFluxStepPolicy(step, input.text(), streamDefinition(target, child))
                         .doOnNext(accumulator::accept);
         return Flux.concat(
-                Flux.just(agentPipelineEvent(target.agentId(), "pipeline_final_step", "Streaming final pipeline step " + safe(step.stepId(), "step") + " -> " + target.agentId())),
+                Flux.just(pipelineStepStartEvent(step, true)),
                 execution,
                 Flux.defer(
                         () -> {
@@ -1765,9 +1757,18 @@ public class AgentRuntimeService implements AgentRuntime {
                         }));
     }
 
-    private Flux<AgentEventEnvelope> pipelineAgentSummaryEvents(String agentId, String phase) {
-        return orchestrationAgentSummaryEvents(
-                agentId, phase, Map.of("agent_pipeline", true, "orchestration", "PIPELINE"));
+    private Flux<AgentEventEnvelope> pipelineAgentSummaryEvents(
+            PipelineStep step, String phase) {
+        Map<String, Object> marker = new LinkedHashMap<>();
+        marker.put("agent_pipeline", true);
+        marker.put("orchestration", "PIPELINE");
+        marker.put("step_id", safe(step.stepId(), "step"));
+        marker.put("agent_id", step.agentId());
+        if (!step.parallelGroup().isBlank()) {
+            marker.put("parallel", true);
+            marker.put("parallel_group", step.parallelGroup());
+        }
+        return orchestrationAgentSummaryEvents(step.agentId(), phase, Map.copyOf(marker));
     }
 
     private Flux<AgentEventEnvelope> supervisorAgentSummaryEvents(String agentId, String phase) {
@@ -3221,6 +3222,33 @@ public class AgentRuntimeService implements AgentRuntime {
                         "summary", summary,
                         "agent_pipeline", true,
                         "orchestration", "PIPELINE"));
+    }
+
+    private AgentEventEnvelope pipelineStepStartEvent(PipelineStep step, boolean finalStep) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put(
+                "summary",
+                (finalStep ? "Streaming final Pipeline step " : "Start Pipeline step ")
+                        + safe(step.stepId(), "step")
+                        + " -> "
+                        + step.agentId());
+        payload.put("agent_pipeline", true);
+        payload.put("orchestration", "PIPELINE");
+        payload.put("step_id", safe(step.stepId(), "step"));
+        payload.put("agent_id", step.agentId());
+        payload.put("final", finalStep);
+        if (!step.parallelGroup().isBlank()) {
+            payload.put("parallel", true);
+            payload.put("parallel_group", step.parallelGroup());
+        }
+        String type = finalStep ? "pipeline_final_step" : "pipeline_step_start";
+        return new AgentEventEnvelope(
+                type + "_" + Instant.now().toEpochMilli(),
+                type,
+                Instant.now().toString(),
+                step.agentId(),
+                null,
+                Map.copyOf(payload));
     }
 
     private AgentEventEnvelope pipelineParallelEvent(

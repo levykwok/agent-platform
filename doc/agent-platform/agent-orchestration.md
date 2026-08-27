@@ -143,6 +143,22 @@ At run creation the persisted run freezes `agent_version`, the configured model,
 
 `GET /platform/frontend/agents/orchestration/metrics` aggregates Router labels/accuracy, Supervisor fallback rate, average child calls, decision and run P95 latency, token usage, and estimated model cost. Router accuracy is only calculated from explicit run labels posted to `.../runs/{runId}/orchestration-evaluation`; unlabeled success is not treated as a correct route.
 
+## Run timing observability
+
+`GET /platform/frontend/agents/runs/{runId}/timing` returns the versioned `agent.run.timing.v1` contract. Access uses the same run owner/platform-administrator check as the other run-detail endpoints.
+
+The contract separates:
+
+- queue time, execution time, result finalization, and end-to-end duration
+- Router decision, Supervisor PLAN/REVISE, Agent, model, tool, Pipeline step, parallel group, and Supervisor child-Agent phases
+- model cumulative time from model critical-path time, so parallel calls are not presented as serial latency
+- explained wall-clock coverage from gaps that have no persisted phase event
+- per-run model calls, input/output/total tokens, configured model, provider, measured duration, and estimated cost
+
+Overlapping explanatory phases are unioned before coverage is calculated. `parallel_savings_ms` compares the cumulative model time inside each explicit parallel group with that group's wall-clock duration. Gaps of at least 50 ms are returned with their neighboring phases so unexplained latency remains visible instead of being assigned to an arbitrary Agent.
+
+The Run Observation page renders the same contract as summary cards, a horizontal timeline, gap diagnostics, and an expandable per-model usage table. New Pipeline events persist stable `step_id`, `agent_id`, and `parallel_group` metadata. Legacy events without discriminators are paired chronologically by phase type for backward-compatible historical timelines.
+
 ## Decision model configuration
 
 Router and Supervisor control calls should use a small, low-latency model with reasoning disabled. The runtime resolves models in this order:

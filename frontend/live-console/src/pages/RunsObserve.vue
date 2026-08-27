@@ -14,6 +14,7 @@ const selectedRunId = ref('')
 const detail = ref<JsonMap | null>(null)
 const steps = ref<JsonMap[]>([])
 const events = ref<JsonMap[]>([])
+const timing = ref<JsonMap | null>(null)
 const waiting = ref<JsonMap | null>(null)
 const detailLoading = ref(false)
 const cancellingRunId = ref('')
@@ -83,18 +84,21 @@ async function openRun(r: JsonMap) {
   detail.value = r
   steps.value = []
   events.value = []
+  timing.value = null
   waiting.value = null
   try {
-    const [d, s, e, w] = await Promise.all([
+    const [d, s, e, w, t] = await Promise.all([
       readJson<JsonMap>(await fetch(`/platform/frontend/agents/runs/${encodeURIComponent(String(r.run_id))}`, { headers: headers(false) })),
       readJson<JsonMap>(await fetch(`/platform/frontend/agents/runs/${encodeURIComponent(String(r.run_id))}/steps`, { headers: headers(false) })),
       readJson<JsonMap>(await fetch(`/platform/frontend/agents/runs/${encodeURIComponent(String(r.run_id))}/events?limit=200`, { headers: headers(false) })),
       readJson<JsonMap>(await fetch(`/platform/frontend/agents/runs/${encodeURIComponent(String(r.run_id))}/waiting`, { headers: headers(false) })).catch(() => ({ item: null })),
+      readJson<JsonMap>(await fetch(`/platform/frontend/agents/runs/${encodeURIComponent(String(r.run_id))}/timing`, { headers: headers(false) })).catch(() => ({ timing: null })),
     ])
     detail.value = d.run || d
     steps.value = (s.items || s.steps || []) as JsonMap[]
     events.value = (e.items || e.events || []) as JsonMap[]
     waiting.value = (w.item || null) as JsonMap | null
+    timing.value = (t.timing || null) as JsonMap | null
   } catch (err) {
     notifyError(err)
   } finally {
@@ -104,6 +108,12 @@ async function openRun(r: JsonMap) {
 function pretty(v: unknown) { try { return JSON.stringify(v ?? {}, null, 2) } catch { return String(v ?? '') } }
 function percent(value: unknown) { return typeof value === 'number' ? `${(value * 100).toFixed(1)}%` : '暂无样本' }
 function metricNumber(value: unknown, suffix = '') { return typeof value === 'number' ? `${Number(value).toFixed(Number.isInteger(value) ? 0 : 2)}${suffix}` : '—' }
+function durationText(value: unknown) {
+  if (typeof value !== 'number') return '—'
+  if (value < 1000) return `${Math.round(value)} ms`
+  if (value < 60000) return `${(value / 1000).toFixed(value < 10000 ? 2 : 1)} s`
+  return `${Math.floor(value / 60000)}m ${((value % 60000) / 1000).toFixed(1)}s`
+}
 function eventStatusCls(ev: JsonMap) {
   const type = String(ev.event_type || ev.type || '')
   if (type.includes('failed') || type.includes('rejected') || type.includes('expired')) return 'badge-red'
@@ -279,6 +289,23 @@ const stats = computed(() => ({
   running: runs.value.filter((r) => statusCls(String(r.status)) === 'badge-amber').length,
 }))
 const hasRouterDecision = computed(() => events.value.some((ev) => String(ev.event_type || ev.type || '').toLowerCase() === 'router_decision'))
+const timingSummary = computed<JsonMap>(() => (timing.value?.summary || {}) as JsonMap)
+const timingPhases = computed<JsonMap[]>(() => (timing.value?.phases || []) as JsonMap[])
+const timingGaps = computed<JsonMap[]>(() => (timing.value?.gaps || []) as JsonMap[])
+const timingLlmCalls = computed<JsonMap[]>(() => (timing.value?.llm_calls || []) as JsonMap[])
+function timingBarStyle(item: JsonMap) {
+  const started = timing.value?.started_at ? Date.parse(String(timing.value.started_at)) : 0
+  const total = Number(timing.value?.execution_ms || 0)
+  const itemStart = item.started_at ? Date.parse(String(item.started_at)) : started
+  const duration = Number(item.duration_ms || 0)
+  if (!started || !total) return { left: '0%', width: '1%' }
+  const left = Math.max(0, Math.min(100, ((itemStart - started) / total) * 100))
+  const width = Math.max(0.8, Math.min(100 - left, (duration / total) * 100))
+  return { left: `${left}%`, width: `${width}%` }
+}
+function timingKindClass(kind: unknown) {
+  return `timing-${String(kind || 'unknown').replace(/[^a-z0-9_-]/gi, '-')}`
+}
 async function evaluateRouter(correct: boolean) {
   if (!detail.value?.run_id) return
   try {
@@ -386,6 +413,52 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
           </section>
 
           <section v-if="answerOf(detail)" class="panel"><div class="section-title">回答</div><div class="rd-answer">{{ answerOf(detail) }}</div></section>
+
+          <section v-if="timing" class="panel timing-panel">
+            <div class="section-head">
+              <div>
+                <div class="section-title">编排耗时拆分</div>
+                <div class="section-sub">关键路径按重叠区间去重；“累计”会把并行分支分别计入。</div>
+              </div>
+              <span class="timing-coverage">覆盖率 {{ percent(timing.coverage_ratio) }}</span>
+            </div>
+            <div class="timing-summary-grid">
+              <div class="timing-stat"><span>端到端</span><strong>{{ durationText(timing.total_ms) }}</strong><small>排队 {{ durationText(timing.queue_ms) }}</small></div>
+              <div class="timing-stat"><span>模型关键路径</span><strong>{{ durationText(timingSummary.model_critical_path_ms) }}</strong><small>累计 {{ durationText(timingSummary.model_sum_ms) }}</small></div>
+              <div class="timing-stat"><span>LLM 决策</span><strong>{{ durationText(timingSummary.decision_ms) }}</strong><small>Router / PLAN / REVISE</small></div>
+              <div class="timing-stat"><span>并行节省</span><strong>{{ durationText(timingSummary.parallel_savings_ms) }}</strong><small>相对分支模型累计</small></div>
+              <div class="timing-stat"><span>结果收尾</span><strong>{{ durationText(timing.finalization_ms) }}</strong><small>最后阶段 → Run 完成</small></div>
+              <div class="timing-stat" :class="{ 'timing-alert': Number(timing.unexplained_ms || 0) > 500 }"><span>未解释间隔</span><strong>{{ durationText(timing.unexplained_ms) }}</strong><small>{{ timingGaps.length }} 段 ≥ 50 ms</small></div>
+              <div class="timing-stat"><span>Token</span><strong>{{ timingSummary.total_tokens || 0 }}</strong><small>输入 {{ timingSummary.input_tokens || 0 }} / 输出 {{ timingSummary.output_tokens || 0 }}</small></div>
+              <div class="timing-stat"><span>模型成本</span><strong>{{ timingSummary.currency || 'USD' }} {{ metricNumber(timingSummary.estimated_cost) }}</strong><small>{{ timingSummary.model_calls || 0 }} 次模型调用</small></div>
+            </div>
+            <div v-if="timingPhases.length" class="timing-timeline">
+              <div class="timing-axis"><span>0</span><span>{{ durationText(Number(timing.execution_ms || 0) / 2) }}</span><span>{{ durationText(timing.execution_ms) }}</span></div>
+              <div v-for="phase in timingPhases" :key="String(phase.id)" class="timing-row">
+                <div class="timing-row-label">
+                  <strong>{{ phase.label }}</strong>
+                  <small>{{ durationText(phase.duration_ms) }}<template v-if="phase.reported_duration_ms != null && phase.reported_duration_ms !== phase.duration_ms"> · 内部 {{ durationText(phase.reported_duration_ms) }}</template></small>
+                </div>
+                <div class="timing-track">
+                  <span class="timing-bar" :class="[timingKindClass(phase.kind), { running: phase.running }]" :style="timingBarStyle(phase)" :title="`${phase.label} · ${durationText(phase.duration_ms)}`"></span>
+                </div>
+              </div>
+            </div>
+            <div v-if="timingGaps.length" class="timing-gaps">
+              <div class="timing-subtitle">未解释间隔</div>
+              <div v-for="gap in timingGaps" :key="String(gap.id)" class="timing-gap">
+                <strong>{{ durationText(gap.duration_ms) }}</strong>
+                <span>{{ gap.after }} → {{ gap.before }}</span>
+              </div>
+            </div>
+            <details v-if="timingLlmCalls.length" class="timing-llm-details">
+              <summary>模型调用与 Token / 成本（{{ timingLlmCalls.length }}）</summary>
+              <div class="table-wrap"><table>
+                <thead><tr><th>Agent</th><th>类型</th><th>模型</th><th>耗时</th><th>输入</th><th>输出</th><th>成本</th></tr></thead>
+                <tbody><tr v-for="call in timingLlmCalls" :key="String(call.call_id)"><td>{{ call.agent_id || '—' }}</td><td>{{ call.call_kind || 'agent' }}</td><td class="mono">{{ call.model_name || call.configured_model || '—' }}</td><td>{{ durationText(call.duration_ms) }}</td><td>{{ call.input_tokens || 0 }}</td><td>{{ call.output_tokens || 0 }}</td><td>{{ call.currency || 'USD' }} {{ metricNumber(call.estimated_cost) }}</td></tr></tbody>
+              </table></div>
+            </details>
+          </section>
 
           <section class="panel sandbox-timeline-panel">
             <div class="section-head">
@@ -525,6 +598,40 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
 .rd-error.sm { margin-top: 6px; padding: 6px 9px; font-size: 11px; }
 .rd-answer { font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; color: #334155; }
 
+.timing-panel { display: flex; flex-direction: column; gap: 14px; }
+.timing-coverage { padding: 5px 9px; border-radius: 999px; background: #ecfdf5; color: #047857; font-size: 11px; font-weight: 800; }
+.timing-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(125px, 1fr)); gap: 8px; }
+.timing-stat { min-width: 0; padding: 9px 10px; border: 1px solid #e2e8f0; border-radius: 9px; background: #f8fafc; display: flex; flex-direction: column; gap: 3px; }
+.timing-stat span, .timing-stat small { color: var(--muted); font-size: 10px; }
+.timing-stat strong { color: #0f172a; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timing-stat.timing-alert { border-color: #fdba74; background: #fff7ed; }
+.timing-stat.timing-alert strong { color: #c2410c; }
+.timing-timeline { padding: 10px 12px 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; display: flex; flex-direction: column; gap: 7px; }
+.timing-axis { margin-left: 190px; display: flex; justify-content: space-between; color: #94a3b8; font-size: 9px; }
+.timing-row { display: grid; grid-template-columns: 180px minmax(180px, 1fr); gap: 10px; align-items: center; }
+.timing-row-label { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.timing-row-label strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #334155; font-size: 10px; }
+.timing-row-label small { color: #94a3b8; font-size: 9px; }
+.timing-track { height: 14px; position: relative; overflow: hidden; border-radius: 4px; background: repeating-linear-gradient(90deg, #f8fafc 0, #f8fafc calc(25% - 1px), #e2e8f0 25%); }
+.timing-bar { position: absolute; top: 2px; bottom: 2px; min-width: 3px; border-radius: 4px; background: #64748b; }
+.timing-bar.running { opacity: .55; animation: timing-pulse 1.1s ease-in-out infinite alternate; }
+.timing-decision { background: #8b5cf6; }
+.timing-model { background: #2563eb; }
+.timing-pipeline_step { background: #0f766e; }
+.timing-parallel_group { background: #f59e0b; outline: 1px solid #b45309; opacity: .72; }
+.timing-supervisor_step { background: #db2777; }
+.timing-tool { background: #475569; }
+.timing-agent { background: #cbd5e1; }
+@keyframes timing-pulse { to { opacity: 1; } }
+.timing-subtitle { color: #334155; font-size: 11px; font-weight: 800; }
+.timing-gaps { display: flex; flex-direction: column; gap: 5px; }
+.timing-gap { display: grid; grid-template-columns: 75px minmax(0, 1fr); gap: 8px; padding: 6px 8px; border-left: 3px solid #f97316; border-radius: 5px; background: #fff7ed; font-size: 10px; }
+.timing-gap strong { color: #c2410c; }
+.timing-gap span { color: #7c2d12; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.timing-llm-details summary { cursor: pointer; color: #475569; font-size: 11px; font-weight: 700; }
+.timing-llm-details .table-wrap { margin-top: 8px; }
+.timing-llm-details table { font-size: 10px; }
+
 .sandbox-timeline { display: flex; flex-direction: column; gap: 10px; }
 .skill-timeline-item { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 9px; align-items: start; padding: 8px 2px; }
 .timeline-dot { width: 12px; height: 12px; border-radius: 50%; margin: 4px; box-shadow: 0 0 0 4px #eff6ff; }
@@ -573,6 +680,9 @@ onMounted(async () => { await loadAgents(); await loadRuns() })
 
 @media (max-width: 980px) {
   .orchestration-metrics { grid-template-columns: repeat(2, 1fr); }
+  .timing-summary-grid { grid-template-columns: repeat(2, 1fr); }
+  .timing-row { grid-template-columns: 130px minmax(160px, 1fr); }
+  .timing-axis { margin-left: 140px; }
   .eval-layout { grid-template-columns: 1fr; }
   .runs-page { overflow: visible; }
   .runs-body { grid-template-columns: 1fr; overflow: visible; }

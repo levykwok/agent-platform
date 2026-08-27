@@ -44,6 +44,11 @@ public record TaskResult(
     }
 
     public AgentBusinessResult businessResult() {
+        AgentBusinessResult decoded = AgentBusinessResult.fromText(content);
+        if (status == TaskStatus.COMPLETED
+                && !AgentBusinessResult.SUCCEEDED.equals(decoded.status())) {
+            return decoded;
+        }
         return new AgentBusinessResult(
                 status == TaskStatus.COMPLETED
                         ? AgentBusinessResult.SUCCEEDED

@@ -37,6 +37,7 @@ import io.agentscope.harness.agent.HarnessAgent;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -394,6 +395,121 @@ class NestedOrchestrationTest {
                                         message.getTextContent().contains("facts-child result")
                                                 && message.getTextContent().contains("risks-child result")
                                                 && message.getTextContent().contains("parallel_group")));
+    }
+
+    @Test
+    void pipelineHonorsConfiguredParallelismAtTwoFourAndEightWorkers() {
+        for (int concurrency : List.of(2, 4, 8)) {
+            AtomicInteger active = new AtomicInteger();
+            AtomicInteger maxActive = new AtomicInteger();
+            List<PipelineStep> steps = new ArrayList<>();
+            for (int index = 0; index < concurrency; index++) {
+                String childId = "load-child-" + concurrency + "-" + index;
+                addDefinition(childId, OrchestrationPolicy.single());
+                HarnessAgent child = mock(HarnessAgent.class);
+                doReturn(
+                                reactor.core.publisher.Mono.defer(
+                                        () -> {
+                                            int current = active.incrementAndGet();
+                                            maxActive.accumulateAndGet(current, Math::max);
+                                            return reactor.core.publisher.Mono.delay(
+                                                            Duration.ofMillis(60))
+                                                    .map(
+                                                            ignored ->
+                                                                    Msg.builder()
+                                                                            .role(MsgRole.ASSISTANT)
+                                                                            .textContent(childId)
+                                                                            .build())
+                                                    .doFinally(
+                                                            ignored ->
+                                                                    active.decrementAndGet());
+                                        }))
+                        .when(child)
+                        .call(any(UserMessage.class), any(RuntimeContext.class));
+                agents.put(childId, child);
+                steps.add(
+                        new PipelineStep(
+                                "load-step-" + concurrency + "-" + index,
+                                childId,
+                                "work",
+                                null,
+                                0,
+                                null,
+                                List.of(),
+                                "load-group-" + concurrency));
+            }
+            String pipelineId = "load-pipeline-" + concurrency;
+            addDefinition(
+                    pipelineId,
+                    new OrchestrationPolicy(
+                            OrchestrationMode.PIPELINE,
+                            List.of(),
+                            List.of(),
+                            steps,
+                            5,
+                            false,
+                            2,
+                            true,
+                            true,
+                            concurrency));
+
+            ChatResponse response = runtime.chat(pipelineId, request("load test")).block();
+
+            assertNotNull(response);
+            assertEquals(concurrency, maxActive.get(), "parallelism " + concurrency);
+            for (int index = 0; index < concurrency; index++) {
+                assertTrue(response.text().contains("load-child-" + concurrency + "-" + index));
+            }
+        }
+    }
+
+    @Test
+    void pipelineMarksJoinedOutputPartialWhenOneParallelBranchFails() {
+        addSingle(
+                "partial-failed-child",
+                "{\"status\":\"failed\",\"data\":{},\"summary\":\"branch failed\","
+                        + "\"artifacts\":[],\"error\":{\"code\":\"UPSTREAM\",\"message\":\"boom\"}}");
+        addSingle("partial-success-child", "usable result");
+        addSingle("partial-join-child", "degraded final");
+        addDefinition(
+                "partial-parallel-pipeline",
+                new OrchestrationPolicy(
+                        OrchestrationMode.PIPELINE,
+                        List.of(),
+                        List.of(),
+                        List.of(
+                                new PipelineStep(
+                                        "failed",
+                                        "partial-failed-child",
+                                        "fail",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "partial-group"),
+                                new PipelineStep(
+                                        "success",
+                                        "partial-success-child",
+                                        "succeed",
+                                        null,
+                                        0,
+                                        null,
+                                        List.of(),
+                                        "partial-group"),
+                                new PipelineStep(
+                                        "partial-join", "partial-join-child", "join"))));
+
+        ChatResponse response =
+                runtime.chat("partial-parallel-pipeline", request("partial failure")).block();
+
+        assertEquals("degraded final", response.text());
+        ArgumentCaptor<UserMessage> joinedInput = ArgumentCaptor.forClass(UserMessage.class);
+        verify(agents.get("partial-join-child"))
+                .call(joinedInput.capture(), any(RuntimeContext.class));
+        String prompt = joinedInput.getValue().getTextContent();
+        assertTrue(prompt.contains("\"status\":\"partial\""));
+        assertTrue(prompt.contains("branch failed"));
+        assertTrue(prompt.contains("usable result"));
     }
 
     @Test

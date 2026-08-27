@@ -3,6 +3,7 @@
  */
 package io.agent.platform.web;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
@@ -27,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import reactor.core.publisher.Flux;
@@ -142,6 +144,68 @@ class DurableAgentRunServiceTest {
         assertTrue(second.getMessage().contains("synchronous runtime failure"));
         verify(runtime, times(2)).stream(eq("agent"), any());
         service.failed("run-sync-failure");
+    }
+
+    @Test
+    void durableRunStreamsHandleTwoFourAndEightConcurrentRoots() {
+        PlatformStorageLayer storage = storage(tempDir);
+        OrchestrationCheckpointStore checkpoints =
+                new OrchestrationCheckpointStore(storage, "instance-a", 5_000);
+        checkpoints.initialize();
+        AgentRuntime runtime = mock(AgentRuntime.class);
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maxActive = new AtomicInteger();
+        when(runtime.stream(eq("agent"), any()))
+                .thenAnswer(
+                        ignored ->
+                                Flux.defer(
+                                        () -> {
+                                            int current = active.incrementAndGet();
+                                            maxActive.accumulateAndGet(current, Math::max);
+                                            return reactor.core.publisher.Mono.delay(
+                                                            Duration.ofMillis(500))
+                                                    .map(
+                                                            tick ->
+                                                                    new AgentEventEnvelope(
+                                                                            "event-" + tick,
+                                                                            "text_block_delta",
+                                                                            Instant.now().toString(),
+                                                                            "agent",
+                                                                            "ok",
+                                                                            Map.of()))
+                                                    .doOnSuccess(
+                                                            event ->
+                                                                    active.decrementAndGet())
+                                                    .flux();
+                                        }));
+        DurableAgentRunService service =
+                new DurableAgentRunService(
+                        checkpoints, runtime, mock(PlatformCompatibilityState.class), 10);
+
+        for (int concurrency : List.of(2, 4, 8)) {
+            maxActive.set(0);
+            for (int index = 0; index < concurrency; index++) {
+                String runId = "run-load-" + concurrency + "-" + index;
+                service.register(runId, "agent", request(runId, "agent"));
+            }
+
+            reactor.core.publisher.Flux.range(0, concurrency)
+                    .flatMap(
+                            index -> {
+                                String runId = "run-load-" + concurrency + "-" + index;
+                                return service.stream(runId, "agent", request(runId, "agent"))
+                                        .then();
+                            },
+                            concurrency)
+                    .then()
+                    .block(Duration.ofSeconds(10));
+
+            assertEquals(concurrency, maxActive.get(), "root concurrency " + concurrency);
+            assertEquals(0, active.get());
+            for (int index = 0; index < concurrency; index++) {
+                service.succeeded("run-load-" + concurrency + "-" + index);
+            }
+        }
     }
 
     private static ChatRequest request(String runId, String agentId) {

@@ -93,6 +93,16 @@ class PlatformRunPersistenceTest {
                 runId,
                 "pipeline_parallel_end",
                 Map.of("parallel_group", "gather", "duration_ms", 15));
+        state.appendAuditEvent(
+                "llm.call",
+                "metrics-agent",
+                Map.of(
+                        "root_task_id", runId,
+                        "agent_id", "metrics-agent",
+                        "configured_model", "test-model",
+                        "input_tokens", 40,
+                        "output_tokens", 10,
+                        "total_tokens", 50));
         state.recordOrchestrationEvaluation(runId, "router", true, "correct route");
 
         Map<String, Object> metrics = state.orchestrationMetrics("metrics-agent", "user-1");
@@ -103,6 +113,9 @@ class PlatformRunPersistenceTest {
         assertEquals(1L, metrics.get("pipeline_parallel_groups"));
         assertEquals(15L, metrics.get("pipeline_parallel_p95_ms"));
         assertEquals(30L, metrics.get("decision_p95_ms"));
+        Map<?, ?> timingSummary = (Map<?, ?>) state.runTiming(runId).get("summary");
+        assertEquals(1, timingSummary.get("model_calls"));
+        assertEquals(50L, timingSummary.get("total_tokens"));
     }
 
     @Test

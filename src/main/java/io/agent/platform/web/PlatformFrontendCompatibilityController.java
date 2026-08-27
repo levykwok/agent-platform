@@ -426,6 +426,13 @@ public class PlatformFrontendCompatibilityController {
         return map("items", rows, "events", rows, "next_after_id", rows.size());
     }
 
+    @GetMapping("/agents/runs/{runId}/timing")
+    public Map<String, Object> runTiming(
+            @PathVariable("runId") String runId, ServerHttpRequest request) {
+        readableRun(runId, requirePrincipal(request));
+        return map("timing", state.runTiming(runId));
+    }
+
     @PostMapping("/agents/runs/{runId}/orchestration-evaluation")
     public Map<String, Object> evaluateOrchestration(
             @PathVariable("runId") String runId,

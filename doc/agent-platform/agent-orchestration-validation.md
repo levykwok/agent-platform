@@ -21,9 +21,9 @@ Runs and detailed persisted timelines are in the ignored artifact `output/orches
 
 ## Automated coverage
 
-`mvn -o test` completed successfully:
+`mvn -o test` completed successfully after the timing-observability pass:
 
-- 128 tests run
+- 134 tests run
 - 0 failures
 - 0 errors
 - 0 skipped
@@ -32,11 +32,14 @@ The suite includes:
 
 - LLM Router decision parsing, whitelist validation, fallback, and `enable_thinking=false` request injection
 - Pipeline ordered execution, branching, explicit parallel fan-out/join, bounded concurrency, timeout/retry/failure policy, typed joined values, group-level recovery, and legacy migration
+- deterministic Pipeline fan-out and durable root-run streaming at concurrency levels 2, 4, and 8, plus mixed successful/failed branch joining as `partial`
 - Supervisor PLAN/REVISE, repeated and parallel child calls, budgets, tool-scope preservation, timeout/retry/fallback, and thinking policy
 - root task depth/call/token/time budgets and nested task contracts
 - SQLite lease fencing, stale-owner rejection, durable cancellation, expired-run takeover, and checkpoint cleanup
 - process-recovery simulations proving committed Pipeline and Supervisor phases are not repeated
+- durable cancellation and recovery coverage remained green in the complete regression suite
 - persisted Router/Supervisor/Pipeline evaluation suites and tenant scoping
+- timing interval union, legacy-event pairing, unexplained-gap detection, per-run LLM usage, and cost aggregation
 
 `npm run build` completed Vue type checking and the Vite production build. The only frontend warning is the existing bundle chunk-size advisory.
 
@@ -65,6 +68,16 @@ The Pipeline parallel editor received an additional Playwright pass against Vite
 - both parallel-group values remained `acceptance-fanout` after the save/reload cycle
 
 The final browser artifact is `output/playwright/pipeline-parallel-20260827/pipeline-parallel-save-refresh.png`.
+
+Run timing observability received a separate Playwright pass against Vite on `5173` and an isolated backend on `18085`:
+
+- the historical parallel Pipeline run loaded through the authenticated Run Observation page
+- the timing endpoint returned the `agent.run.timing.v1` contract without weakening run access control
+- legacy events were paired into the `analyze`, `format`, and `join` Pipeline steps
+- the page displayed 97.3% explained coverage, 15.3 s model critical path, 23.9 s cumulative model time, 9.81 s parallel savings, and two unexplained gaps totaling 444 ms
+- expanding model usage displayed exactly three calls with Agent, model, measured duration, input tokens, output tokens, and cost
+
+The reviewed browser artifact is `output/playwright/orchestration-timing-20260827/timing-panel-final.png`. The isolated `18085` backend and Playwright session were stopped after validation; the existing `8080/5173` services were not modified.
 
 ## Parallel current-head real-model result
 

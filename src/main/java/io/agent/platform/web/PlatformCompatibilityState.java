@@ -2952,6 +2952,59 @@ public class PlatformCompatibilityState {
         return runEvents.getOrDefault(runId, List.of());
     }
 
+    public Map<String, Object> runTiming(String runId) {
+        return RunTimingAnalyzer.analyze(run(runId), runEvents(runId), runLlmCalls(runId));
+    }
+
+    private List<Map<String, Object>> runLlmCalls(String runId) {
+        List<Map<String, Object>> auditSnapshot;
+        synchronized (audit) {
+            auditSnapshot = List.copyOf(audit);
+        }
+        List<Map<String, Object>> calls = new ArrayList<>();
+        int sequence = 0;
+        for (Map<String, Object> event : auditSnapshot) {
+            if (!"llm.call".equals(String.valueOf(event.get("event_type")))) continue;
+            Map<String, Object> payload = objectMap(event.get("payload"));
+            if (!runId.equals(String.valueOf(payload.getOrDefault("root_task_id", "")))) {
+                continue;
+            }
+            String modelId = String.valueOf(payload.getOrDefault("configured_model", ""));
+            if (modelId.isBlank()) {
+                modelId = String.valueOf(payload.getOrDefault("model_name", ""));
+            }
+            long inputTokens = number(payload.get("input_tokens"), 0L);
+            long outputTokens = number(payload.get("output_tokens"), 0L);
+            long totalTokens = number(payload.get("total_tokens"), inputTokens + outputTokens);
+            Map<String, Object> pricing =
+                    objectMap(modelRows.getOrDefault(modelId, Map.of()).get("pricing_json"));
+            double inputPrice = decimal(pricing.get("input_per_million_tokens"));
+            double outputPrice = decimal(pricing.get("output_per_million_tokens"));
+            Map<String, Object> call = new LinkedHashMap<>();
+            call.put("call_id", "llm_" + (++sequence));
+            call.put("agent_id", String.valueOf(payload.getOrDefault("agent_id", "")));
+            call.put("call_kind", String.valueOf(payload.getOrDefault("call_kind", "agent")));
+            call.put("configured_model", modelId);
+            call.put("model_name", String.valueOf(payload.getOrDefault("model_name", modelId)));
+            call.put("provider_type", String.valueOf(payload.getOrDefault("provider_type", "")));
+            call.put("input_tokens", inputTokens);
+            call.put("output_tokens", outputTokens);
+            call.put("total_tokens", totalTokens);
+            call.put("estimated_cost", (inputTokens * inputPrice + outputTokens * outputPrice) / 1_000_000D);
+            call.put("currency", String.valueOf(pricing.getOrDefault("currency", "USD")));
+            call.put(
+                    "recorded_at",
+                    String.valueOf(
+                            payload.getOrDefault(
+                                    "recorded_at", event.getOrDefault("created_at", ""))));
+            if (payload.get("usage_time_seconds") instanceof Number usageTime) {
+                call.put("duration_ms", Math.max(0L, Math.round(usageTime.doubleValue() * 1000D)));
+            }
+            calls.add(Map.copyOf(call));
+        }
+        return List.copyOf(calls);
+    }
+
     public Map<String, Object> recordOrchestrationEvaluation(
             String runId, String kind, boolean correct, String note) {
         Map<String, Object> payload =
