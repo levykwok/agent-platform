@@ -333,7 +333,12 @@ async function runOrchestrationEvaluation() {
   }
 }
 
-onMounted(async () => { await loadAgents(); await loadRuns() })
+onMounted(async () => {
+  await loadAgents()
+  await loadRuns()
+  const requestedRunId = new URLSearchParams(location.search).get('run_id')?.trim() || ''
+  if (requestedRunId) await openRun(runs.value.find((item) => String(item.run_id) === requestedRunId) || { run_id: requestedRunId })
+})
 </script>
 
 <template>

@@ -5,6 +5,7 @@ package io.agent.platform.web;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,20 +18,27 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 /** Protects the stable external API without affecting the platform's internal endpoints. */
 @Component
 @Order(-100)
 public class ExternalApiKeyWebFilter implements WebFilter {
 
+    public static final String CLIENT_ATTRIBUTE =
+            ExternalApiKeyWebFilter.class.getName() + ".client";
+
     private final boolean enabled;
     private final Set<String> apiKeys;
+    private final ExternalAccessService externalAccess;
 
     public ExternalApiKeyWebFilter(
             @Value("${agent.platform.api.external.enabled:false}") String enabled,
-            @Value("${agent.platform.api.external.api-keys:}") String configuredKeys) {
+            @Value("${agent.platform.api.external.api-keys:}") String configuredKeys,
+            ExternalAccessService externalAccess) {
         this.enabled = Boolean.parseBoolean(enabled);
         this.apiKeys = parseKeys(configuredKeys);
+        this.externalAccess = externalAccess;
     }
 
     @Override
@@ -46,22 +54,29 @@ public class ExternalApiKeyWebFilter implements WebFilter {
                     "external_api_disabled",
                     "External API is disabled.");
         }
-        if (apiKeys.isEmpty()) {
-            return writeError(
-                    exchange,
-                    HttpStatus.SERVICE_UNAVAILABLE,
-                    "external_api_not_configured",
-                    "External API keys are not configured.");
-        }
         String supplied = suppliedKey(exchange);
-        if (supplied.isBlank() || !apiKeys.contains(supplied)) {
-            return writeError(
-                    exchange,
-                    HttpStatus.UNAUTHORIZED,
-                    "invalid_api_key",
-                    "A valid X-API-Key or Bearer token is required.");
-        }
-        return chain.filter(exchange);
+        return Mono.fromCallable(() -> Optional.ofNullable(authenticate(supplied)))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMap(
+                        resolved -> {
+                            if (resolved.isEmpty()) {
+                                return writeError(
+                                        exchange,
+                                        HttpStatus.UNAUTHORIZED,
+                                        "invalid_api_key",
+                                        "A valid X-API-Key or Bearer token is required.");
+                            }
+                            ExternalAccessService.ApiClient client = resolved.orElseThrow();
+                            exchange.getAttributes().put(CLIENT_ATTRIBUTE, client);
+                            return chain.filter(exchange);
+                        });
+    }
+
+    private ExternalAccessService.ApiClient authenticate(String supplied) {
+        ExternalAccessService.ApiClient client = externalAccess.authenticate(supplied);
+        return client == null && apiKeys.contains(supplied)
+                ? externalAccess.legacyClient(supplied)
+                : client;
     }
 
     private static boolean isExternalApi(String path) {

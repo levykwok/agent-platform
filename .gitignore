@@ -25,6 +25,7 @@ frontend/live-console/dist-check*/
 .playwright-cli/
 test-results/
 .tmp-governance-e2e/
+.tmp-external-e2e-*/
 .tmp-schedule-test-logs/
 docs/_build/
 docs/_static/

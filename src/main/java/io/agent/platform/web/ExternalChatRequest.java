@@ -5,6 +5,7 @@ package io.agent.platform.web;
 
 import io.agent.platform.runtime.ChatImage;
 import io.agent.platform.runtime.ChatRequest;
+import io.agent.platform.runtime.protocol.TaskContext;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -44,13 +45,36 @@ public record ExternalChatRequest(
     }
 
     public ChatRequest toRuntimeRequest() {
-        return new ChatRequest(
+        return toRuntimeRequest(
                 defaultValue(tenantId, "external"),
                 defaultValue(userId, "external-user"),
-                defaultValue(sessionId, "session_" + UUID.randomUUID()),
-                messageWithFiles(),
+                sessionIdOrGenerated(),
                 null,
+                null);
+    }
+
+    /** Build a runtime request with identity and run ownership chosen by the server. */
+    public ChatRequest toRuntimeRequest(
+            String runtimeTenantId,
+            String runtimeUserId,
+            String effectiveSessionId,
+            String runId,
+            String agentId) {
+        return new ChatRequest(
+                defaultValue(runtimeTenantId, "external"),
+                defaultValue(runtimeUserId, "external-user"),
+                defaultValue(effectiveSessionId, sessionIdOrGenerated()),
+                messageWithFiles(),
+                TaskContext.root(runId, agentId, agentId, null),
                 images);
+    }
+
+    public String clientUserId() {
+        return defaultValue(userId, "external-user");
+    }
+
+    public String sessionIdOrGenerated() {
+        return defaultValue(sessionId, "session_" + UUID.randomUUID());
     }
 
     private String messageWithFiles() {
