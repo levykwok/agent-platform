@@ -59,12 +59,14 @@ public class ExternalAgentApiController {
 
     @GetMapping("/agents")
     public Map<String, Object> agents(ServerWebExchange exchange) {
-        var principal = client(exchange).principal();
+        ExternalAccessService.ApiClient client = client(exchange);
+        var principal = client.principal();
         List<PublicAgent> items =
                 registry.allPublished().stream()
                         .filter(AgentDefinition::enabled)
+                        .filter(definition -> client.allowsAgent(definition.agentId()))
                         .filter(definition -> assetAccess.canRead("AGENT", definition.agentId(), principal))
-                        .map(ExternalAgentApiController::publicAgent)
+                        .map(definition -> publicAgent(definition, client))
                         .toList();
         return Map.of("items", items, "count", items.size());
     }
@@ -72,8 +74,9 @@ public class ExternalAgentApiController {
     @GetMapping("/agents/{agentId}")
     public PublicAgent agent(
             @PathVariable("agentId") String agentId, ServerWebExchange exchange) {
-        ensureAgent(agentId, client(exchange));
-        return publicAgent(registry.findPublished(agentId).orElseThrow());
+        ExternalAccessService.ApiClient client = client(exchange);
+        ensureAgent(agentId, client);
+        return publicAgent(registry.findPublished(agentId).orElseThrow(), client);
     }
 
     @PostMapping("/agents/{agentId}/chat")
@@ -304,7 +307,9 @@ public class ExternalAgentApiController {
     private void ensureAgent(String agentId, ExternalAccessService.ApiClient client) {
         boolean available =
                 registry.findPublished(agentId).filter(AgentDefinition::enabled).isPresent();
-        if (!available || !assetAccess.canRead("AGENT", agentId, client.principal())) {
+        if (!available
+                || !client.allowsAgent(agentId)
+                || !assetAccess.canRead("AGENT", agentId, client.principal())) {
             throw new ResponseStatusException(
                     HttpStatus.NOT_FOUND, "Published agent was not found: " + agentId);
         }
@@ -406,13 +411,16 @@ public class ExternalAgentApiController {
         return "/platform/live/runs?run_id=" + runId;
     }
 
-    private static PublicAgent publicAgent(AgentDefinition definition) {
+    private static PublicAgent publicAgent(
+            AgentDefinition definition, ExternalAccessService.ApiClient client) {
+        List<String> capabilities =
+                List.of("chat", "stream").stream().filter(client::allowsCapability).toList();
         return new PublicAgent(
                 definition.agentId(),
                 definition.version(),
                 definition.name(),
                 definition.orchestration().mode().name().toLowerCase(),
-                List.of("chat", "stream"));
+                capabilities);
     }
 
     private record Invocation(

@@ -245,6 +245,28 @@ if ($SqliteUrl -and $SqliteUrl.Trim()) {
     $env:AGENT_PLATFORM_SQLITE_URL = $SqliteUrl.Trim()
 }
 
+# The development UI runs on a separate origin and proxies API requests to the
+# backend. Keep custom operator values, but make the standard local launcher work
+# with both default and overridden ports without requiring extra environment setup.
+if (-not $FrontendOnly -and -not $BackendOnly) {
+    if ([string]::IsNullOrWhiteSpace($env:VITE_API_PROXY)) {
+        $env:VITE_API_PROXY = "http://127.0.0.1:$BackendPort"
+    }
+
+    $allowedOrigins = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:AGENT_PLATFORM_AUTH_ALLOWED_ORIGINS)) {
+        $allowedOrigins += @($env:AGENT_PLATFORM_AUTH_ALLOWED_ORIGINS.Split(',') |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ })
+    }
+    $allowedOrigins += @(
+        "http://127.0.0.1:$FrontendPort",
+        "http://localhost:$FrontendPort"
+    )
+    $env:AGENT_PLATFORM_AUTH_ALLOWED_ORIGINS =
+        [string]::Join(',', @($allowedOrigins | Select-Object -Unique))
+}
+
 if (-not $BackendOnly) {
     Require-Command "node"
     Require-Command "npm"

@@ -11,6 +11,7 @@ import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -55,11 +56,22 @@ public class ExternalApiKeyWebFilter implements WebFilter {
                     "External API is disabled.");
         }
         String supplied = suppliedKey(exchange);
+        RequestTarget target = requestTarget(exchange);
         return Mono.fromCallable(() -> Optional.ofNullable(authenticate(supplied)))
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMap(
                         resolved -> {
                             if (resolved.isEmpty()) {
+                                ExternalAccessService.ApiClient identified =
+                                        externalAccess.identifyManagedCredential(supplied);
+                                auditRejection(
+                                        exchange,
+                                        identified,
+                                        supplied,
+                                        target,
+                                        HttpStatus.UNAUTHORIZED.value(),
+                                        "invalid_api_key",
+                                        "A valid X-API-Key or Bearer token is required.");
                                 return writeError(
                                         exchange,
                                         HttpStatus.UNAUTHORIZED,
@@ -67,6 +79,24 @@ public class ExternalApiKeyWebFilter implements WebFilter {
                                         "A valid X-API-Key or Bearer token is required.");
                             }
                             ExternalAccessService.ApiClient client = resolved.orElseThrow();
+                            ExternalAccessService.AccessDecision decision =
+                                    invocationDecision(exchange, client, target);
+                            applyRateLimitHeaders(exchange, decision);
+                            if (!decision.allowed()) {
+                                auditRejection(
+                                        exchange,
+                                        client,
+                                        supplied,
+                                        target,
+                                        decision.httpStatus(),
+                                        decision.code(),
+                                        decision.message());
+                                return writeError(
+                                        exchange,
+                                        HttpStatus.valueOf(decision.httpStatus()),
+                                        decision.code(),
+                                        decision.message());
+                            }
                             exchange.getAttributes().put(CLIENT_ATTRIBUTE, client);
                             return chain.filter(exchange);
                         });
@@ -77,6 +107,79 @@ public class ExternalApiKeyWebFilter implements WebFilter {
         return client == null && apiKeys.contains(supplied)
                 ? externalAccess.legacyClient(supplied)
                 : client;
+    }
+
+    private ExternalAccessService.AccessDecision invocationDecision(
+            ServerWebExchange exchange,
+            ExternalAccessService.ApiClient client,
+            RequestTarget target) {
+        if (!HttpMethod.POST.equals(exchange.getRequest().getMethod())) {
+            return ExternalAccessService.AccessDecision.permit(0, 0, 0);
+        }
+        if (!Set.of("chat", "stream").contains(target.callMode())
+                || target.agentId().isBlank()) {
+            return ExternalAccessService.AccessDecision.permit(0, 0, 0);
+        }
+        return externalAccess.authorizeInvocation(
+                client, target.agentId(), target.callMode());
+    }
+
+    private static RequestTarget requestTarget(ServerWebExchange exchange) {
+        String path = exchange.getRequest().getPath().value();
+        String prefix = "/api/v1/agents/";
+        if (!path.startsWith(prefix)) return new RequestTarget("", "read");
+        String suffix = path.substring(prefix.length());
+        if (suffix.endsWith("/chat/stream")) {
+            return new RequestTarget(
+                    suffix.substring(0, suffix.length() - "/chat/stream".length()),
+                    "stream");
+        } else if (suffix.endsWith("/chat")) {
+            return new RequestTarget(
+                    suffix.substring(0, suffix.length() - "/chat".length()), "chat");
+        }
+        int slash = suffix.indexOf('/');
+        return new RequestTarget(slash < 0 ? suffix : suffix.substring(0, slash), "read");
+    }
+
+    private void auditRejection(
+            ServerWebExchange exchange,
+            ExternalAccessService.ApiClient client,
+            String supplied,
+            RequestTarget target,
+            int status,
+            String code,
+            String message) {
+        externalAccess.recordRejectedRequest(
+                client,
+                supplied,
+                target.agentId(),
+                "chat".equals(target.callMode()) ? "sync" : target.callMode(),
+                exchange.getRequest().getPath().value(),
+                sourceIp(exchange),
+                status,
+                code,
+                message);
+    }
+
+    private static String sourceIp(ServerWebExchange exchange) {
+        var remote = exchange.getRequest().getRemoteAddress();
+        return remote == null || remote.getAddress() == null
+                ? ""
+                : remote.getAddress().getHostAddress();
+    }
+
+    private record RequestTarget(String agentId, String callMode) {}
+
+    private static void applyRateLimitHeaders(
+            ServerWebExchange exchange, ExternalAccessService.AccessDecision decision) {
+        if (decision.limit() <= 0) return;
+        HttpHeaders headers = exchange.getResponse().getHeaders();
+        headers.set("X-RateLimit-Limit", String.valueOf(decision.limit()));
+        headers.set("X-RateLimit-Remaining", String.valueOf(decision.remaining()));
+        headers.set("X-RateLimit-Reset", String.valueOf(decision.retryAfterSeconds()));
+        if (!decision.allowed() && decision.retryAfterSeconds() > 0) {
+            headers.set(HttpHeaders.RETRY_AFTER, String.valueOf(decision.retryAfterSeconds()));
+        }
     }
 
     private static boolean isExternalApi(String path) {
