@@ -413,7 +413,7 @@ class NestedOrchestrationTest {
                                             int current = active.incrementAndGet();
                                             maxActive.accumulateAndGet(current, Math::max);
                                             return reactor.core.publisher.Mono.delay(
-                                                            Duration.ofMillis(60))
+                                                            Duration.ofMillis(300))
                                                     .map(
                                                             ignored ->
                                                                     Msg.builder()
@@ -959,10 +959,21 @@ class NestedOrchestrationTest {
                                 "{\"steps\":[{\"binding_id\":\"a\",\"instruction\":\"A\",\"parallel_group\":\"g1\"},{\"binding_id\":\"b\",\"instruction\":\"B\",\"parallel_group\":\"g1\"}],\"reason\":\"parallel\"}"),
                         decision("{\"action\":\"FINISH\",\"reason\":\"done\"}"));
 
-        ChatResponse response = runtime.chat("parallel-supervisor", request("run both")).block();
+        List<AgentEventEnvelope> events =
+                runtime.stream("parallel-supervisor", request("run both"))
+                        .takeUntil(event -> "supervisor_parallel_end".equals(event.type()))
+                        .collectList()
+                        .block();
 
         assertEquals(2, maxActive.get());
-        assertEquals(true, response.task().metadata().get("parallel"));
+        AgentEventEnvelope parallelStart =
+                events.stream()
+                        .filter(event -> "supervisor_parallel_start".equals(event.type()))
+                        .findFirst()
+                        .orElseThrow();
+        assertEquals(2, parallelStart.payload().get("max_parallelism"));
+        assertEquals(List.of("a", "b"), parallelStart.payload().get("binding_ids"));
+        assertTrue(events.stream().anyMatch(event -> "supervisor_parallel_end".equals(event.type())));
     }
 
     @Test

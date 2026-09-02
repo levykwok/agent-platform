@@ -95,6 +95,43 @@ class RunTimingAnalyzerTest {
     }
 
     @Test
+    void countsSupervisorParallelGroupSavings() {
+        Map<String, Object> timing =
+                RunTimingAnalyzer.analyze(
+                        Map.of(
+                                "run_id", "supervisor-parallel",
+                                "status", "succeeded",
+                                "created_at", at(0),
+                                "started_at", at(0),
+                                "finished_at", at(8)),
+                        List.of(
+                                event(
+                                        "supervisor_parallel_start",
+                                        1,
+                                        Map.of("parallel_group", "g1")),
+                                event("model_call_start", 1, Map.of("agent_id", "analysis")),
+                                event("model_call_start", 1.2, Map.of("agent_id", "format")),
+                                event("model_call_end", 4, Map.of("agent_id", "analysis")),
+                                event("model_call_end", 5, Map.of("agent_id", "format")),
+                                event(
+                                        "supervisor_parallel_end",
+                                        5,
+                                        Map.of("parallel_group", "g1", "duration_ms", 4000))),
+                        List.of());
+
+        Map<?, ?> summary = (Map<?, ?>) timing.get("summary");
+        assertEquals(2_800L, summary.get("parallel_savings_ms"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> phases = (List<Map<String, Object>>) timing.get("phases");
+        assertTrue(
+                phases.stream()
+                        .anyMatch(
+                                phase ->
+                                        "parallel_group".equals(phase.get("kind"))
+                                                && "g1".equals(phase.get("parallel_group"))));
+    }
+
+    @Test
     void pairsLegacyEventsByTypeWhenTheirDiscriminatorsAreMissing() {
         Instant started = Instant.parse("2026-01-01T00:00:00Z");
         Map<String, Object> run =

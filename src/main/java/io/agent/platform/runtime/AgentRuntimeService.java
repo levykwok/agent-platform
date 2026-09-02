@@ -1584,16 +1584,20 @@ public class AgentRuntimeService implements AgentRuntime {
                     List<SupervisorStep> batch = supervisorBatch(supervisor, current, remaining);
                     List<SupervisorStep> afterBatch = remainingAfterBatch(remaining, batch);
                     int firstStepIndex = completed.size() + 1;
+                    boolean parallelBatch = batch.size() > 1;
+                    long batchStartedAt = System.nanoTime();
                     List<AgentEventEnvelope> startEvents = new ArrayList<>();
+                    if (parallelBatch) {
+                        startEvents.add(supervisorParallelEvent(supervisor, batch, true, 0L));
+                    }
                     for (int index = 0; index < batch.size(); index++) {
                         SupervisorStep step = batch.get(index);
                         AgentDefinition target = definition(step.binding().targetAgentId());
                         startEvents.add(
                                 supervisorStepStartEvent(
                                         supervisor, step, target, firstStepIndex + index));
-                        supervisorAgentSummaryEvents(target.agentId(), "start")
-                                .toIterable()
-                                .forEach(startEvents::add);
+                        startEvents.addAll(
+                                supervisorAgentSummaryEvents(target.agentId(), "start"));
                     }
                     Flux<AgentEventEnvelope> started = Flux.fromIterable(startEvents);
                     Flux<AgentEventEnvelope> executed =
@@ -1605,10 +1609,9 @@ public class AgentRuntimeService implements AgentRuntime {
                                                 List<AgentEventEnvelope> completedEvents =
                                                         new ArrayList<>();
                                                 for (SubagentReply reply : batchReplies) {
-                                                    supervisorAgentSummaryEvents(
-                                                                    reply.target().agentId(), "end")
-                                                            .toIterable()
-                                                            .forEach(completedEvents::add);
+                                                    completedEvents.addAll(
+                                                            supervisorAgentSummaryEvents(
+                                                                    reply.target().agentId(), "end"));
                                                     completedEvents.add(
                                                             subagentResultEvent(
                                                                     supervisor,
@@ -1621,6 +1624,17 @@ public class AgentRuntimeService implements AgentRuntime {
                                                                     reply.instruction(),
                                                                     reply.fallbackUsed(),
                                                                     reply.failureReason()));
+                                                }
+                                                if (parallelBatch) {
+                                                    completedEvents.add(
+                                                            supervisorParallelEvent(
+                                                                    supervisor,
+                                                                    batch,
+                                                                    false,
+                                                                    java.util.concurrent.TimeUnit.NANOSECONDS
+                                                                            .toMillis(
+                                                                                    System.nanoTime()
+                                                                                            - batchStartedAt)));
                                                 }
                                                 Flux<AgentEventEnvelope> resultEvents =
                                                         Flux.fromIterable(completedEvents);
@@ -1768,20 +1782,21 @@ public class AgentRuntimeService implements AgentRuntime {
             marker.put("parallel", true);
             marker.put("parallel_group", step.parallelGroup());
         }
-        return orchestrationAgentSummaryEvents(step.agentId(), phase, Map.copyOf(marker));
+        return Flux.fromIterable(
+                orchestrationAgentSummaryEvents(step.agentId(), phase, Map.copyOf(marker)));
     }
 
-    private Flux<AgentEventEnvelope> supervisorAgentSummaryEvents(String agentId, String phase) {
+    private List<AgentEventEnvelope> supervisorAgentSummaryEvents(String agentId, String phase) {
         return orchestrationAgentSummaryEvents(
                 agentId, phase, Map.of("supervisor", true, "orchestration", "SUPERVISOR"));
     }
 
-    private Flux<AgentEventEnvelope> orchestrationAgentSummaryEvents(
+    private List<AgentEventEnvelope> orchestrationAgentSummaryEvents(
             String agentId, String phase, Map<String, Object> marker) {
         Map<String, Object> detail = new LinkedHashMap<>(marker);
         detail.put("agent_id", agentId);
         if ("start".equals(phase)) {
-            return Flux.just(
+            return List.of(
                     runtimeEvent(
                             agentId,
                             "agent_start",
@@ -1798,7 +1813,7 @@ public class AgentRuntimeService implements AgentRuntime {
                             "Text generation started for " + agentId,
                             detail));
         }
-        return Flux.just(
+        return List.of(
                 runtimeEvent(
                         agentId,
                         "text_block_end",
@@ -2124,9 +2139,7 @@ public class AgentRuntimeService implements AgentRuntime {
         int concurrency =
                 batch.size() == 1
                         ? 1
-                        : Math.min(
-                                AgentExecutionPolicy.from(supervisor).maxSubagentConcurrency(),
-                                supervisor.orchestration().maxSupervisorParallelism());
+                        : supervisorParallelism(supervisor);
         return Flux.range(0, batch.size())
                 .flatMapSequential(
                         index ->
@@ -2151,15 +2164,18 @@ public class AgentRuntimeService implements AgentRuntime {
         }
         List<SupervisorStep> batch = new ArrayList<>();
         batch.add(current);
-        int max =
-                Math.min(
-                        supervisor.orchestration().maxSupervisorParallelism(),
-                        AgentExecutionPolicy.from(supervisor).maxSubagentConcurrency());
+        int max = supervisorParallelism(supervisor);
         for (SupervisorStep step : remaining) {
             if (batch.size() >= max || !group.equals(step.parallelGroup())) break;
             batch.add(step);
         }
         return List.copyOf(batch);
+    }
+
+    private int supervisorParallelism(AgentDefinition supervisor) {
+        return Math.min(
+                supervisor.orchestration().maxSupervisorParallelism(),
+                AgentExecutionPolicy.from(supervisor).maxSubagentConcurrency());
     }
 
     private static List<SupervisorStep> remainingAfterBatch(
@@ -3275,6 +3291,43 @@ public class AgentRuntimeService implements AgentRuntime {
         payload.put("max_parallelism", maxParallelism);
         if (!start) payload.put("duration_ms", Math.max(0L, durationMs));
         String type = start ? "pipeline_parallel_start" : "pipeline_parallel_end";
+        return new AgentEventEnvelope(
+                type + "_" + Instant.now().toEpochMilli(),
+                type,
+                Instant.now().toString(),
+                definition.agentId(),
+                null,
+                Map.copyOf(payload));
+    }
+
+    private AgentEventEnvelope supervisorParallelEvent(
+            AgentDefinition definition,
+            List<SupervisorStep> group,
+            boolean start,
+            long durationMs) {
+        String parallelGroup = group.isEmpty() ? "" : group.get(0).parallelGroup();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put(
+                "summary",
+                (start ? "Start" : "Finished")
+                        + " Supervisor parallel group "
+                        + parallelGroup
+                        + " ("
+                        + group.size()
+                        + " steps)");
+        payload.put("supervisor", true);
+        payload.put("orchestration", "SUPERVISOR");
+        payload.put("parallel", true);
+        payload.put("parallel_group", parallelGroup);
+        payload.put(
+                "binding_ids",
+                group.stream().map(step -> step.binding().bindingId()).toList());
+        payload.put(
+                "target_agent_ids",
+                group.stream().map(step -> step.binding().targetAgentId()).toList());
+        payload.put("max_parallelism", supervisorParallelism(definition));
+        if (!start) payload.put("duration_ms", Math.max(0L, durationMs));
+        String type = start ? "supervisor_parallel_start" : "supervisor_parallel_end";
         return new AgentEventEnvelope(
                 type + "_" + Instant.now().toEpochMilli(),
                 type,

@@ -157,7 +157,7 @@ The contract separates:
 
 Overlapping explanatory phases are unioned before coverage is calculated. `parallel_savings_ms` compares the cumulative model time inside each explicit parallel group with that group's wall-clock duration. Gaps of at least 50 ms are returned with their neighboring phases so unexplained latency remains visible instead of being assigned to an arbitrary Agent.
 
-The Run Observation page renders the same contract as summary cards, a horizontal timeline, gap diagnostics, and an expandable per-model usage table. New Pipeline events persist stable `step_id`, `agent_id`, and `parallel_group` metadata. Legacy events without discriminators are paired chronologically by phase type for backward-compatible historical timelines.
+The Run Observation page renders the same contract as summary cards, a horizontal timeline, gap diagnostics, and an expandable per-model usage table. Pipeline parallel batches emit `pipeline_parallel_start` / `pipeline_parallel_end`; Supervisor parallel PLAN batches emit `supervisor_parallel_start` / `supervisor_parallel_end`. Both event pairs persist the explicit `parallel_group` and are included in `parallel_savings_ms`. Pipeline step events also persist stable `step_id` and `agent_id` metadata. Legacy events without discriminators are paired chronologically by phase type for backward-compatible historical timelines.
 
 ## Decision model configuration
 
@@ -239,6 +239,15 @@ Example suite:
 ```
 
 Only expectations relevant to the Agent mode need to be supplied. Results and observed traces are scoped to the submitting user and organization; platform administrators retain their normal cross-user visibility.
+
+## Public acceptance demos
+
+`scripts/seed-orchestration-e2e-examples.ps1` idempotently creates or upgrades the platform-owned public acceptance Agents. The two parallel examples are:
+
+- `orchestration-e2e-workflow`: Agent-owned `PIPELINE`; `analyze` and `format` share `parallelGroup=acceptance-fanout`, then the serial `join` Agent validates the joined value. `maxPipelineParallelism=2`.
+- `orchestration-e2e-supervisor`: LLM-planned `SUPERVISOR`; PLAN may place `analysis-child` and `format-child` in the same explicit `parallel_group`. `supervisorParallelEnabled=true` and `maxSupervisorParallelism=2`.
+
+Their child Agents are tool-free acceptance fixtures. On first creation the script writes `visibility=PUBLIC` and `source=e2e-example`; every run writes the enabled published specs while retaining existing asset metadata. All users can inspect and invoke the demos as platform public assets while normal run ownership and user isolation still apply.
 
 ## Capability assembly
 

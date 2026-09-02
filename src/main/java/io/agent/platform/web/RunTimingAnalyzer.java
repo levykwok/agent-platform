@@ -225,7 +225,8 @@ final class RunTimingAnalyzer {
             case "model_call_start" -> PhaseType.MODEL;
             case "agent_start" -> PhaseType.AGENT;
             case "pipeline_step_start", "pipeline_final_step" -> PhaseType.PIPELINE_STEP;
-            case "pipeline_parallel_start" -> PhaseType.PARALLEL_GROUP;
+            case "pipeline_parallel_start", "supervisor_parallel_start" ->
+                    PhaseType.PARALLEL_GROUP;
             case "supervisor_step_start" -> PhaseType.SUPERVISOR_STEP;
             case "tool_call_start" -> PhaseType.TOOL;
             default -> null;
@@ -240,7 +241,8 @@ final class RunTimingAnalyzer {
             case "model_call_end" -> PhaseType.MODEL;
             case "agent_end" -> PhaseType.AGENT;
             case "pipeline_step_end", "pipeline_result" -> PhaseType.PIPELINE_STEP;
-            case "pipeline_parallel_end" -> PhaseType.PARALLEL_GROUP;
+            case "pipeline_parallel_end", "supervisor_parallel_end" ->
+                    PhaseType.PARALLEL_GROUP;
             case "supervisor_subagent_result" -> PhaseType.SUPERVISOR_STEP;
             case "tool_result_end", "tool_call_end" -> PhaseType.TOOL;
             default -> null;
