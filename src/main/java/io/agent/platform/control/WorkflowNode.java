@@ -60,8 +60,9 @@ public record WorkflowNode(
         Map<String, Object> schema = objectMap(config == null ? null : config.get("schema"));
         String contract = type == WorkflowNodeType.INPUT || type == WorkflowNodeType.OUTPUT
                 ? "workflow." + (type == WorkflowNodeType.INPUT ? "input" : "output") : "";
+        String cardinality = input && type == WorkflowNodeType.JOIN ? "many" : "one";
         return List.of(new WorkflowPort("value", input ? "input" : "output", contract, schema,
-                input && type != WorkflowNodeType.INPUT, "one", input ? "节点输入" : "节点输出"));
+                input && type != WorkflowNodeType.INPUT, cardinality, input ? "节点输入" : "节点输出"));
     }
 
     private static Map<String, Object> objectMap(Object value) {

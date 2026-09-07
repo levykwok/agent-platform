@@ -20,6 +20,8 @@ import io.agent.platform.control.WorkflowNode;
 import io.agent.platform.control.WorkflowNodeType;
 import io.agent.platform.control.WorkflowPort;
 import io.agent.platform.control.WorkflowFailurePolicy;
+import io.agent.platform.control.WorkflowHttpSecurity;
+import io.agent.platform.control.WorkflowJdbcSecurity;
 import io.agent.platform.control.PipelineStep;
 import io.agent.platform.control.PipelineTransition;
 import io.agent.platform.control.WorkflowValueValidationResult;
@@ -93,6 +95,22 @@ public class AgentRuntimeService implements AgentRuntime {
     private static final ObjectMapper WORKFLOW_JSON = new ObjectMapper();
     private static final WorkflowBindingResolver WORKFLOW_BINDING_RESOLVER = new WorkflowBindingResolver();
     private static final WorkflowValueValidator WORKFLOW_VALUE_VALIDATOR = new WorkflowValueValidator();
+    private static final AgentExecutionPolicy WORKFLOW_EXECUTION_POLICY =
+            new AgentExecutionPolicy(
+                    6,
+                    12,
+                    120_000L,
+                    4,
+                    2,
+                    90_000L,
+                    180_000L,
+                    20,
+                    100_000L,
+                    12,
+                    false,
+                    false,
+                    false,
+                    false);
 
     private final AgentDefinitionRegistry registry;
     private final AgentScopeHarnessFactory harnessFactory;
@@ -232,7 +250,28 @@ public class AgentRuntimeService implements AgentRuntime {
 
     @Override
     public Mono<ChatResponse> workflow(WorkflowAsset workflow, ChatRequest request) {
-        return runTypedWorkflow(workflow, request);
+        return Mono.defer(
+                () -> {
+                    ChatRequest effective = prepareWorkflowRequest(workflow, request);
+                    boolean root =
+                            effective.taskContext().parentTaskId() == null
+                                    || effective.taskContext().parentTaskId().isBlank();
+                    if (root) {
+                        rootTaskBudgetManager.start(
+                                effective.taskContext(), WORKFLOW_EXECUTION_POLICY);
+                    }
+                    Mono<ChatResponse> execution =
+                            runTypedWorkflow(workflow, effective, ignored -> {})
+                                    .timeout(
+                                            rootTaskBudgetManager.remaining(
+                                                    effective.taskContext().rootTaskId()));
+                    return root
+                            ? execution.doFinally(
+                                    signal ->
+                                            rootTaskBudgetManager.finish(
+                                                    effective.taskContext().rootTaskId()))
+                            : execution;
+                });
     }
 
     @Override
@@ -286,22 +325,81 @@ public class AgentRuntimeService implements AgentRuntime {
     @Override
     public Flux<AgentEventEnvelope> workflowStream(
             WorkflowAsset workflow, ChatRequest request) {
-        return Flux.concat(
-                Flux.just(workflowEvent(workflow.workflowId(), "workflow_start", "Running Workflow " + workflow.name())),
-                runTypedWorkflow(workflow, request)
-                        .flatMapMany(response -> Flux.just(
-                                new AgentEventEnvelope(
-                                        "workflow_output_" + UUID.randomUUID().toString().replace("-", ""),
-                                        "text_block_delta",
-                                        Instant.now().toString(),
-                                        workflow.workflowId(),
-                                        response.text(),
-                                        Map.of("workflow", true, "workflow_id", workflow.workflowId(), "version", workflow.version())),
-                                workflowEvent(workflow.workflowId(), "workflow_end", "Finished Workflow " + workflow.name()))));
+        return Flux.defer(
+                () -> {
+                    ChatRequest effective = prepareWorkflowRequest(workflow, request);
+                    boolean root =
+                            effective.taskContext().parentTaskId() == null
+                                    || effective.taskContext().parentTaskId().isBlank();
+                    if (root) {
+                        rootTaskBudgetManager.start(
+                                effective.taskContext(), WORKFLOW_EXECUTION_POLICY);
+                    }
+                    Flux<AgentEventEnvelope> execution =
+                            workflowStreamInternal(workflow, effective)
+                                    .timeout(
+                                            rootTaskBudgetManager.remaining(
+                                                    effective.taskContext().rootTaskId()));
+                    return root
+                            ? execution.doFinally(
+                                    signal ->
+                                            rootTaskBudgetManager.finish(
+                                                    effective.taskContext().rootTaskId()))
+                            : execution;
+                });
+    }
+
+    private Flux<AgentEventEnvelope> workflowStreamInternal(
+            WorkflowAsset workflow, ChatRequest request) {
+        return Flux.create(
+                sink -> {
+                    Object eventLock = new Object();
+                    java.util.function.Consumer<AgentEventEnvelope> emit =
+                            event -> {
+                                synchronized (eventLock) {
+                                    sink.next(event);
+                                }
+                            };
+                    emit.accept(
+                            workflowEvent(
+                                    workflow.workflowId(),
+                                    "workflow_start",
+                                    "Running Workflow " + workflow.name()));
+                    reactor.core.Disposable execution =
+                            runTypedWorkflow(workflow, request, emit)
+                                    .subscribe(
+                                            response -> {
+                                                emit.accept(
+                                                        new AgentEventEnvelope(
+                                                                "workflow_output_"
+                                                                        + UUID.randomUUID()
+                                                                                .toString()
+                                                                                .replace("-", ""),
+                                                                "text_block_delta",
+                                                                Instant.now().toString(),
+                                                                workflow.workflowId(),
+                                                                response.text(),
+                                                                Map.of(
+                                                                        "workflow", true,
+                                                                        "workflow_id",
+                                                                        workflow.workflowId(),
+                                                                        "version",
+                                                                        workflow.version())));
+                                                emit.accept(
+                                                        workflowEvent(
+                                                                workflow.workflowId(),
+                                                                "workflow_end",
+                                                                "Finished Workflow "
+                                                                        + workflow.name()));
+                                                sink.complete();
+                                            },
+                                            sink::error);
+                    sink.onCancel(execution::dispose);
+                });
     }
 
     private Mono<ChatResponse> executeDefinition(AgentDefinition definition, ChatRequest request) {
-        return switch (definition.orchestration().mode()) {
+        Mono<ChatResponse> execution = switch (definition.orchestration().mode()) {
             case ROUTER ->
                     decideRoute(definition, request)
                             .flatMap(decision -> executeDefinition(decision.target(), request));
@@ -309,9 +407,16 @@ public class AgentRuntimeService implements AgentRuntime {
             case SUPERVISOR -> runSupervisor(definition, request);
             case SINGLE -> runSingle(definition, request);
         };
+        return execution.contextWrite(context -> WorkflowInvocationContext.put(context, request));
     }
 
     private Flux<AgentEventEnvelope> streamDefinition(
+            AgentDefinition definition, ChatRequest request) {
+        return streamDefinitionInternal(definition, request)
+                .contextWrite(context -> WorkflowInvocationContext.put(context, request));
+    }
+
+    private Flux<AgentEventEnvelope> streamDefinitionInternal(
             AgentDefinition definition, ChatRequest request) {
         RuntimeContext context = runtimeContext(request);
         if (definition.orchestration().mode() == OrchestrationMode.ROUTER) {
@@ -946,7 +1051,10 @@ public class AgentRuntimeService implements AgentRuntime {
     }
 
     /** Executes the independent Workflow graph; nodes and edges are the only execution model. */
-    private Mono<ChatResponse> runTypedWorkflow(WorkflowAsset workflow, ChatRequest request) {
+    private Mono<ChatResponse> runTypedWorkflow(
+            WorkflowAsset workflow,
+            ChatRequest request,
+            java.util.function.Consumer<AgentEventEnvelope> observer) {
         List<WorkflowNode> nodes = workflow.nodes();
         if (nodes.isEmpty()) {
             return Mono.error(new AgentRuntimeException("Workflow has no nodes: " + workflow.workflowId()));
@@ -959,7 +1067,7 @@ public class AgentRuntimeService implements AgentRuntime {
         Object initialData = workflowValueData(request.message(), startNode == null ? null : firstInputPort(startNode));
         Instant startedAt = Instant.now();
         return runTypedWorkflowNode(workflow, request, nodesById, edges, startNodeId,
-                        ContractValue.of("", initialData), new java.util.HashSet<>())
+                        ContractValue.of("", initialData), new java.util.HashSet<>(), observer)
                 .map(
                         value -> {
                             String text = workflowValueText(value.data());
@@ -983,36 +1091,167 @@ public class AgentRuntimeService implements AgentRuntime {
             List<WorkflowEdge> edges,
             String nodeId,
             ContractValue input,
-            java.util.Set<String> visited) {
+            java.util.Set<String> visited,
+            java.util.function.Consumer<AgentEventEnvelope> observer) {
         WorkflowNode node = nodesById.get(nodeId);
         if (node == null) return Mono.error(new AgentRuntimeException("Workflow node not found: " + nodeId));
         if (!visited.add(nodeId)) return Mono.error(new AgentRuntimeException("Workflow cycle detected at node: " + nodeId));
+        Instant nodeStartedAt = Instant.now();
+        observer.accept(workflowNodeEvent(workflow, node, "workflow_node_start", input, null, nodeStartedAt, null));
         if (node.type() == WorkflowNodeType.PARALLEL) {
-            return runParallelWorkflowNode(workflow, request, nodesById, edges, node, input, visited);
+            return runParallelWorkflowNode(
+                    workflow,
+                    request,
+                    nodesById,
+                    edges,
+                    node,
+                    input,
+                    visited,
+                    observer,
+                    nodeStartedAt);
         }
-        WorkflowPort inputPort = firstInputPort(node);
+        WorkflowNodeCheckpoint recovered = workflowNodeCheckpoint(workflow, request, node);
+        if (recovered != null) {
+            observer.accept(
+                    workflowRecoveredNodeEvent(
+                            workflow, node, input, recovered.value(), nodeStartedAt));
+            return continueTypedWorkflowNode(
+                    workflow,
+                    request,
+                    nodesById,
+                    edges,
+                    node,
+                    input,
+                    recovered.value(),
+                    recovered.content(),
+                    visited,
+                    observer);
+        }
+        WorkflowPort inputPort = workflowInputPort(node, input);
         if (inputPort != null) {
             WorkflowValueValidationResult validation = WORKFLOW_VALUE_VALIDATOR.validate(inputPort, input);
             if (!validation.valid()) return Mono.error(new AgentRuntimeException("Workflow input validation failed at " + nodeId + ": " + String.join("; ", validation.errors())));
         }
-        return runWorkflowNode(node, request, workflowValueText(input == null ? null : input.data()))
+        ContractValue actionInput =
+                node.inputMapping().isEmpty()
+                        ? input
+                        : WORKFLOW_BINDING_RESOLVER.resolve(
+                                input,
+                                input == null ? "" : input.contractRef(),
+                                node.inputMapping(),
+                                node.nodeId());
+        return runWorkflowNode(
+                        node,
+                        request,
+                        workflowValueText(actionInput == null ? null : actionInput.data()))
+                .doOnError(
+                        error ->
+                                observer.accept(
+                                        workflowNodeEvent(
+                                                workflow,
+                                                node,
+                                                "workflow_node_failed",
+                                                input,
+                                                null,
+                                                nodeStartedAt,
+                                                error)))
                 .flatMap(rawOutput -> {
                     WorkflowNodeOutput parsed = WorkflowNodeOutput.parse(rawOutput);
                     List<WorkflowEdge> outgoing = edges.stream().filter(edge -> edge != null && edge.from() != null && nodeId.equals(edge.from().nodeId())).toList();
                     WorkflowEdge next = chooseTypedEdge(outgoing, parsed.content());
                     WorkflowPort outputPort = next == null ? firstOutputPort(node) : findPort(node.outputPorts(), next.from().portId());
                     ContractValue output = new ContractValue(outputPort == null ? "" : outputPort.contractRef(), workflowValueData(parsed.content(), outputPort), Map.of("source_node", nodeId));
-                    if (next == null) return Mono.just(output);
-                    WorkflowNode target = nodesById.get(next.to().nodeId());
-                    if (target == null) return Mono.error(new AgentRuntimeException("Workflow edge target not found: " + next.to().nodeId()));
-                    WorkflowPort targetPort = findPort(target.inputPorts(), next.to().portId());
-                    ContractValue mapped = WORKFLOW_BINDING_RESOLVER.resolve(output, targetPort == null ? "" : targetPort.contractRef(), next.binding(), nodeId);
-                    if (targetPort != null) {
-                        WorkflowValueValidationResult validation = WORKFLOW_VALUE_VALIDATOR.validate(targetPort, mapped);
-                        if (!validation.valid()) return Mono.error(new AgentRuntimeException("Workflow edge validation failed at " + next.edgeId() + ": " + String.join("; ", validation.errors())));
+                    WorkflowValueValidationResult outputValidation = validateNodeOutput(node, output);
+                    if (!outputValidation.valid()) {
+                        return Mono.error(
+                                new AgentRuntimeException(
+                                        "Workflow output validation failed at "
+                                                + nodeId
+                                                + ": "
+                                                + String.join("; ", outputValidation.errors())));
                     }
-                    return runTypedWorkflowNode(workflow, request, nodesById, edges, next.to().nodeId(), mapped, visited);
+                    checkpointWorkflowNode(workflow, request, node, output, parsed.content());
+                    observer.accept(
+                            workflowNodeEvent(
+                                    workflow,
+                                    node,
+                                    "workflow_node_complete",
+                                    input,
+                                    output,
+                                    nodeStartedAt,
+                                    null));
+                    return continueTypedWorkflowNode(
+                            workflow,
+                            request,
+                            nodesById,
+                            edges,
+                            node,
+                            input,
+                            output,
+                            parsed.content(),
+                            visited,
+                            observer);
                 });
+    }
+
+    private Mono<ContractValue> continueTypedWorkflowNode(
+            WorkflowAsset workflow,
+            ChatRequest request,
+            Map<String, WorkflowNode> nodesById,
+            List<WorkflowEdge> edges,
+            WorkflowNode node,
+            ContractValue input,
+            ContractValue output,
+            String content,
+            Set<String> visited,
+            java.util.function.Consumer<AgentEventEnvelope> observer) {
+        List<WorkflowEdge> outgoing =
+                edges.stream()
+                        .filter(
+                                edge ->
+                                        edge != null
+                                                && edge.from() != null
+                                                && node.nodeId().equals(edge.from().nodeId()))
+                        .toList();
+        WorkflowEdge next = chooseTypedEdge(outgoing, content);
+        if (next == null) return Mono.just(output);
+        WorkflowNode target = nodesById.get(next.to().nodeId());
+        if (target == null) {
+            return Mono.error(
+                    new AgentRuntimeException(
+                            "Workflow edge target not found: " + next.to().nodeId()));
+        }
+        WorkflowPort targetPort = findPort(target.inputPorts(), next.to().portId());
+        ContractValue mapped =
+                WORKFLOW_BINDING_RESOLVER.resolve(
+                        output,
+                        targetPort == null ? "" : targetPort.contractRef(),
+                        next.binding(),
+                        node.nodeId());
+        Map<String, Object> mappedMetadata = new LinkedHashMap<>(mapped.metadata());
+        mappedMetadata.put("target_port", next.to().portId());
+        mapped = new ContractValue(mapped.contractRef(), mapped.data(), mappedMetadata);
+        if (targetPort != null) {
+            WorkflowValueValidationResult validation =
+                    WORKFLOW_VALUE_VALIDATOR.validate(targetPort, mapped);
+            if (!validation.valid()) {
+                return Mono.error(
+                        new AgentRuntimeException(
+                                "Workflow edge validation failed at "
+                                        + next.edgeId()
+                                        + ": "
+                                        + String.join("; ", validation.errors())));
+            }
+        }
+        return runTypedWorkflowNode(
+                workflow,
+                request,
+                nodesById,
+                edges,
+                next.to().nodeId(),
+                mapped,
+                visited,
+                observer);
     }
 
     /** Runs each branch of a PARALLEL node concurrently and supplies an ordered array to JOIN. */
@@ -1023,7 +1262,9 @@ public class AgentRuntimeService implements AgentRuntime {
             List<WorkflowEdge> edges,
             WorkflowNode parallel,
             ContractValue input,
-            Set<String> visited) {
+            Set<String> visited,
+            java.util.function.Consumer<AgentEventEnvelope> observer,
+            Instant nodeStartedAt) {
         WorkflowPort inputPort = firstInputPort(parallel);
         if (inputPort != null) {
             WorkflowValueValidationResult validation =
@@ -1056,7 +1297,8 @@ public class AgentRuntimeService implements AgentRuntime {
                                                 parallel.nodeId(),
                                                 edge,
                                                 input,
-                                                new HashSet<>(visited)))
+                                                new HashSet<>(visited),
+                                                observer))
                         .toList();
         // mergeSequential subscribes to every branch eagerly (parallel execution) while keeping
         // the declared edge order stable in the JOIN array.
@@ -1082,6 +1324,15 @@ public class AgentRuntimeService implements AgentRuntime {
                                             joinPort == null ? "" : joinPort.contractRef(),
                                             values,
                                             Map.of("source_node", parallel.nodeId(), "parallel", true));
+                            observer.accept(
+                                    workflowNodeEvent(
+                                            workflow,
+                                            parallel,
+                                            "workflow_node_complete",
+                                            input,
+                                            joined,
+                                            nodeStartedAt,
+                                            null));
                             Set<String> nextVisited = new HashSet<>(visited);
                             return runTypedWorkflowNode(
                                     workflow,
@@ -1090,8 +1341,20 @@ public class AgentRuntimeService implements AgentRuntime {
                                     edges,
                                     joinNodeId,
                                     joined,
-                                    nextVisited);
-                        });
+                                    nextVisited,
+                                    observer);
+                        })
+                .doOnError(
+                        error ->
+                                observer.accept(
+                                        workflowNodeEvent(
+                                                workflow,
+                                                parallel,
+                                                "workflow_node_failed",
+                                                input,
+                                                null,
+                                                nodeStartedAt,
+                                                error)));
     }
 
     private Mono<BranchResult> runWorkflowBranch(
@@ -1102,7 +1365,8 @@ public class AgentRuntimeService implements AgentRuntime {
             String sourceNodeId,
             WorkflowEdge firstEdge,
             ContractValue input,
-            Set<String> visited) {
+            Set<String> visited,
+            java.util.function.Consumer<AgentEventEnvelope> observer) {
         WorkflowNode source = nodesById.get(sourceNodeId);
         WorkflowNode target = nodesById.get(firstEdge.to().nodeId());
         if (target == null) {
@@ -1121,8 +1385,23 @@ public class AgentRuntimeService implements AgentRuntime {
                         targetPort == null ? "" : targetPort.contractRef(),
                         firstEdge.binding(),
                         sourceNodeId);
+        Map<String, Object> mappedMetadata = new LinkedHashMap<>(mapped.metadata());
+        mappedMetadata.put("target_port", firstEdge.to().portId());
+        mapped = new ContractValue(mapped.contractRef(), mapped.data(), mappedMetadata);
+        if (targetPort != null) {
+            WorkflowValueValidationResult validation =
+                    WORKFLOW_VALUE_VALIDATOR.validate(targetPort, mapped);
+            if (!validation.valid()) {
+                return Mono.error(
+                        new AgentRuntimeException(
+                                "Workflow edge validation failed at "
+                                        + firstEdge.edgeId()
+                                        + ": "
+                                        + String.join("; ", validation.errors())));
+            }
+        }
         return runWorkflowBranchNode(
-                workflow, request, nodesById, edges, target.nodeId(), mapped, visited);
+                workflow, request, nodesById, edges, target.nodeId(), mapped, visited, observer);
     }
 
     private Mono<BranchResult> runWorkflowBranchNode(
@@ -1132,7 +1411,8 @@ public class AgentRuntimeService implements AgentRuntime {
             List<WorkflowEdge> edges,
             String nodeId,
             ContractValue input,
-            Set<String> visited) {
+            Set<String> visited,
+            java.util.function.Consumer<AgentEventEnvelope> observer) {
         WorkflowNode node = nodesById.get(nodeId);
         if (node == null) return Mono.error(new AgentRuntimeException("Workflow node not found: " + nodeId));
         if (node.type() == WorkflowNodeType.JOIN) {
@@ -1152,12 +1432,52 @@ public class AgentRuntimeService implements AgentRuntime {
             return Mono.just(new BranchResult(nodeId, input));
         }
         if (!visited.add(nodeId)) return Mono.error(new AgentRuntimeException("Workflow cycle detected at node: " + nodeId));
-        WorkflowPort inputPort = firstInputPort(node);
+        Instant nodeStartedAt = Instant.now();
+        observer.accept(workflowNodeEvent(workflow, node, "workflow_node_start", input, null, nodeStartedAt, null));
+        WorkflowNodeCheckpoint recovered = workflowNodeCheckpoint(workflow, request, node);
+        if (recovered != null) {
+            observer.accept(
+                    workflowRecoveredNodeEvent(
+                            workflow, node, input, recovered.value(), nodeStartedAt));
+            return continueWorkflowBranchNode(
+                    workflow,
+                    request,
+                    nodesById,
+                    edges,
+                    node,
+                    recovered.value(),
+                    recovered.content(),
+                    visited,
+                    observer);
+        }
+        WorkflowPort inputPort = workflowInputPort(node, input);
         if (inputPort != null) {
             WorkflowValueValidationResult validation = WORKFLOW_VALUE_VALIDATOR.validate(inputPort, input);
             if (!validation.valid()) return Mono.error(new AgentRuntimeException("Workflow input validation failed at " + nodeId + ": " + String.join("; ", validation.errors())));
         }
-        return runWorkflowNode(node, request, workflowValueText(input == null ? null : input.data()))
+        ContractValue actionInput =
+                node.inputMapping().isEmpty()
+                        ? input
+                        : WORKFLOW_BINDING_RESOLVER.resolve(
+                                input,
+                                input == null ? "" : input.contractRef(),
+                                node.inputMapping(),
+                                node.nodeId());
+        return runWorkflowNode(
+                        node,
+                        request,
+                        workflowValueText(actionInput == null ? null : actionInput.data()))
+                .doOnError(
+                        error ->
+                                observer.accept(
+                                        workflowNodeEvent(
+                                                workflow,
+                                                node,
+                                                "workflow_node_failed",
+                                                input,
+                                                null,
+                                                nodeStartedAt,
+                                                error)))
                 .flatMap(
                         rawOutput -> {
                             WorkflowNodeOutput parsed = WorkflowNodeOutput.parse(rawOutput);
@@ -1166,24 +1486,102 @@ public class AgentRuntimeService implements AgentRuntime {
                             if (next == null) {
                                 return Mono.error(new AgentRuntimeException("PARALLEL branch does not converge on JOIN: " + nodeId));
                             }
-                            WorkflowNode target = nodesById.get(next.to().nodeId());
-                            if (target == null) return Mono.error(new AgentRuntimeException("Workflow edge target not found: " + next.to().nodeId()));
                             WorkflowPort outputPort = findPort(node.outputPorts(), next.from().portId());
                             ContractValue output =
                                     new ContractValue(
                                             outputPort == null ? "" : outputPort.contractRef(),
                                             workflowValueData(parsed.content(), outputPort),
                                             Map.of("source_node", nodeId));
-                            WorkflowPort targetPort = findPort(target.inputPorts(), next.to().portId());
-                            ContractValue mapped =
-                                    WORKFLOW_BINDING_RESOLVER.resolve(
+                            WorkflowValueValidationResult outputValidation =
+                                    validateNodeOutput(node, output);
+                            if (!outputValidation.valid()) {
+                                return Mono.error(
+                                        new AgentRuntimeException(
+                                                "Workflow output validation failed at "
+                                                        + nodeId
+                                                        + ": "
+                                                        + String.join(
+                                                                "; ",
+                                                                outputValidation.errors())));
+                            }
+                            checkpointWorkflowNode(
+                                    workflow, request, node, output, parsed.content());
+                            observer.accept(
+                                    workflowNodeEvent(
+                                            workflow,
+                                            node,
+                                            "workflow_node_complete",
+                                            input,
                                             output,
-                                            targetPort == null ? "" : targetPort.contractRef(),
-                                            next.binding(),
-                                            nodeId);
-                            return runWorkflowBranchNode(
-                                    workflow, request, nodesById, edges, target.nodeId(), mapped, visited);
+                                            nodeStartedAt,
+                                            null));
+                            return continueWorkflowBranchNode(
+                                    workflow,
+                                    request,
+                                    nodesById,
+                                    edges,
+                                    node,
+                                    output,
+                                    parsed.content(),
+                                    visited,
+                                    observer);
                         });
+    }
+
+    private Mono<BranchResult> continueWorkflowBranchNode(
+            WorkflowAsset workflow,
+            ChatRequest request,
+            Map<String, WorkflowNode> nodesById,
+            List<WorkflowEdge> edges,
+            WorkflowNode node,
+            ContractValue output,
+            String content,
+            Set<String> visited,
+            java.util.function.Consumer<AgentEventEnvelope> observer) {
+        List<WorkflowEdge> outgoing = outgoingWorkflowEdges(edges, node.nodeId());
+        WorkflowEdge next = chooseTypedEdge(outgoing, content);
+        if (next == null) {
+            return Mono.error(
+                    new AgentRuntimeException(
+                            "PARALLEL branch does not converge on JOIN: " + node.nodeId()));
+        }
+        WorkflowNode target = nodesById.get(next.to().nodeId());
+        if (target == null) {
+            return Mono.error(
+                    new AgentRuntimeException(
+                            "Workflow edge target not found: " + next.to().nodeId()));
+        }
+        WorkflowPort targetPort = findPort(target.inputPorts(), next.to().portId());
+        ContractValue mapped =
+                WORKFLOW_BINDING_RESOLVER.resolve(
+                        output,
+                        targetPort == null ? "" : targetPort.contractRef(),
+                        next.binding(),
+                        node.nodeId());
+        Map<String, Object> mappedMetadata = new LinkedHashMap<>(mapped.metadata());
+        mappedMetadata.put("target_port", next.to().portId());
+        mapped = new ContractValue(mapped.contractRef(), mapped.data(), mappedMetadata);
+        if (targetPort != null) {
+            WorkflowValueValidationResult validation =
+                    WORKFLOW_VALUE_VALIDATOR.validate(targetPort, mapped);
+            if (!validation.valid()) {
+                return Mono.error(
+                        new AgentRuntimeException(
+                                "Workflow edge validation failed at "
+                                        + next.edgeId()
+                                        + ": "
+                                        + String.join("; ", validation.errors())));
+            }
+        }
+        return runWorkflowBranchNode(
+                workflow,
+                request,
+                nodesById,
+                edges,
+                target.nodeId(),
+                mapped,
+                visited,
+                observer);
     }
 
     private static List<WorkflowEdge> outgoingWorkflowEdges(List<WorkflowEdge> edges, String nodeId) {
@@ -1208,11 +1606,45 @@ public class AgentRuntimeService implements AgentRuntime {
         if (condition == null || condition.isEmpty()) return false;
         String path = String.valueOf(condition.getOrDefault("path", ""));
         String operator = String.valueOf(condition.getOrDefault("operator", "equals"));
-        String expected = String.valueOf(condition.getOrDefault("value", ""));
+        Object expected = condition.get("value");
         Object data = workflowValueData(content, null);
-        Object resolved = WORKFLOW_BINDING_RESOLVER.resolve(ContractValue.of("", data), "", Map.of("value", path), "").data();
-        Object actual = resolved instanceof Map<?, ?> map ? map.get("value") : null;
-        return "equals".equalsIgnoreCase(operator) && expected.equals(String.valueOf(actual));
+        Object actual = data;
+        if (!path.isBlank()) {
+            Object resolved =
+                    WORKFLOW_BINDING_RESOLVER
+                            .resolve(
+                                    ContractValue.of("", data),
+                                    "",
+                                    Map.of("value", path),
+                                    "")
+                            .data();
+            actual = resolved instanceof Map<?, ?> map ? map.get("value") : null;
+        }
+        return switch (operator.trim().toLowerCase()) {
+            case "equals", "eq" -> java.util.Objects.equals(actual, expected)
+                    || String.valueOf(expected).equals(String.valueOf(actual));
+            case "not_equals", "ne" -> !java.util.Objects.equals(actual, expected)
+                    && !String.valueOf(expected).equals(String.valueOf(actual));
+            case "exists" -> actual != null;
+            case "not_exists" -> actual == null;
+            case "contains" -> actual != null
+                    && String.valueOf(actual).contains(String.valueOf(expected));
+            case "greater_than", "gt" -> decimalValue(actual) > decimalValue(expected);
+            case "greater_or_equal", "gte" -> decimalValue(actual) >= decimalValue(expected);
+            case "less_than", "lt" -> decimalValue(actual) < decimalValue(expected);
+            case "less_or_equal", "lte" -> decimalValue(actual) <= decimalValue(expected);
+            default -> false;
+        };
+    }
+
+    private static double decimalValue(Object value) {
+        try {
+            return value instanceof Number number
+                    ? number.doubleValue()
+                    : Double.parseDouble(String.valueOf(value));
+        } catch (RuntimeException ignored) {
+            return Double.NaN;
+        }
     }
 
     private static String typedWorkflowStartNode(List<WorkflowNode> nodes, List<WorkflowEdge> edges) {
@@ -1224,6 +1656,32 @@ public class AgentRuntimeService implements AgentRuntime {
     private static WorkflowPort firstInputPort(WorkflowNode node) { return node.inputPorts().isEmpty() ? null : node.inputPorts().get(0); }
     private static WorkflowPort firstOutputPort(WorkflowNode node) { return node.outputPorts().isEmpty() ? null : node.outputPorts().get(0); }
     private static WorkflowPort findPort(List<WorkflowPort> ports, String portId) { return ports.stream().filter(port -> port != null && port.portId().equals(portId)).findFirst().orElse(null); }
+
+    private static WorkflowPort workflowInputPort(WorkflowNode node, ContractValue input) {
+        Object targetPort = input == null ? null : input.metadata().get("target_port");
+        WorkflowPort selected =
+                targetPort == null
+                        ? null
+                        : findPort(node.inputPorts(), String.valueOf(targetPort));
+        return selected == null ? firstInputPort(node) : selected;
+    }
+
+    private static WorkflowValueValidationResult validateNodeOutput(
+            WorkflowNode node, ContractValue output) {
+        if (node.outputSchema().isEmpty()) {
+            return new WorkflowValueValidationResult(true, List.of());
+        }
+        WorkflowPort port =
+                new WorkflowPort(
+                        "node_output",
+                        "output",
+                        output == null ? "" : output.contractRef(),
+                        node.outputSchema(),
+                        true,
+                        "one",
+                        "Node output schema");
+        return WORKFLOW_VALUE_VALIDATOR.validate(port, output);
+    }
 
     private static Object workflowValueData(String content, WorkflowPort port) {
         String text = content == null ? "" : content.trim();
@@ -1246,10 +1704,19 @@ public class AgentRuntimeService implements AgentRuntime {
         Mono<String> action =
                 switch (node.type()) {
                     case INPUT, OUTPUT, JOIN -> Mono.just(input);
+                    case CONDITION, RETURN -> Mono.just(input);
+                    case DATA_TRANSFORM -> runTransformNode(node, input);
+                    case DATABASE_QUERY -> runDatabaseNode(node, request, input, false);
+                    case DATABASE_WRITE -> runDatabaseNode(node, request, input, true);
+                    case FOREACH -> runForeachNode(node, request, input);
+                    case HUMAN_APPROVAL -> runHumanApprovalNode(node, request, input);
+                    case SKILL_INVOKE -> runCapabilityNode(node, request, input, true);
+                    case MCP_INVOKE -> runCapabilityNode(node, request, input, false);
                     case AGENT_INVOKE, REACT_AGENT -> runReferencedAgentNode(node, request, input);
                     case SUBFLOW_INVOKE -> runReferencedWorkflowNode(node, request, input);
                     case LLM_CHAT -> runLlmNode(node, request, input);
                     case HTTP_REQUEST -> runHttpNode(node, input);
+                    case MESSAGE_SEND -> runHttpNode(node, input);
                     default ->
                             Mono.error(
                                     new AgentRuntimeException(
@@ -1260,6 +1727,403 @@ public class AgentRuntimeService implements AgentRuntime {
                                                     + ")"));
                 };
         return withNodePolicy(node, input, action);
+    }
+
+    private Mono<String> runTransformNode(WorkflowNode node, String input) {
+        Object source = workflowValueData(input, null);
+        Map<String, Object> mapping = asMap(node.config().get("mapping"));
+        if (!mapping.isEmpty()) {
+            Object projected =
+                    WORKFLOW_BINDING_RESOLVER
+                            .resolve(ContractValue.of("", source), "", mapping, node.nodeId())
+                            .data();
+            return Mono.just(workflowValueText(projected));
+        }
+        String template = workflowConfigString(node, "template", "");
+        if (!template.isBlank()) {
+            return Mono.just(resolveWorkflowTemplate(template, input));
+        }
+        String path = workflowConfigString(node, "path", "");
+        if (!path.isBlank()) {
+            Object projected =
+                    WORKFLOW_BINDING_RESOLVER
+                            .resolve(
+                                    ContractValue.of("", source),
+                                    "",
+                                    Map.of("value", path),
+                                    node.nodeId())
+                            .data();
+            if (projected instanceof Map<?, ?> map) {
+                return Mono.just(workflowValueText(map.get("value")));
+            }
+        }
+        return Mono.just(input);
+    }
+
+    private Mono<String> runDatabaseNode(
+            WorkflowNode node, ChatRequest request, String input, boolean write) {
+        return Mono.fromCallable(
+                        () -> {
+                            String jdbcUrl =
+                                    WorkflowJdbcSecurity.validateUrl(
+                                            workflowConfigString(node, "jdbc_url", ""));
+                            String sql = workflowConfigString(node, "sql", "");
+                            if (sql.isBlank()
+                                    || sql.contains("{{input}}")
+                                    || sql.contains("${input}")) {
+                                throw new AgentRuntimeException(
+                                        "Workflow database node requires parameterized config.sql: "
+                                                + node.nodeId());
+                            }
+                            String username =
+                                    WorkflowJdbcSecurity.credential(
+                                            workflowConfigString(node, "username", ""));
+                            String password =
+                                    WorkflowJdbcSecurity.credential(
+                                            workflowConfigString(node, "password", ""));
+                            java.util.Properties properties = new java.util.Properties();
+                            if (!username.isBlank()) properties.setProperty("user", username);
+                            if (!password.isBlank()) properties.setProperty("password", password);
+                            if (write && !sql.contains("{{idempotency_key}}")) {
+                                throw new AgentRuntimeException(
+                                        "database.write SQL must bind {{idempotency_key}}: "
+                                                + node.nodeId());
+                            }
+                            String preparedSql = sql.replace("{{idempotency_key}}", "?");
+                            int idempotencyParameterIndex =
+                                    write
+                                            ? workflowSqlParameterIndex(
+                                                    sql, "{{idempotency_key}}")
+                                            : 0;
+                            try (java.sql.Connection connection =
+                                            java.sql.DriverManager.getConnection(jdbcUrl, properties);
+                                    java.sql.PreparedStatement statement =
+                                            connection.prepareStatement(preparedSql)) {
+                                bindWorkflowSqlParameters(
+                                        statement, node, input, idempotencyParameterIndex);
+                                if (write) {
+                                    String configuredKey =
+                                            workflowConfigString(
+                                                    node, "idempotency_key", "");
+                                    String idempotencyKey =
+                                            request.taskContext().rootTaskId()
+                                                    + ":"
+                                                    + node.nodeId()
+                                                    + ":"
+                                                    + resolveWorkflowTemplate(
+                                                            configuredKey, input);
+                                    statement.setString(
+                                            idempotencyParameterIndex, idempotencyKey);
+                                    return workflowValueText(
+                                            Map.of("updated_rows", statement.executeUpdate()));
+                                }
+                                int maxRows =
+                                        Math.max(
+                                                1,
+                                                Math.min(
+                                                        10_000,
+                                                        integer(
+                                                                node.config().get("max_rows"),
+                                                                1_000)));
+                                statement.setMaxRows(maxRows);
+                                try (java.sql.ResultSet result = statement.executeQuery()) {
+                                    java.sql.ResultSetMetaData metadata = result.getMetaData();
+                                    List<Map<String, Object>> rows = new ArrayList<>();
+                                    while (result.next()) {
+                                        Map<String, Object> row = new LinkedHashMap<>();
+                                        for (int index = 1;
+                                                index <= metadata.getColumnCount();
+                                                index++) {
+                                            row.put(
+                                                    metadata.getColumnLabel(index),
+                                                    result.getObject(index));
+                                        }
+                                        rows.add(row);
+                                    }
+                                    return workflowValueText(rows);
+                                }
+                            }
+                        })
+                .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private int bindWorkflowSqlParameters(
+            java.sql.PreparedStatement statement,
+            WorkflowNode node,
+            String input,
+            int skippedParameterIndex)
+            throws java.sql.SQLException {
+        Object configured = node.config().get("parameters");
+        if (!(configured instanceof List<?> parameters)) return 0;
+        Object source = workflowValueData(input, null);
+        for (int index = 0; index < parameters.size(); index++) {
+            Object specification = parameters.get(index);
+            Object value = specification;
+            if (specification instanceof String path && path.startsWith("$")) {
+                Object projected =
+                        WORKFLOW_BINDING_RESOLVER
+                                .resolve(
+                                        ContractValue.of("", source),
+                                        "",
+                                        Map.of("value", path),
+                                        node.nodeId())
+                                .data();
+                value = projected instanceof Map<?, ?> map ? map.get("value") : null;
+            } else if (specification instanceof Map<?, ?> raw) {
+                Map<String, Object> spec = asMap(raw);
+                Object projected =
+                        WORKFLOW_BINDING_RESOLVER
+                                .resolve(
+                                        ContractValue.of("", source),
+                                        "",
+                                        Map.of("value", spec),
+                                        node.nodeId())
+                                .data();
+                value = projected instanceof Map<?, ?> map ? map.get("value") : null;
+            }
+            int parameterIndex = index + 1;
+            if (skippedParameterIndex > 0 && parameterIndex >= skippedParameterIndex) {
+                parameterIndex++;
+            }
+            statement.setObject(parameterIndex, value);
+        }
+        return parameters.size();
+    }
+
+    private static int workflowSqlParameterIndex(String sql, String marker) {
+        int markerOffset = sql.indexOf(marker);
+        if (markerOffset < 0) {
+            throw new AgentRuntimeException("Workflow SQL marker is missing: " + marker);
+        }
+        int parameterIndex = 1;
+        boolean singleQuoted = false;
+        boolean doubleQuoted = false;
+        boolean lineComment = false;
+        boolean blockComment = false;
+        for (int index = 0; index < markerOffset; index++) {
+            char current = sql.charAt(index);
+            char next = index + 1 < markerOffset ? sql.charAt(index + 1) : '\0';
+            if (lineComment) {
+                if (current == '\n' || current == '\r') lineComment = false;
+                continue;
+            }
+            if (blockComment) {
+                if (current == '*' && next == '/') {
+                    blockComment = false;
+                    index++;
+                }
+                continue;
+            }
+            if (!singleQuoted && !doubleQuoted && current == '-' && next == '-') {
+                lineComment = true;
+                index++;
+                continue;
+            }
+            if (!singleQuoted && !doubleQuoted && current == '/' && next == '*') {
+                blockComment = true;
+                index++;
+                continue;
+            }
+            if (!doubleQuoted && current == '\'') {
+                if (singleQuoted && next == '\'') {
+                    index++;
+                } else {
+                    singleQuoted = !singleQuoted;
+                }
+                continue;
+            }
+            if (!singleQuoted && current == '"') {
+                if (doubleQuoted && next == '"') {
+                    index++;
+                } else {
+                    doubleQuoted = !doubleQuoted;
+                }
+                continue;
+            }
+            if (!singleQuoted && !doubleQuoted && current == '?') parameterIndex++;
+        }
+        return parameterIndex;
+    }
+
+    private Mono<String> runForeachNode(
+            WorkflowNode node, ChatRequest request, String input) {
+        Object data = workflowValueData(input, null);
+        if (!(data instanceof List<?> items)) {
+            return Mono.error(
+                    new AgentRuntimeException(
+                            "foreach input must be a JSON array: " + node.nodeId()));
+        }
+        int concurrency =
+                Math.max(1, Math.min(16, integer(node.config().get("concurrency"), 1)));
+        String targetType = workflowConfigString(node, "target_type", "").toLowerCase();
+        String targetId = safe(node.refId(), workflowConfigString(node, "target_id", ""));
+        return Flux.fromIterable(items)
+                .index()
+                .flatMapSequential(
+                        item -> {
+                            String itemInput = workflowValueText(item.getT2());
+                            WorkflowNode target =
+                                    new WorkflowNode(
+                                            node.nodeId() + "_item_" + item.getT1(),
+                                            "workflow".equals(targetType)
+                                                    ? WorkflowNodeType.SUBFLOW_INVOKE
+                                                    : WorkflowNodeType.AGENT_INVOKE,
+                                            targetId,
+                                            node.instruction(),
+                                            node.config(),
+                                            Map.of(),
+                                            Map.of(),
+                                            node.timeoutMs(),
+                                            0,
+                                            WorkflowFailurePolicy.FAIL_FAST,
+                                            List.of(),
+                                            List.of());
+                            if (targetId.isBlank()) return Mono.just(itemInput);
+                            return "workflow".equals(targetType)
+                                    ? runReferencedWorkflowNode(target, request, itemInput)
+                                    : runReferencedAgentNode(target, request, itemInput);
+                        },
+                        concurrency)
+                .collectList()
+                .map(AgentRuntimeService::workflowValueText);
+    }
+
+    private Mono<String> runHumanApprovalNode(
+            WorkflowNode node, ChatRequest request, String input) {
+        if (platformState == null) {
+            return Mono.error(
+                    new AgentRuntimeException(
+                            "Human approval state service is unavailable: " + node.nodeId()));
+        }
+        String runId = request.taskContext().rootTaskId();
+        String waitingId = "wait_" + pathSafe(runId + "_" + node.nodeId(), "workflow");
+        Map<String, Object> current = platformState.waiting(runId);
+        if (current != null
+                && waitingId.equals(String.valueOf(current.get("waiting_id")))) {
+            String status = String.valueOf(current.getOrDefault("status", ""));
+            if ("rejected".equals(status)) {
+                return Mono.error(
+                        new AgentRuntimeException(
+                                "Workflow human approval was rejected: " + node.nodeId()));
+            }
+            if ("resumed".equals(status)) {
+                Object response = current.get("answer");
+                boolean returnResponse =
+                        "response"
+                                .equalsIgnoreCase(
+                                        workflowConfigString(
+                                                node, "output_mode", "input"));
+                return Mono.just(
+                        returnResponse && response != null
+                                ? workflowValueText(response)
+                                : input);
+            }
+        }
+        if (current == null
+                || !waitingId.equals(String.valueOf(current.get("waiting_id")))) {
+            Map<String, Object> waiting = new LinkedHashMap<>();
+            waiting.put("waiting_id", waitingId);
+            waiting.put("kind", "workflow.human_approval");
+            waiting.put("waiting_type", "approval");
+            waiting.put("step_id", node.nodeId());
+            waiting.put("workflow_node_id", node.nodeId());
+            waiting.put("title", workflowConfigString(node, "title", "需要人工审批"));
+            waiting.put("question", safe(node.instruction(), "请确认是否继续执行"));
+            waiting.put("input", workflowEventValue(workflowValueData(input, null)));
+            waiting.put(
+                    "pending_action",
+                    Map.of("type", "workflow_node", "node_id", node.nodeId()));
+            current = platformState.createWaiting(runId, waiting);
+        }
+        return Mono.error(new WorkflowWaitingException(runId, waitingId, current));
+    }
+
+    public static final class WorkflowWaitingException extends RuntimeException {
+        private final String runId;
+        private final String waitingId;
+        private final Map<String, Object> waiting;
+
+        public WorkflowWaitingException(
+                String runId, String waitingId, Map<String, Object> waiting) {
+            super("Workflow is waiting for human approval: " + waitingId);
+            this.runId = runId;
+            this.waitingId = waitingId;
+            this.waiting = waiting == null ? Map.of() : Map.copyOf(waiting);
+        }
+
+        public String runId() {
+            return runId;
+        }
+
+        public String waitingId() {
+            return waitingId;
+        }
+
+        public Map<String, Object> waiting() {
+            return waiting;
+        }
+    }
+
+    private Mono<String> runCapabilityNode(
+            WorkflowNode node, ChatRequest request, String input, boolean skill) {
+        String agentId = workflowConfigString(node, "agent_id", "");
+        if (agentId.isBlank() || node.refId() == null || node.refId().isBlank()) {
+            return Mono.error(
+                    new AgentRuntimeException(
+                            (skill ? "skill.invoke" : "mcp.invoke")
+                                    + " requires refId and config.agent_id: "
+                                    + node.nodeId()));
+        }
+        AgentDefinition target = definition(agentId);
+        List<String> refs = skill ? target.skillRefs() : target.mcpRefs();
+        if (!refs.contains(node.refId())) {
+            return Mono.error(
+                    new AgentRuntimeException(
+                            "Target Agent does not expose "
+                                    + (skill ? "Skill " : "MCP ")
+                                    + node.refId()));
+        }
+        Map<String, Object> policy = new LinkedHashMap<>(target.modelPolicy());
+        policy.put(
+                "runtime",
+                Map.of(
+                        "max_iters", 4,
+                        "max_tool_calls", 4,
+                        "timeout_ms", node.timeoutMs() == null ? 90_000L : node.timeoutMs()));
+        // Capability nodes are deliberately projected to a SINGLE agent with no ordinary
+        // tools and exactly one Skill or MCP registration. They cannot inherit the target
+        // Agent's orchestration graph or unrelated capabilities.
+        AgentDefinition constrained =
+                new AgentDefinition(
+                        target.agentId(),
+                        target.version(),
+                        target.name(),
+                        target.model(),
+                        policy,
+                        target.systemPrompt()
+                                + "\n\nFor this Workflow step, use only the configured "
+                                + (skill ? "Skill " : "MCP server ")
+                                + node.refId()
+                                + ". Do not use any unrelated capability.",
+                        target.enabled(),
+                        target.workspace(),
+                        List.of(),
+                        skill ? List.of() : List.of(node.refId()),
+                        skill ? List.of(node.refId()) : List.of(),
+                        OrchestrationPolicy.single());
+        ChatRequest childRequest =
+                new ChatRequest(
+                        request.tenantId(),
+                        request.userId(),
+                        sessionKey(request) + "_" + pathSafe(node.nodeId(), "capability"),
+                        workflowNodeMessage(node, input),
+                        request.taskContext()
+                                .child(
+                                        request.taskContext().targetAgentId(),
+                                        constrained.agentId(),
+                                        node.nodeId()),
+                        request.images());
+        return executeDefinition(constrained, childRequest).map(ChatResponse::text);
     }
 
     private Mono<String> runReferencedAgentNode(
@@ -1291,7 +2155,12 @@ public class AgentRuntimeService implements AgentRuntime {
                     new AgentRuntimeException(
                             "Workflow service is unavailable for node: " + node.nodeId()));
         }
-        var target = workflowAssetService.requirePublished(node.refId());
+        int pinnedVersion = integer(node.config().get("workflow_version"), 0);
+        var active = workflowAssetService.requirePublished(node.refId());
+        var target =
+                pinnedVersion > 0
+                        ? workflowAssetService.requirePublishedVersion(node.refId(), pinnedVersion)
+                        : active;
         ChatRequest childRequest =
                 new ChatRequest(
                         request.tenantId(),
@@ -1316,6 +2185,7 @@ public class AgentRuntimeService implements AgentRuntime {
                             "LLM workflow node requires refId or a default chat model: "
                                     + node.nodeId()));
         }
+        rootTaskBudgetManager.acquireModel(request.taskContext().rootTaskId());
         return ModelRegistry.resolve(modelId)
                 .stream(
                         List.of(userMessage(workflowNodeMessage(node, input), request.images())),
@@ -1329,7 +2199,10 @@ public class AgentRuntimeService implements AgentRuntime {
                 .filter(TextBlock.class::isInstance)
                 .cast(TextBlock.class)
                 .map(TextBlock::getText)
-                .collect(java.util.stream.Collectors.joining());
+                .collect(java.util.stream.Collectors.joining())
+                .timeout(
+                        rootTaskBudgetManager.remaining(
+                                request.taskContext().rootTaskId()));
     }
 
     private Mono<String> runHttpNode(WorkflowNode node, String input) {
@@ -1347,7 +2220,7 @@ public class AgentRuntimeService implements AgentRuntime {
                         : HttpRequest.BodyPublishers.ofString(body);
         HttpRequest.Builder builder =
                 HttpRequest.newBuilder()
-                        .uri(URI.create(resolveWorkflowTemplate(url, input)))
+                        .uri(WorkflowHttpSecurity.validateRuntimeUrl(url))
                         .timeout(Duration.ofMillis(node.timeoutMs() == null ? 30000L : node.timeoutMs()))
                         .method(method, bodyPublisher)
                         .header("Content-Type", "application/json");
@@ -1357,7 +2230,15 @@ public class AgentRuntimeService implements AgentRuntime {
                     (key, value) ->
                             builder.header(
                                     String.valueOf(key),
-                                    resolveWorkflowTemplate(String.valueOf(value), input)));
+                                    resolveWorkflowTemplate(
+                                            WorkflowHttpSecurity.resolveCredential(
+                                                    String.valueOf(value)),
+                                            input)));
+        }
+        String idempotencyKey = workflowConfigString(node, "idempotency_key", "");
+        if (!idempotencyKey.isBlank()) {
+            builder.header(
+                    "Idempotency-Key", resolveWorkflowTemplate(idempotencyKey, input));
         }
         return Mono.fromFuture(WORKFLOW_HTTP_CLIENT.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofString()))
                 .flatMap(
@@ -1377,6 +2258,16 @@ public class AgentRuntimeService implements AgentRuntime {
         Mono<String> guarded = action;
         if (node.timeoutMs() != null) {
             guarded = guarded.timeout(Duration.ofMillis(node.timeoutMs()));
+        } else if (!List.of(
+                        WorkflowNodeType.INPUT,
+                        WorkflowNodeType.OUTPUT,
+                        WorkflowNodeType.JOIN,
+                        WorkflowNodeType.CONDITION,
+                        WorkflowNodeType.RETURN,
+                        WorkflowNodeType.DATA_TRANSFORM,
+                        WorkflowNodeType.HUMAN_APPROVAL)
+                .contains(node.type())) {
+            guarded = guarded.timeout(Duration.ofSeconds(90));
         }
         if (node.maxRetries() > 0) {
             guarded =
@@ -1679,6 +2570,36 @@ public class AgentRuntimeService implements AgentRuntime {
                                             });
                     return Flux.concat(started, executed);
                 });
+    }
+
+    private ChatRequest prepareWorkflowRequest(WorkflowAsset workflow, ChatRequest request) {
+        if (workflow == null) throw new AgentRuntimeException("Workflow is required");
+        if (request == null) throw new AgentRuntimeException("Workflow request is required");
+        String callKey = workflow.workflowId() + "@" + workflow.version();
+        List<String> stack =
+                new ArrayList<>(
+                        stringValues(request.taskContext().metadata().get("workflow_call_stack")));
+        if (stack.contains(callKey)) {
+            throw new AgentRuntimeException(
+                    "Workflow invocation cycle detected: "
+                            + String.join(" -> ", stack)
+                            + " -> "
+                            + callKey);
+        }
+        if (stack.size() >= WORKFLOW_EXECUTION_POLICY.rootMaxDepth()) {
+            throw new RootTaskBudgetExceededException(
+                    "Workflow invocation depth exceeded: " + stack.size());
+        }
+        stack.add(callKey);
+        TaskContext context =
+                request.taskContext().withMetadata("workflow_call_stack", List.copyOf(stack));
+        return new ChatRequest(
+                request.tenantId(),
+                request.userId(),
+                request.sessionId(),
+                request.message(),
+                context,
+                request.images());
     }
 
     private Flux<AgentEventEnvelope> supervisorSummaryStream(
@@ -3227,6 +4148,152 @@ public class AgentRuntimeService implements AgentRuntime {
                 Map.of("summary", summary, "workflow", true));
     }
 
+    private AgentEventEnvelope workflowNodeEvent(
+            WorkflowAsset workflow,
+            WorkflowNode node,
+            String type,
+            ContractValue input,
+            ContractValue output,
+            Instant startedAt,
+            Throwable error) {
+        long durationMs =
+                startedAt == null
+                        ? 0L
+                        : Math.max(0L, Duration.between(startedAt, Instant.now()).toMillis());
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("workflow", true);
+        payload.put("workflow_id", workflow.workflowId());
+        payload.put("workflow_version", workflow.version());
+        payload.put("node_id", node.nodeId());
+        payload.put("node_type", node.type().value());
+        payload.put("status", type.endsWith("_start") ? "running" : type.endsWith("_failed") ? "failed" : "succeeded");
+        payload.put("duration_ms", durationMs);
+        payload.put(
+                "summary",
+                type.endsWith("_start")
+                        ? "Running " + node.nodeId()
+                        : type.endsWith("_failed")
+                                ? "Failed " + node.nodeId()
+                                : "Completed " + node.nodeId());
+        if (input != null) payload.put("input", workflowEventValue(input.data()));
+        if (output != null) payload.put("output", workflowEventValue(output.data()));
+        if (error != null) payload.put("error", failureMessage(error));
+        return new AgentEventEnvelope(
+                type + "_" + node.nodeId() + "_" + UUID.randomUUID().toString().replace("-", ""),
+                type,
+                Instant.now().toString(),
+                workflow.workflowId(),
+                null,
+                payload);
+    }
+
+    private AgentEventEnvelope workflowRecoveredNodeEvent(
+            WorkflowAsset workflow,
+            WorkflowNode node,
+            ContractValue input,
+            ContractValue output,
+            Instant startedAt) {
+        AgentEventEnvelope event =
+                workflowNodeEvent(
+                        workflow,
+                        node,
+                        "workflow_node_complete",
+                        input,
+                        output,
+                        startedAt,
+                        null);
+        Map<String, Object> payload = new LinkedHashMap<>(event.payload());
+        payload.put("recovered", true);
+        payload.put("summary", "Recovered " + node.nodeId() + " from checkpoint");
+        return new AgentEventEnvelope(
+                event.id(),
+                event.type(),
+                event.createdAt(),
+                event.source(),
+                event.delta(),
+                payload);
+    }
+
+    private WorkflowNodeCheckpoint workflowNodeCheckpoint(
+            WorkflowAsset workflow, ChatRequest request, WorkflowNode node) {
+        if (checkpointStore == null) return null;
+        return checkpointStore
+                .load(
+                        request.taskContext().rootTaskId(),
+                        workflowNodeCheckpointScope(workflow, node))
+                .filter(checkpoint -> "NODE_COMPLETED".equals(checkpoint.phase()))
+                .map(
+                        checkpoint -> {
+                            Map<String, Object> payload = checkpoint.payload();
+                            Object data =
+                                    Boolean.TRUE.equals(payload.get("data_null"))
+                                            ? null
+                                            : payload.get("data");
+                            Object contractRef = payload.get("contract_ref");
+                            Object content = payload.get("content");
+                            ContractValue value =
+                                    new ContractValue(
+                                            contractRef == null ? "" : String.valueOf(contractRef),
+                                            data,
+                                            Map.of(
+                                                    "source_node",
+                                                    node.nodeId(),
+                                                    "recovered",
+                                                    true));
+                            return new WorkflowNodeCheckpoint(
+                                    value, content == null ? "" : String.valueOf(content));
+                        })
+                .orElse(null);
+    }
+
+    private void checkpointWorkflowNode(
+            WorkflowAsset workflow,
+            ChatRequest request,
+            WorkflowNode node,
+            ContractValue output,
+            String content) {
+        if (checkpointStore == null) return;
+        String runId = request.taskContext().rootTaskId();
+        // Direct in-process runtime calls may intentionally run without durable ownership.
+        // Once a durable request exists, a rejected write means this instance lost its lease
+        // and must be fenced before it performs another node.
+        if (checkpointStore.request(runId).isEmpty()) return;
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("mode", "WORKFLOW");
+        payload.put("workflow_id", workflow.workflowId());
+        payload.put("workflow_version", workflow.version());
+        payload.put("node_id", node.nodeId());
+        payload.put("node_type", node.type().value());
+        payload.put("contract_ref", output == null ? "" : safe(output.contractRef(), ""));
+        payload.put("data_null", output == null || output.data() == null);
+        payload.put("data", output == null || output.data() == null ? "" : output.data());
+        payload.put("content", safe(content, ""));
+        if (!checkpointStore.save(
+                runId,
+                workflowNodeCheckpointScope(workflow, node),
+                "NODE_COMPLETED",
+                payload)) {
+            throw new AgentRuntimeException(
+                    "Workflow checkpoint was rejected after node " + node.nodeId());
+        }
+    }
+
+    private static String workflowNodeCheckpointScope(
+            WorkflowAsset workflow, WorkflowNode node) {
+        return "workflow:"
+                + workflow.workflowId()
+                + ":v"
+                + workflow.version()
+                + ":node:"
+                + node.nodeId();
+    }
+
+    private static Object workflowEventValue(Object value) {
+        if (value == null || value instanceof Number || value instanceof Boolean) return value;
+        String text = workflowValueText(value);
+        return text.length() <= 2_000 ? value : text.substring(0, 2_000) + "…";
+    }
+
     private AgentEventEnvelope agentPipelineEvent(String source, String type, String summary) {
         return new AgentEventEnvelope(
                 type + "_" + Instant.now().toEpochMilli(),
@@ -4536,6 +5603,7 @@ public class AgentRuntimeService implements AgentRuntime {
         return RuntimeContext.builder()
                 .userId(userKey(request))
                 .sessionId(sessionKey(request))
+                .put(ChatRequest.class, request)
                 .put("tenant_id", safe(request.tenantId(), "default"))
                 .put("task_id", request.taskContext().taskId())
                 .put("root_task_id", request.taskContext().rootTaskId())
@@ -4552,6 +5620,7 @@ public class AgentRuntimeService implements AgentRuntime {
                                 + "_sub_"
                                 + pathSafe(safe(binding.bindingId(), "subagent"), "subagent")
                                 + (stepIndex > 0 ? "_step_" + stepIndex : ""))
+                .put(ChatRequest.class, request)
                 .put("tenant_id", safe(request.tenantId(), "default"))
                 .put("supervisor_session_id", sessionKey(request))
                 .put("supervisor_step", Math.max(0, stepIndex))
@@ -4900,6 +5969,8 @@ public class AgentRuntimeService implements AgentRuntime {
     private static String safe(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
     }
+
+    private record WorkflowNodeCheckpoint(ContractValue value, String content) {}
 
     private String abbreviate(String value, int limit) {
         String text = safe(value, "");

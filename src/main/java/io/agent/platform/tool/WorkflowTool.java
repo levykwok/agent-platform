@@ -8,11 +8,11 @@ import io.agent.platform.control.WorkflowAsset;
 import io.agent.platform.control.WorkflowToolRegistration;
 import io.agent.platform.runtime.AgentRuntime;
 import io.agent.platform.runtime.ChatRequest;
+import io.agent.platform.runtime.WorkflowInvocationContext;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.ToolBase;
 import io.agentscope.core.tool.ToolCallParam;
 import java.util.Map;
-import java.util.UUID;
 import reactor.core.publisher.Mono;
 
 /** AgentScope tool adapter for a published Workflow asset. */
@@ -44,16 +44,41 @@ public final class WorkflowTool extends ToolBase {
     public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
         Map<String, Object> args = param == null || param.getInput() == null ? Map.of() : param.getInput();
         String message = message(args);
-        return runtime
-                .workflow(
-                        workflow,
-                        new ChatRequest(
-                                "platform",
-                                "platform_admin",
-                                "workflow_tool_" + UUID.randomUUID().toString().replace("-", ""),
-                                message))
+        return Mono.deferContextual(
+                        context -> {
+                            ChatRequest caller =
+                                    callerRequest(param, context)
+                                            .orElseThrow(
+                                                    () ->
+                                                            new IllegalStateException(
+                                                                    "Workflow Tool caller context is unavailable"));
+                            var childContext =
+                                    caller.taskContext()
+                                            .child(
+                                                    caller.taskContext().targetAgentId(),
+                                                    "workflow:" + workflow.workflowId(),
+                                                    "tool:" + registration.toolId());
+                            ChatRequest child =
+                                    new ChatRequest(
+                                            caller.tenantId(),
+                                            caller.userId(),
+                                            caller.sessionId() + "_" + registration.toolId(),
+                                            message,
+                                            childContext,
+                                            java.util.List.of());
+                            return runtime.workflow(workflow, child);
+                        })
                 .map(response -> ToolResultBlock.text(response.text() == null ? "" : response.text()))
                 .onErrorResume(error -> Mono.just(ToolResultBlock.error(error.getMessage())));
+    }
+
+    private static java.util.Optional<ChatRequest> callerRequest(
+            ToolCallParam param, reactor.util.context.ContextView context) {
+        if (param != null && param.getRuntimeContext() != null) {
+            ChatRequest request = param.getRuntimeContext().get(ChatRequest.class);
+            if (request != null) return java.util.Optional.of(request);
+        }
+        return WorkflowInvocationContext.request(context);
     }
 
     private String message(Map<String, Object> args) {

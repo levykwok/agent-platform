@@ -9,6 +9,9 @@ import io.agent.platform.control.WorkflowToolRegistration;
 import jakarta.annotation.PostConstruct;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -16,15 +19,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /** Registry for explicit Workflow-as-Tool bindings. */
 @Component
 public class WorkflowToolRegistry {
 
+    private static final String SQLITE_TABLE = "platform_workflow_tools";
+
     private final WorkflowAssetService workflowAssetService;
     private final AgentDefinitionRegistry agentRegistry;
     private final PlatformStorageLayer storage;
+    private final PlatformAssetAccessService assetAccess;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, WorkflowToolRegistration> registrations = new ConcurrentHashMap<>();
 
@@ -32,19 +39,38 @@ public class WorkflowToolRegistry {
             WorkflowAssetService workflowAssetService,
             AgentDefinitionRegistry agentRegistry,
             PlatformStorageLayer storage) {
+        this(workflowAssetService, agentRegistry, storage, null);
+    }
+
+    @Autowired
+    public WorkflowToolRegistry(
+            WorkflowAssetService workflowAssetService,
+            AgentDefinitionRegistry agentRegistry,
+            PlatformStorageLayer storage,
+            PlatformAssetAccessService assetAccess) {
         this.workflowAssetService = workflowAssetService;
         this.agentRegistry = agentRegistry;
         this.storage = storage;
+        this.assetAccess = assetAccess;
+        storage.initializeSqliteSchema(
+                "CREATE TABLE IF NOT EXISTS "
+                        + SQLITE_TABLE
+                        + " (tool_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)");
     }
 
     @PostConstruct
     private void load() {
+        if (storage.isSqliteEnabled()) {
+            loadSqlite();
+            if (!registrations.isEmpty()) return;
+        }
         Path path = storage.cacheRoot().resolve("workflow-tools.json");
         if (!Files.exists(path)) return;
         try {
             List<Map<String, Object>> rows = objectMapper.readValue(path.toFile(), new TypeReference<>() {});
             rows.stream().map(this::fromMap).filter(java.util.Objects::nonNull)
                     .forEach(item -> registrations.put(item.toolId(), item));
+            if (storage.isSqliteEnabled() && !registrations.isEmpty()) persist();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to load Workflow Tool registrations: " + path, e);
         }
@@ -74,22 +100,34 @@ public class WorkflowToolRegistry {
             throw new IllegalArgumentException(
                     "Workflow Tool is not allowed for Agent: " + toolId + " -> " + agentId);
         }
-        WorkflowAsset workflow = workflowAssetService.requirePublished(registration.workflowId());
-        if (workflow.version() != registration.workflowVersion()) {
-            throw new IllegalArgumentException(
-                    "Workflow Tool points to an unpublished or changed Workflow version: " + toolId);
-        }
+        workflowAssetService.requirePublished(registration.workflowId());
+        workflowAssetService.requirePublishedVersion(
+                registration.workflowId(), registration.workflowVersion());
         return registration;
     }
 
     public WorkflowAsset workflowForAgent(String toolId, String agentId) {
         WorkflowToolRegistration registration = requireForAgent(toolId, agentId);
-        return workflowAssetService.requirePublished(registration.workflowId());
+        return workflowAssetService.requirePublishedVersion(
+                registration.workflowId(), registration.workflowVersion());
     }
 
     public synchronized WorkflowToolRegistration register(Map<String, Object> payload) {
+        return register(payload, null);
+    }
+
+    public synchronized WorkflowToolRegistration register(
+            Map<String, Object> payload, PlatformAuthService.Principal principal) {
+        if (principal != null) PlatformRolePolicy.requireBuilder(principal);
         String workflowId = string(payload, "workflow_id");
-        WorkflowAsset workflow = workflowAssetService.requirePublished(workflowId);
+        int requestedVersion = number(payload.get("workflow_version"), 0);
+        WorkflowAsset activeWorkflow =
+                workflowAssetService.requirePublished(workflowId, principal);
+        WorkflowAsset workflow =
+                requestedVersion > 0
+                        ? workflowAssetService.requirePublishedVersion(
+                                workflowId, requestedVersion, principal)
+                        : activeWorkflow;
         String toolId = string(payload, "tool_id");
         if (toolId.isBlank()) {
             toolId = "workflow_tool_" + UUID.randomUUID().toString().replace("-", "");
@@ -97,33 +135,72 @@ public class WorkflowToolRegistry {
         if (registrations.containsKey(toolId)) {
             throw new IllegalArgumentException("Workflow Tool already exists: " + toolId);
         }
-        WorkflowToolRegistration registration = normalize(toolId, workflow, payload, null);
-        validateAgentBindings(registration, workflow);
+        WorkflowToolRegistration registration =
+                normalize(toolId, workflow, payload, null, principal);
+        validateAgentBindings(registration, workflow, principal);
         registrations.put(toolId, registration);
-        persist();
+        try {
+            persist();
+        } catch (RuntimeException error) {
+            registrations.remove(toolId, registration);
+            throw error;
+        }
         return registration;
     }
 
     public synchronized WorkflowToolRegistration update(String toolId, Map<String, Object> payload) {
+        return update(toolId, payload, null);
+    }
+
+    public synchronized WorkflowToolRegistration update(
+            String toolId,
+            Map<String, Object> payload,
+            PlatformAuthService.Principal principal) {
         WorkflowToolRegistration existing = require(toolId);
+        requireWritable(existing, principal);
         String workflowId = string(payload, "workflow_id");
-        WorkflowAsset workflow = workflowAssetService.requirePublished(
-                workflowId.isBlank() ? existing.workflowId() : workflowId);
-        WorkflowToolRegistration registration = normalize(toolId, workflow, payload, existing);
-        validateAgentBindings(registration, workflow);
+        String selectedWorkflowId = workflowId.isBlank() ? existing.workflowId() : workflowId;
+        int requestedVersion =
+                number(payload.get("workflow_version"), existing.workflowVersion());
+        workflowAssetService.requirePublished(selectedWorkflowId, principal);
+        WorkflowAsset workflow =
+                workflowAssetService.requirePublishedVersion(
+                        selectedWorkflowId, requestedVersion, principal);
+        WorkflowToolRegistration registration =
+                normalize(toolId, workflow, payload, existing, principal);
+        validateAgentBindings(registration, workflow, principal);
         registrations.put(toolId, registration);
-        persist();
+        try {
+            persist();
+        } catch (RuntimeException error) {
+            registrations.put(toolId, existing);
+            throw error;
+        }
         return registration;
     }
 
     public synchronized void delete(String toolId) {
-        require(toolId);
-        registrations.remove(toolId);
-        persist();
+        delete(toolId, null);
+    }
+
+    public synchronized void delete(
+            String toolId, PlatformAuthService.Principal principal) {
+        requireWritable(require(toolId), principal);
+        WorkflowToolRegistration removed = registrations.remove(toolId);
+        try {
+            persist();
+        } catch (RuntimeException error) {
+            registrations.put(toolId, removed);
+            throw error;
+        }
     }
 
     public List<Map<String, Object>> rows() {
-        return all().stream().map(registration -> {
+        return rows(null);
+    }
+
+    public List<Map<String, Object>> rows(PlatformAuthService.Principal principal) {
+        return all().stream().filter(item -> principal == null || canRead(item, principal)).map(registration -> {
             Map<String, Object> row = new java.util.LinkedHashMap<>();
             row.put("tool_id", registration.toolId());
             row.put("type", "workflow");
@@ -135,6 +212,11 @@ public class WorkflowToolRegistry {
             row.put("workflow_version", registration.workflowVersion());
             row.put("parameter_schema", registration.inputSchema());
             row.put("allowed_agents", registration.allowedAgents());
+            row.put("owner_id", registration.ownerId());
+            row.put("org_id", registration.orgId());
+            row.put("visibility", registration.visibility());
+            row.put("created_at", registration.createdAt());
+            row.put("updated_at", registration.updatedAt());
             return row;
         }).toList();
     }
@@ -143,12 +225,20 @@ public class WorkflowToolRegistry {
             String toolId,
             WorkflowAsset workflow,
             Map<String, Object> payload,
-            WorkflowToolRegistration existing) {
+            WorkflowToolRegistration existing,
+            PlatformAuthService.Principal principal) {
         List<String> agents = stringList(payload.get("allowed_agents"));
         if (!payload.containsKey("allowed_agents") && existing != null) agents = existing.allowedAgents();
         boolean enabled = payload.containsKey("enabled")
                 ? Boolean.TRUE.equals(payload.get("enabled"))
                 : existing == null || existing.enabled();
+        String now = java.time.Instant.now().toString();
+        String visibility =
+                existing == null
+                        ? requestedVisibility(payload, principal)
+                        : payload.containsKey("visibility")
+                                ? requestedVisibility(payload, principal)
+                                : existing.visibility();
         return new WorkflowToolRegistration(
                 toolId,
                 workflow.workflowId(),
@@ -158,14 +248,34 @@ public class WorkflowToolRegistry {
                 workflow.inputSchema(),
                 agents,
                 enabled,
-                enabled ? "ACTIVE" : "DISABLED");
+                enabled ? "ACTIVE" : "DISABLED",
+                existing == null
+                        ? principal == null ? "platform" : principal.userId()
+                        : existing.ownerId(),
+                existing == null
+                        ? principal == null ? "platform" : principal.orgId()
+                        : existing.orgId(),
+                visibility,
+                existing == null ? now : existing.createdAt(),
+                now);
     }
 
     private void validateAgentBindings(
-            WorkflowToolRegistration registration, WorkflowAsset workflow) {
+            WorkflowToolRegistration registration,
+            WorkflowAsset workflow,
+            PlatformAuthService.Principal principal) {
+        if (principal != null
+                && !"PLATFORM_ADMIN".equals(principal.role())
+                && registration.allowedAgents().isEmpty()) {
+            throw new PlatformAuthService.AuthException(
+                    400, "非平台管理员创建 Workflow Tool 时必须明确绑定 Agent");
+        }
         for (String agentId : registration.allowedAgents()) {
             if (agentRegistry.findPublished(agentId).isEmpty()) {
                 throw new IllegalArgumentException("Workflow Tool allowed Agent not found: " + agentId);
+            }
+            if (principal != null && assetAccess != null) {
+                assetAccess.requireWritable("AGENT", agentId, principal);
             }
         }
         for (var node : workflow.nodes()) {
@@ -183,6 +293,10 @@ public class WorkflowToolRegistry {
     }
 
     private void persist() {
+        if (storage.isSqliteEnabled()) {
+            persistSqlite();
+            return;
+        }
         Path path = storage.cacheRoot().resolve("workflow-tools.json");
         try {
             Files.createDirectories(path.getParent());
@@ -190,6 +304,51 @@ public class WorkflowToolRegistry {
                     .writeValue(path.toFile(), all().stream().map(this::toMap).toList());
         } catch (Exception e) {
             throw new IllegalStateException("Failed to persist Workflow Tool registrations: " + path, e);
+        }
+    }
+
+    private void loadSqlite() {
+        String sql = "SELECT payload FROM " + SQLITE_TABLE + " ORDER BY tool_id";
+        try (Connection connection = storage.connection();
+                PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                Map<String, Object> row =
+                        objectMapper.readValue(
+                                resultSet.getString("payload"), new TypeReference<>() {});
+                WorkflowToolRegistration item = fromMap(row);
+                if (item != null) registrations.put(item.toolId(), item);
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException("Failed to load Workflow Tool registrations", error);
+        }
+    }
+
+    private void persistSqlite() {
+        String insert =
+                "INSERT INTO "
+                        + SQLITE_TABLE
+                        + " (tool_id,payload,updated_at) VALUES (?,?,?)";
+        try (Connection connection = storage.connection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement =
+                    connection.prepareStatement("DELETE FROM " + SQLITE_TABLE)) {
+                statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement(insert)) {
+                String now = java.time.Instant.now().toString();
+                for (WorkflowToolRegistration item : all()) {
+                    statement.setString(1, item.toolId());
+                    statement.setString(2, objectMapper.writeValueAsString(toMap(item)));
+                    statement.setString(3, now);
+                    statement.addBatch();
+                }
+                statement.executeBatch();
+            }
+            connection.commit();
+        } catch (Exception error) {
+            throw new IllegalStateException(
+                    "Failed to persist Workflow Tool registrations", error);
         }
     }
 
@@ -204,6 +363,11 @@ public class WorkflowToolRegistry {
         row.put("allowed_agents", item.allowedAgents());
         row.put("enabled", item.enabled());
         row.put("status", item.status());
+        row.put("owner_id", item.ownerId());
+        row.put("org_id", item.orgId());
+        row.put("visibility", item.visibility());
+        row.put("created_at", item.createdAt());
+        row.put("updated_at", item.updatedAt());
         return row;
     }
 
@@ -221,7 +385,48 @@ public class WorkflowToolRegistry {
                 map(row.get("input_schema")),
                 stringList(row.get("allowed_agents")),
                 Boolean.TRUE.equals(row.get("enabled")),
-                string(row, "status", "DISABLED"));
+                string(row, "status", "DISABLED"),
+                string(row, "owner_id", "platform"),
+                string(row, "org_id", "platform"),
+                string(row, "visibility", "PUBLIC"),
+                string(row, "created_at", ""),
+                string(row, "updated_at", ""));
+    }
+
+    private static boolean canRead(
+            WorkflowToolRegistration item, PlatformAuthService.Principal principal) {
+        return "PLATFORM_ADMIN".equals(principal.role())
+                || "PUBLIC".equals(item.visibility())
+                || ("ORGANIZATION".equals(item.visibility())
+                        && item.orgId().equals(principal.orgId()))
+                || item.ownerId().equals(principal.userId());
+    }
+
+    private static void requireWritable(
+            WorkflowToolRegistration item, PlatformAuthService.Principal principal) {
+        if (principal == null || "PLATFORM_ADMIN".equals(principal.role())) return;
+        PlatformRolePolicy.requireBuilder(principal);
+        if (!item.ownerId().equals(principal.userId())
+                && !("ORG_ADMIN".equals(principal.role())
+                        && item.orgId().equals(principal.orgId()))) {
+            throw new PlatformAuthService.AuthException(403, "没有权限修改该 Workflow Tool");
+        }
+    }
+
+    private static String requestedVisibility(
+            Map<String, Object> payload, PlatformAuthService.Principal principal) {
+        if (principal == null) return "PUBLIC";
+        String requested = string(payload, "visibility", "PRIVATE").toUpperCase();
+        if ("PUBLIC".equals(requested) && !"PLATFORM_ADMIN".equals(principal.role())) {
+            return "PRIVATE";
+        }
+        if ("ORGANIZATION".equals(requested)
+                && !List.of("PLATFORM_ADMIN", "ORG_ADMIN").contains(principal.role())) {
+            return "PRIVATE";
+        }
+        return List.of("PRIVATE", "ORGANIZATION", "PUBLIC").contains(requested)
+                ? requested
+                : "PRIVATE";
     }
 
     private static String string(Map<String, Object> row, String key, String fallback) {

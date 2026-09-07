@@ -69,7 +69,10 @@ public class ExternalAccessService {
         }
 
         public boolean allowsAgent(String agentId) {
-            return !managed || allowedAgentIds.isEmpty() || allowedAgentIds.contains(text(agentId));
+            String target = text(agentId);
+            if (!managed) return true;
+            if (target.startsWith("workflow:")) return allowedAgentIds.contains(target);
+            return allowedAgentIds.isEmpty() || allowedAgentIds.contains(target);
         }
 
         public boolean allowsCapability(String capability) {
@@ -1133,12 +1136,14 @@ public class ExternalAccessService {
                 String normalized = text(value);
                 if (normalized.isBlank()) continue;
                 if (normalized.length() > 160
-                        || !normalized.matches("[A-Za-z0-9][A-Za-z0-9._-]*")) {
-                    throw new PlatformAuthService.AuthException(400, "Agent ID 格式无效: " + normalized);
+                        || !normalized.matches("(?:workflow:)?[A-Za-z0-9][A-Za-z0-9._-]*")) {
+                    throw new PlatformAuthService.AuthException(
+                            400, "Agent / Workflow 授权目标格式无效: " + normalized);
                 }
                 result.add(normalized);
                 if (result.size() > 100) {
-                    throw new PlatformAuthService.AuthException(400, "每个 API Key 最多绑定 100 个 Agent");
+                    throw new PlatformAuthService.AuthException(
+                            400, "每个 API Key 最多绑定 100 个 Agent / Workflow 目标");
                 }
             }
         }

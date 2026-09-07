@@ -5,11 +5,15 @@ package io.agent.platform.scheduled;
 
 import io.agent.platform.control.AgentDefinitionRegistry;
 import io.agent.platform.control.PlatformStorageLayer;
+import io.agent.platform.control.WorkflowAsset;
 import io.agent.platform.runtime.AgentRuntime;
 import io.agent.platform.runtime.ChatRequest;
 import io.agent.platform.runtime.ChatResponse;
 import io.agent.platform.runtime.protocol.TaskContext;
 import io.agent.platform.web.PlatformCompatibilityState;
+import io.agent.platform.web.PlatformAuthService;
+import io.agent.platform.web.PlatformAssetAccessService;
+import io.agent.platform.web.WorkflowAssetService;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -20,6 +24,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -41,11 +46,14 @@ public class ScheduledTaskService {
     private final PlatformCompatibilityState state;
     private final PlatformStorageLayer storage;
     private final ScheduledTaskWebhookService webhook;
+    private final WorkflowAssetService workflows;
+    private final PlatformAssetAccessService assetAccess;
     private final boolean enabled;
     private final int batchSize;
     private final long leaseMs;
     private final ZoneId defaultZone;
 
+    @Autowired
     public ScheduledTaskService(
             ScheduledTaskStore store,
             AgentRuntime runtime,
@@ -53,6 +61,8 @@ public class ScheduledTaskService {
             PlatformCompatibilityState state,
             PlatformStorageLayer storage,
             ScheduledTaskWebhookService webhook,
+            WorkflowAssetService workflows,
+            PlatformAssetAccessService assetAccess,
             @Value("${agent.platform.scheduled-tasks.enabled:true}") boolean enabled,
             @Value("${agent.platform.scheduled-tasks.batch-size:20}") int batchSize,
             @Value("${agent.platform.scheduled-tasks.lease-ms:120000}") long leaseMs,
@@ -63,12 +73,42 @@ public class ScheduledTaskService {
         this.state = state;
         this.storage = storage;
         this.webhook = webhook;
+        this.workflows = workflows;
+        this.assetAccess = assetAccess;
         this.enabled = enabled;
         this.batchSize = Math.max(1, Math.min(200, batchSize));
         this.leaseMs = Math.max(10_000L, leaseMs);
         this.defaultZone = defaultTimezone == null || defaultTimezone.isBlank()
                 ? ZoneId.systemDefault()
                 : resolveZone(defaultTimezone);
+    }
+
+    /** Compatibility constructor used by focused scheduler tests. */
+    public ScheduledTaskService(
+            ScheduledTaskStore store,
+            AgentRuntime runtime,
+            AgentDefinitionRegistry agents,
+            PlatformCompatibilityState state,
+            PlatformStorageLayer storage,
+            ScheduledTaskWebhookService webhook,
+            WorkflowAssetService workflows,
+            boolean enabled,
+            int batchSize,
+            long leaseMs,
+            String defaultTimezone) {
+        this(
+                store,
+                runtime,
+                agents,
+                state,
+                storage,
+                webhook,
+                workflows,
+                null,
+                enabled,
+                batchSize,
+                leaseMs,
+                defaultTimezone);
     }
 
     public List<Map<String, Object>> list(String userId, String orgId) {
@@ -81,10 +121,20 @@ public class ScheduledTaskService {
 
     public Map<String, Object> create(Map<String, Object> payload, String userId, String orgId) {
         String agentId = first(payload, "agent_id", "agentId");
-        if (agentId.isBlank()) throw badRequest("agent_id 不能为空");
-        if (agents.findPublished(agentId).isEmpty()) {
-            throw badRequest("Agent 不存在或未发布: " + agentId);
+        String workflowId = first(payload, "workflow_id", "workflowId");
+        if (agentId.isBlank() == workflowId.isBlank()) {
+            throw badRequest("agent_id 与 workflow_id 必须且只能提供一个");
         }
+        WorkflowAsset workflow = null;
+        if (!workflowId.isBlank()) {
+            workflow = requireWorkflow(workflowId, userId, orgId);
+            ensureSchedulable(workflow);
+        } else {
+            requireAgent(agentId, userId, orgId);
+        }
+        String targetType = workflow == null ? "agent" : "workflow";
+        String targetId = workflow == null ? agentId : workflowId;
+        String runtimeId = workflow == null ? agentId : "workflow:" + workflowId;
         String prompt = first(payload, "prompt", "message", "instruction");
         if (prompt.isBlank()) throw badRequest("prompt 不能为空");
         String cron = normalizeCron(first(payload, "cron", "cron_expression", "schedule"));
@@ -98,7 +148,7 @@ public class ScheduledTaskService {
             Map<String, Object> session =
                     state.newSession(
                             map(
-                                    "agent_id", agentId,
+                                    "agent_id", runtimeId,
                                     "title", nonBlank(first(payload, "name", "title"), "定时任务")),
                             orgId,
                             userId);
@@ -112,7 +162,11 @@ public class ScheduledTaskService {
                         "task_id", taskId,
                         "org_id", orgId,
                         "user_id", userId,
-                        "agent_id", agentId,
+                        "target_type", targetType,
+                        "target_id", targetId,
+                        "agent_id", runtimeId,
+                        "workflow_id", workflowId,
+                        "workflow_version", workflow == null ? 0 : workflow.version(),
                         "session_id", sessionId,
                         "name", nonBlank(first(payload, "name", "title"), "定时任务"),
                         "prompt", prompt,
@@ -135,11 +189,25 @@ public class ScheduledTaskService {
             String taskId, Map<String, Object> payload, String userId, String orgId) {
         Map<String, Object> task = requireTask(taskId, userId, orgId);
         String agentId = first(payload, "agent_id", "agentId");
-        if (!agentId.isBlank()) {
-            if (agents.findPublished(agentId).isEmpty()) {
-                throw badRequest("Agent 不存在或未发布: " + agentId);
-            }
+        String workflowId = first(payload, "workflow_id", "workflowId");
+        if (!agentId.isBlank() && !workflowId.isBlank()) {
+            throw badRequest("agent_id 与 workflow_id 不能同时提供");
+        }
+        if (!workflowId.isBlank()) {
+            WorkflowAsset workflow = requireWorkflow(workflowId, userId, orgId);
+            ensureSchedulable(workflow);
+            task.put("target_type", "workflow");
+            task.put("target_id", workflowId);
+            task.put("workflow_id", workflowId);
+            task.put("workflow_version", workflow.version());
+            task.put("agent_id", "workflow:" + workflowId);
+        } else if (!agentId.isBlank()) {
+            requireAgent(agentId, userId, orgId);
+            task.put("target_type", "agent");
+            task.put("target_id", agentId);
             task.put("agent_id", agentId);
+            task.put("workflow_id", "");
+            task.put("workflow_version", 0);
         }
         String prompt = first(payload, "prompt", "message", "instruction");
         if (!prompt.isBlank()) task.put("prompt", prompt);
@@ -280,16 +348,21 @@ public class ScheduledTaskService {
                             .withMetadata("source", "scheduled_task")
                             .withMetadata("scheduled_task_id", task.get("task_id"))
                             .withMetadata("scheduled_task_run_id", runId);
-            ChatResponse response =
-                    runtime.chat(
-                                    agentId,
-                                    new ChatRequest(
-                                            orgId,
-                                            userId,
-                                            sessionId,
-                                            agentPrompt,
-                                            context))
-                            .block();
+            ChatRequest chatRequest =
+                    new ChatRequest(orgId, userId, sessionId, agentPrompt, context);
+            ChatResponse response;
+            if ("workflow".equals(string(task.get("target_type")))) {
+                String workflowId = string(task.get("workflow_id"));
+                int version = integer(task.get("workflow_version"), 0);
+                workflows.requirePublished(workflowId, principal(userId, orgId));
+                WorkflowAsset workflow =
+                        workflows.requirePublishedVersion(
+                                workflowId, version, principal(userId, orgId));
+                response = runtime.workflow(workflow, chatRequest).block();
+            } else {
+                requireAgent(agentId, userId, orgId);
+                response = runtime.chat(agentId, chatRequest).block();
+            }
             String text = response == null ? "" : nonBlank(response.text(), "");
             state.appendSessionMessage(agentId, sessionId, userId, "assistant", text, metadata);
             finishRun(run, "SUCCEEDED", text, "");
@@ -433,6 +506,37 @@ public class ScheduledTaskService {
         return task;
     }
 
+    private WorkflowAsset requireWorkflow(String workflowId, String userId, String orgId) {
+        try {
+            return workflows.requirePublished(workflowId, principal(userId, orgId));
+        } catch (IllegalArgumentException | PlatformAuthService.AuthException error) {
+            throw badRequest("Workflow 不存在、未发布或当前账号无权访问: " + workflowId);
+        }
+    }
+
+    private void requireAgent(String agentId, String userId, String orgId) {
+        if (agents.findPublished(agentId).isEmpty()
+                || (assetAccess != null
+                        && !assetAccess.canRead("AGENT", agentId, principal(userId, orgId)))) {
+            throw badRequest("Agent 不存在、未发布或当前账号无权访问: " + agentId);
+        }
+    }
+
+    private static void ensureSchedulable(WorkflowAsset workflow) {
+        if (workflow.nodes().stream()
+                .anyMatch(
+                        node ->
+                                node.type()
+                                        == io.agent.platform.control.WorkflowNodeType.HUMAN_APPROVAL)) {
+            throw badRequest(
+                    "包含 human.approval 的 Workflow 不能使用无人值守定时触发器；请使用手动或 API 触发");
+        }
+    }
+
+    private static PlatformAuthService.Principal principal(String userId, String orgId) {
+        return new PlatformAuthService.Principal(userId, "", userId, orgId, "BUILDER");
+    }
+
     private Map<String, Object> publicTask(Map<String, Object> task) {
         Map<String, Object> row = new LinkedHashMap<>(task);
         row.put("enabled", "ACTIVE".equals(row.get("status")));
@@ -532,6 +636,16 @@ public class ScheduledTaskService {
 
     private static String string(Object value) {
         return value == null ? "" : String.valueOf(value).trim();
+    }
+
+    private static int integer(Object value, int fallback) {
+        try {
+            return value instanceof Number number
+                    ? number.intValue()
+                    : Integer.parseInt(String.valueOf(value));
+        } catch (RuntimeException ignored) {
+            return fallback;
+        }
     }
 
     private static String nonBlank(String value, String fallback) {

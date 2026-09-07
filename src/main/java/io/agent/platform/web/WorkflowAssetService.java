@@ -11,6 +11,8 @@ import io.agent.platform.control.WorkflowAsset;
 import io.agent.platform.control.WorkflowContractValidator;
 import io.agent.platform.control.WorkflowEdge;
 import io.agent.platform.control.WorkflowEndpoint;
+import io.agent.platform.control.WorkflowHttpSecurity;
+import io.agent.platform.control.WorkflowJdbcSecurity;
 import io.agent.platform.control.WorkflowValidationResult;
 import io.agent.platform.control.WorkflowNode;
 import io.agent.platform.control.WorkflowNodeType;
@@ -35,13 +37,18 @@ import org.springframework.stereotype.Component;
 public class WorkflowAssetService {
 
     private static final String SQLITE_TABLE = "platform_workflows";
+    private static final String SQLITE_VERSION_TABLE = "platform_workflow_versions";
+    private static final String SQLITE_PUBLICATION_TABLE = "platform_workflow_publications";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final PlatformStorageLayer storage;
     private final AgentDefinitionRegistry agentRegistry;
-    private final PlatformAuthService auth;
+    private final PlatformAssetAccessService assetAccess;
     private final WorkflowContractValidator contractValidator = new WorkflowContractValidator();
     private final Map<String, WorkflowAsset> workflows = new ConcurrentHashMap<>();
+    private final Map<String, Map<Integer, WorkflowAsset>> publishedVersions =
+            new ConcurrentHashMap<>();
+    private final Map<String, Integer> activePublishedVersions = new ConcurrentHashMap<>();
 
     public WorkflowAssetService(
             PlatformStorageLayer storage, AgentDefinitionRegistry agentRegistry) {
@@ -52,15 +59,23 @@ public class WorkflowAssetService {
     public WorkflowAssetService(
             PlatformStorageLayer storage,
             AgentDefinitionRegistry agentRegistry,
-            PlatformAuthService auth) {
+            PlatformAssetAccessService assetAccess) {
         this.storage = storage;
         this.agentRegistry = agentRegistry;
-        this.auth = auth;
+        this.assetAccess = assetAccess;
         if (storage.isSqliteEnabled()) {
             storage.initializeSqliteSchema(
                     "CREATE TABLE IF NOT EXISTS "
                             + SQLITE_TABLE
-                            + " (workflow_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)");
+                            + " (workflow_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)",
+                    "CREATE TABLE IF NOT EXISTS "
+                            + SQLITE_VERSION_TABLE
+                            + " (workflow_id TEXT NOT NULL, version INTEGER NOT NULL, payload TEXT NOT NULL,"
+                            + " published_at TEXT NOT NULL, PRIMARY KEY(workflow_id, version))",
+                    "CREATE TABLE IF NOT EXISTS "
+                            + SQLITE_PUBLICATION_TABLE
+                            + " (workflow_id TEXT PRIMARY KEY, active_version INTEGER NOT NULL,"
+                            + " updated_at TEXT NOT NULL)");
         }
     }
 
@@ -80,6 +95,17 @@ public class WorkflowAssetService {
     public List<Map<String, Object>> list(
             String domain, String status, PlatformAuthService.Principal principal) {
         return workflows.values().stream()
+                .map(
+                        asset -> {
+                            if (!"PUBLISHED".equalsIgnoreCase(status)) return asset;
+                            Integer active = activePublishedVersions.get(asset.workflowId());
+                            return active == null
+                                    ? null
+                                    : publishedVersions
+                                            .getOrDefault(asset.workflowId(), Map.of())
+                                            .get(active);
+                        })
+                .filter(java.util.Objects::nonNull)
                 .filter(asset -> principal == null || canRead(asset, principal))
                 .filter(asset -> domain == null || domain.isBlank() || domain.equals(asset.domain()))
                 .filter(
@@ -117,12 +143,46 @@ public class WorkflowAssetService {
 
     public WorkflowAsset requirePublished(
             String workflowId, PlatformAuthService.Principal principal) {
-        WorkflowAsset asset = require(workflowId);
-        requireReadable(asset, principal);
-        if (!"PUBLISHED".equals(asset.status())) {
+        WorkflowAsset current = require(workflowId);
+        requireReadable(current, principal);
+        Integer activeVersion = activePublishedVersions.get(workflowId);
+        if (activeVersion == null) {
             throw new IllegalArgumentException("Workflow is not published: " + workflowId);
         }
-        return asset;
+        return requirePublishedVersion(workflowId, activeVersion, principal);
+    }
+
+    public WorkflowAsset requirePublishedVersion(String workflowId, int version) {
+        return requirePublishedVersion(workflowId, version, null);
+    }
+
+    public WorkflowAsset requirePublishedVersion(
+            String workflowId, int version, PlatformAuthService.Principal principal) {
+        WorkflowAsset current = require(workflowId);
+        requireReadable(current, principal);
+        WorkflowAsset revision =
+                publishedVersions.getOrDefault(workflowId, Map.of()).get(version);
+        if (revision == null) {
+            throw new IllegalArgumentException(
+                    "Published Workflow version not found: " + workflowId + "@" + version);
+        }
+        return revision;
+    }
+
+    public List<Map<String, Object>> versions(
+            String workflowId, PlatformAuthService.Principal principal) {
+        WorkflowAsset current = require(workflowId);
+        requireReadable(current, principal);
+        Integer active = activePublishedVersions.get(workflowId);
+        return publishedVersions.getOrDefault(workflowId, Map.of()).values().stream()
+                .sorted(Comparator.comparingInt(WorkflowAsset::version).reversed())
+                .map(
+                        revision -> {
+                            Map<String, Object> row = toMap(revision);
+                            row.put("active", revision.version() == (active == null ? -1 : active));
+                            return row;
+                        })
+                .toList();
     }
 
     public WorkflowValidationResult validateContracts(String workflowId) {
@@ -180,7 +240,7 @@ public class WorkflowAssetService {
         if (existing != null) requireWritable(existing, principal);
         WorkflowAsset asset =
                 normalize(workflowId, payload == null ? Map.of() : payload, existing, principal);
-        validate(asset, false);
+        validate(asset, false, principal);
         workflows.put(workflowId, asset);
         persist(asset);
         return toMap(asset);
@@ -194,11 +254,20 @@ public class WorkflowAssetService {
             String workflowId, PlatformAuthService.Principal principal) {
         WorkflowAsset existing = require(workflowId);
         requireWritable(existing, principal);
-        validate(existing, true);
+        validate(existing, true, principal);
+        Integer previousActiveVersion = activePublishedVersions.get(workflowId);
+        int nextVersion =
+                publishedVersions.getOrDefault(workflowId, Map.of()).keySet().stream()
+                                .mapToInt(Integer::intValue)
+                                .max()
+                                .orElse(0)
+                        + 1;
+        String publishedAt = Instant.now().toString();
+        List<WorkflowNode> publishedNodes = pinPublishedDependencies(existing.nodes(), principal);
         WorkflowAsset published =
                 new WorkflowAsset(
                         existing.workflowId(),
-                        existing.version() + 1,
+                        nextVersion,
                         existing.name(),
                         existing.description(),
                         existing.domain(),
@@ -206,11 +275,11 @@ public class WorkflowAssetService {
                         "PUBLISHED",
                         existing.inputSchema(),
                         existing.outputSchema(),
-                        existing.nodes(),
+                        publishedNodes,
                         existing.edges(),
                         existing.createdAt(),
-                        Instant.now().toString(),
-                        Instant.now().toString(),
+                        publishedAt,
+                        publishedAt,
                         existing.ownerType(),
                         existing.ownerId(),
                         existing.orgId(),
@@ -219,12 +288,62 @@ public class WorkflowAssetService {
         workflows.put(workflowId, published);
         try {
             validateWorkflowCycles();
-            persist(published);
+            publishedVersions
+                    .computeIfAbsent(workflowId, ignored -> new ConcurrentHashMap<>())
+                    .put(nextVersion, published);
+            activePublishedVersions.put(workflowId, nextVersion);
+            persistPublishedState(published);
         } catch (RuntimeException error) {
             workflows.put(workflowId, existing);
+            publishedVersions.getOrDefault(workflowId, Map.of()).remove(nextVersion);
+            if (previousActiveVersion == null) {
+                activePublishedVersions.remove(workflowId);
+            } else {
+                activePublishedVersions.put(workflowId, previousActiveVersion);
+            }
             throw error;
         }
         return toMap(published);
+    }
+
+    private List<WorkflowNode> pinPublishedDependencies(
+            List<WorkflowNode> nodes, PlatformAuthService.Principal principal) {
+        List<WorkflowNode> pinned = new ArrayList<>();
+        for (WorkflowNode node : nodes) {
+            boolean workflowForeach =
+                    node.type() == WorkflowNodeType.FOREACH
+                            && "workflow"
+                                    .equalsIgnoreCase(
+                                            String.valueOf(
+                                                    node.config()
+                                                            .getOrDefault("target_type", "")));
+            if (node.type() != WorkflowNodeType.SUBFLOW_INVOKE && !workflowForeach) {
+                pinned.add(node);
+                continue;
+            }
+            String targetId =
+                    node.refId() == null || node.refId().isBlank()
+                            ? String.valueOf(node.config().getOrDefault("target_id", ""))
+                            : node.refId();
+            WorkflowAsset target = requirePublished(targetId, principal);
+            Map<String, Object> config = new LinkedHashMap<>(node.config());
+            config.put("workflow_version", target.version());
+            pinned.add(
+                    new WorkflowNode(
+                            node.nodeId(),
+                            node.type(),
+                            node.refId(),
+                            node.instruction(),
+                            config,
+                            node.inputMapping(),
+                            node.outputSchema(),
+                            node.timeoutMs(),
+                            node.maxRetries(),
+                            node.failurePolicy(),
+                            node.inputPorts(),
+                            node.outputPorts()));
+        }
+        return List.copyOf(pinned);
     }
 
     public synchronized Map<String, Object> unpublish(String workflowId) {
@@ -257,7 +376,16 @@ public class WorkflowAssetService {
                         existing.createdBy(),
                         existing.visibility());
         workflows.put(workflowId, draft);
-        persist(draft);
+        Integer previousActiveVersion = activePublishedVersions.remove(workflowId);
+        try {
+            persistUnpublishedState(draft);
+        } catch (RuntimeException error) {
+            workflows.put(workflowId, existing);
+            if (previousActiveVersion != null) {
+                activePublishedVersions.put(workflowId, previousActiveVersion);
+            }
+            throw error;
+        }
         return toMap(draft);
     }
 
@@ -268,19 +396,26 @@ public class WorkflowAssetService {
     public synchronized void delete(
             String workflowId, PlatformAuthService.Principal principal) {
         requireWritable(require(workflowId), principal);
-        workflows.remove(workflowId);
-        if (storage.isSqliteEnabled()) {
-            try (Connection connection = storage.connection();
-                    PreparedStatement statement =
-                            connection.prepareStatement(
-                                    "DELETE FROM " + SQLITE_TABLE + " WHERE workflow_id = ?")) {
-                statement.setString(1, workflowId);
-                statement.executeUpdate();
-            } catch (Exception e) {
-                throw new IllegalStateException("Failed to delete workflow: " + workflowId, e);
+        WorkflowAsset removed = workflows.remove(workflowId);
+        Map<Integer, WorkflowAsset> removedVersions = publishedVersions.remove(workflowId);
+        Integer removedActive = activePublishedVersions.remove(workflowId);
+        try {
+            if (storage.isSqliteEnabled()) {
+                try (Connection connection = storage.connection()) {
+                    connection.setAutoCommit(false);
+                    deleteByWorkflowId(connection, SQLITE_PUBLICATION_TABLE, workflowId);
+                    deleteByWorkflowId(connection, SQLITE_VERSION_TABLE, workflowId);
+                    deleteByWorkflowId(connection, SQLITE_TABLE, workflowId);
+                    connection.commit();
+                }
+            } else {
+                persistFile();
             }
-        } else {
-            persistFile();
+        } catch (Exception error) {
+            workflows.put(workflowId, removed);
+            if (removedVersions != null) publishedVersions.put(workflowId, removedVersions);
+            if (removedActive != null) activePublishedVersions.put(workflowId, removedActive);
+            throw new IllegalStateException("Failed to delete workflow: " + workflowId, error);
         }
     }
 
@@ -302,7 +437,7 @@ public class WorkflowAssetService {
         String status = "DRAFT";
         return new WorkflowAsset(
                 workflowId,
-                integer(payload, "version", existing == null ? 1 : existing.version()),
+                existing == null ? 1 : existing.version(),
                 string(payload, "name", existing == null ? workflowId : existing.name()),
                 string(payload, "description", existing == null ? "" : existing.description()),
                 string(payload, "domain", existing == null ? "platform" : existing.domain()),
@@ -338,7 +473,10 @@ public class WorkflowAssetService {
         return fallback;
     }
 
-    private void validate(WorkflowAsset asset, boolean publishing) {
+    private void validate(
+            WorkflowAsset asset,
+            boolean publishing,
+            PlatformAuthService.Principal principal) {
         if (asset.name().isBlank()) {
             throw new IllegalArgumentException("Workflow name is required");
         }
@@ -360,20 +498,137 @@ public class WorkflowAssetService {
                 if (agentRegistry.findPublished(node.refId()).isEmpty()) {
                     throw new IllegalArgumentException("Agent not found: " + node.refId());
                 }
+                requireReadableAgent(node.refId(), principal);
             }
             if (publishing && node.type() == WorkflowNodeType.SUBFLOW_INVOKE) {
                 if (node.refId() == null || node.refId().isBlank()) {
                     throw new IllegalArgumentException("Subflow node requires ref_id: " + node.nodeId());
                 }
-                if (asset.workflowId().equals(node.refId())
-                        || !workflows.containsKey(node.refId())) {
+                if (asset.workflowId().equals(node.refId())) {
                     throw new IllegalArgumentException("Workflow subflow target not found: " + node.refId());
                 }
+                requirePublished(node.refId(), principal);
             }
-            if (publishing && node.type() == WorkflowNodeType.HTTP_REQUEST) {
+            if (publishing
+                    && (node.type() == WorkflowNodeType.HTTP_REQUEST
+                            || node.type() == WorkflowNodeType.MESSAGE_SEND)) {
                 Object url = node.config().get("url");
                 if (url == null || String.valueOf(url).isBlank()) {
                     throw new IllegalArgumentException("HTTP node requires config.url: " + node.nodeId());
+                }
+                WorkflowHttpSecurity.validateStaticUrl(String.valueOf(url));
+                String method =
+                        String.valueOf(node.config().getOrDefault("method", "POST"))
+                                .trim()
+                                .toUpperCase();
+                boolean mutating = !List.of("GET", "HEAD", "OPTIONS").contains(method);
+                Object idempotencyKey = node.config().get("idempotency_key");
+                if (mutating
+                        && node.maxRetries() > 0
+                        && (idempotencyKey == null
+                                || String.valueOf(idempotencyKey).isBlank())) {
+                    throw new IllegalArgumentException(
+                            "Mutating HTTP node retries require config.idempotency_key: "
+                                    + node.nodeId());
+                }
+                Object headers = node.config().get("headers");
+                if (headers instanceof Map<?, ?> headerMap) {
+                    for (Map.Entry<?, ?> header : headerMap.entrySet()) {
+                        if (WorkflowHttpSecurity.sensitiveHeader(String.valueOf(header.getKey()))
+                                && !String.valueOf(header.getValue()).trim().startsWith("env:")) {
+                            throw new IllegalArgumentException(
+                                    "Sensitive Workflow HTTP headers must use env: references: "
+                                            + node.nodeId()
+                                            + "."
+                                            + header.getKey());
+                        }
+                    }
+                }
+            }
+            if (publishing && node.type() == WorkflowNodeType.FOREACH) {
+                String targetId = node.refId() == null ? "" : node.refId();
+                String targetType =
+                        String.valueOf(node.config().getOrDefault("target_type", ""))
+                                .trim()
+                                .toLowerCase();
+                if (!targetId.isBlank()
+                        && !List.of("agent", "workflow").contains(targetType)) {
+                    throw new IllegalArgumentException(
+                            "foreach target_type must be agent or workflow: " + node.nodeId());
+                }
+                if ("agent".equals(targetType)
+                        && agentRegistry.findPublished(targetId).isEmpty()) {
+                    throw new IllegalArgumentException(
+                            "foreach Agent target not found: " + targetId);
+                }
+                if ("agent".equals(targetType)) {
+                    requireReadableAgent(targetId, principal);
+                }
+                if ("workflow".equals(targetType)) {
+                    requirePublished(targetId, principal);
+                }
+            }
+            if (publishing
+                    && (node.type() == WorkflowNodeType.SKILL_INVOKE
+                            || node.type() == WorkflowNodeType.MCP_INVOKE)) {
+                String agentId =
+                        String.valueOf(node.config().getOrDefault("agent_id", "")).trim();
+                var target = agentRegistry.findPublished(agentId).orElse(null);
+                if (target == null || node.refId().isBlank()) {
+                    throw new IllegalArgumentException(
+                            node.type().value()
+                                    + " requires ref_id and config.agent_id: "
+                                    + node.nodeId());
+                }
+                requireReadableAgent(agentId, principal);
+                List<String> refs =
+                        node.type() == WorkflowNodeType.SKILL_INVOKE
+                                ? target.skillRefs()
+                                : target.mcpRefs();
+                if (!refs.contains(node.refId())) {
+                    throw new IllegalArgumentException(
+                            "Target Agent does not expose "
+                                    + node.refId()
+                                    + ": "
+                                    + node.nodeId());
+                }
+            }
+            if (publishing
+                    && (node.type() == WorkflowNodeType.DATABASE_QUERY
+                            || node.type() == WorkflowNodeType.DATABASE_WRITE)) {
+                WorkflowJdbcSecurity.validateUrl(
+                        String.valueOf(node.config().getOrDefault("jdbc_url", "")));
+                String sql = String.valueOf(node.config().getOrDefault("sql", ""));
+                if (sql.isBlank() || sql.contains("{{input}}") || sql.contains("${input}")) {
+                    throw new IllegalArgumentException(
+                            "Database node requires parameterized config.sql: " + node.nodeId());
+                }
+                WorkflowJdbcSecurity.credential(
+                        String.valueOf(node.config().getOrDefault("username", "")));
+                WorkflowJdbcSecurity.credential(
+                        String.valueOf(node.config().getOrDefault("password", "")));
+                if (node.type() == WorkflowNodeType.DATABASE_WRITE
+                        && String.valueOf(
+                                        node.config().getOrDefault("idempotency_key", ""))
+                                .isBlank()) {
+                    throw new IllegalArgumentException(
+                            "database.write requires config.idempotency_key: "
+                                    + node.nodeId());
+                }
+                if (node.type() == WorkflowNodeType.DATABASE_WRITE
+                        && !sql.contains("{{idempotency_key}}")) {
+                    throw new IllegalArgumentException(
+                            "database.write config.sql must bind {{idempotency_key}} to a"
+                                    + " uniqueness-protected column: "
+                                    + node.nodeId());
+                }
+                if (node.type() == WorkflowNodeType.DATABASE_WRITE
+                        && sql.indexOf("{{idempotency_key}}")
+                                != sql.lastIndexOf("{{idempotency_key}}")) {
+                    throw new IllegalArgumentException(
+                            "database.write config.sql must contain exactly one"
+                                    + " {{idempotency_key}} token: "
+                                    + node.nodeId());
                 }
             }
         }
@@ -418,6 +673,12 @@ public class WorkflowAssetService {
                 throw new IllegalArgumentException(message);
             }
         }
+    }
+
+    private void requireReadableAgent(
+            String agentId, PlatformAuthService.Principal principal) {
+        if (principal == null || assetAccess == null) return;
+        assetAccess.requireReadable("AGENT", agentId, principal);
     }
 
     private void validateWorkflowCycles() {
@@ -541,6 +802,11 @@ public class WorkflowAssetService {
         row.put("nodes", asset.nodes());
         row.put("edges", asset.edges());
         row.put("node_count", asset.nodes().size());
+        Integer activeVersion = activePublishedVersions.get(asset.workflowId());
+        row.put("active_published_version", activeVersion == null ? 0 : activeVersion);
+        row.put(
+                "published_version_count",
+                publishedVersions.getOrDefault(asset.workflowId(), Map.of()).size());
         return row;
     }
 
@@ -555,9 +821,12 @@ public class WorkflowAssetService {
                     workflows.put(asset.workflowId(), asset);
                 }
             }
+            loadPublishedVersions(connection);
+            loadPublications(connection);
         } catch (Exception e) {
             throw new IllegalStateException("Failed to load workflows", e);
         }
+        migrateLegacyPublishedAssets();
     }
 
     private void loadFile() {
@@ -570,6 +839,8 @@ public class WorkflowAssetService {
                     objectMapper.readValue(path.toFile(), new TypeReference<>() {});
             rows.stream().map(this::fromMap).filter(java.util.Objects::nonNull)
                     .forEach(asset -> workflows.put(asset.workflowId(), asset));
+            loadPublishedVersionsFile();
+            migrateLegacyPublishedAssets();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to load workflows: " + path, e);
         }
@@ -601,6 +872,7 @@ public class WorkflowAssetService {
         try {
             Files.createDirectories(path.getParent());
             objectMapper.writerWithDefaultPrettyPrinter().writeValue(path.toFile(), workflows.values().stream().map(this::toMap).toList());
+            persistPublishedVersionsFile();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to persist workflows: " + path, e);
         }
@@ -608,6 +880,187 @@ public class WorkflowAssetService {
 
     private Path workflowFile() {
         return storage.cacheRoot().resolve("workflows.json");
+    }
+
+    private Path workflowVersionsFile() {
+        return storage.cacheRoot().resolve("workflow-versions.json");
+    }
+
+    private void loadPublishedVersions(Connection connection) throws Exception {
+        String sql =
+                "SELECT workflow_id, version, payload FROM "
+                        + SQLITE_VERSION_TABLE
+                        + " ORDER BY workflow_id, version";
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                WorkflowAsset revision = fromMap(mapFromJson(resultSet.getString("payload")));
+                if (revision != null) {
+                    publishedVersions
+                            .computeIfAbsent(
+                                    resultSet.getString("workflow_id"),
+                                    ignored -> new ConcurrentHashMap<>())
+                            .put(resultSet.getInt("version"), revision);
+                }
+            }
+        }
+    }
+
+    private void loadPublications(Connection connection) throws Exception {
+        String sql =
+                "SELECT workflow_id, active_version FROM " + SQLITE_PUBLICATION_TABLE;
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+                ResultSet resultSet = statement.executeQuery()) {
+            while (resultSet.next()) {
+                String workflowId = resultSet.getString("workflow_id");
+                int version = resultSet.getInt("active_version");
+                if (publishedVersions.getOrDefault(workflowId, Map.of()).containsKey(version)) {
+                    activePublishedVersions.put(workflowId, version);
+                }
+            }
+        }
+    }
+
+    private void migrateLegacyPublishedAssets() {
+        for (WorkflowAsset asset : workflows.values()) {
+            if (!"PUBLISHED".equals(asset.status())
+                    || publishedVersions
+                            .getOrDefault(asset.workflowId(), Map.of())
+                            .containsKey(asset.version())) {
+                continue;
+            }
+            publishedVersions
+                    .computeIfAbsent(asset.workflowId(), ignored -> new ConcurrentHashMap<>())
+                    .put(asset.version(), asset);
+            activePublishedVersions.put(asset.workflowId(), asset.version());
+            persistPublishedState(asset);
+        }
+    }
+
+    private void persistPublishedState(WorkflowAsset published) {
+        if (!storage.isSqliteEnabled()) {
+            persistFile();
+            return;
+        }
+        String revisionSql =
+                "INSERT INTO "
+                        + SQLITE_VERSION_TABLE
+                        + " (workflow_id,version,payload,published_at) VALUES (?,?,?,?)";
+        String publicationSql =
+                "INSERT INTO "
+                        + SQLITE_PUBLICATION_TABLE
+                        + " (workflow_id,active_version,updated_at) VALUES (?,?,?)"
+                        + " ON CONFLICT(workflow_id) DO UPDATE SET active_version=excluded.active_version,"
+                        + " updated_at=excluded.updated_at";
+        String currentSql =
+                "INSERT INTO "
+                        + SQLITE_TABLE
+                        + " (workflow_id,payload,updated_at) VALUES (?,?,?)"
+                        + " ON CONFLICT(workflow_id) DO UPDATE SET payload=excluded.payload,"
+                        + " updated_at=excluded.updated_at";
+        try (Connection connection = storage.connection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement statement = connection.prepareStatement(revisionSql)) {
+                statement.setString(1, published.workflowId());
+                statement.setInt(2, published.version());
+                statement.setString(3, objectMapper.writeValueAsString(toMap(published)));
+                statement.setString(4, published.publishedAt());
+                statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement(publicationSql)) {
+                statement.setString(1, published.workflowId());
+                statement.setInt(2, published.version());
+                statement.setString(3, published.updatedAt());
+                statement.executeUpdate();
+            }
+            try (PreparedStatement statement = connection.prepareStatement(currentSql)) {
+                statement.setString(1, published.workflowId());
+                statement.setString(2, objectMapper.writeValueAsString(toMap(published)));
+                statement.setString(3, published.updatedAt());
+                statement.executeUpdate();
+            }
+            connection.commit();
+        } catch (Exception error) {
+            throw new IllegalStateException(
+                    "Failed to publish Workflow revision: "
+                            + published.workflowId()
+                            + "@"
+                            + published.version(),
+                    error);
+        }
+    }
+
+    private void persistUnpublishedState(WorkflowAsset draft) {
+        if (!storage.isSqliteEnabled()) {
+            persistFile();
+            return;
+        }
+        String currentSql =
+                "INSERT INTO "
+                        + SQLITE_TABLE
+                        + " (workflow_id,payload,updated_at) VALUES (?,?,?)"
+                        + " ON CONFLICT(workflow_id) DO UPDATE SET payload=excluded.payload,"
+                        + " updated_at=excluded.updated_at";
+        try (Connection connection = storage.connection()) {
+            connection.setAutoCommit(false);
+            deleteByWorkflowId(connection, SQLITE_PUBLICATION_TABLE, draft.workflowId());
+            try (PreparedStatement statement = connection.prepareStatement(currentSql)) {
+                statement.setString(1, draft.workflowId());
+                statement.setString(2, objectMapper.writeValueAsString(toMap(draft)));
+                statement.setString(3, draft.updatedAt());
+                statement.executeUpdate();
+            }
+            connection.commit();
+        } catch (Exception error) {
+            throw new IllegalStateException(
+                    "Failed to unpublish Workflow: " + draft.workflowId(), error);
+        }
+    }
+
+    private void loadPublishedVersionsFile() throws Exception {
+        Path path = workflowVersionsFile();
+        if (!Files.exists(path)) return;
+        List<Map<String, Object>> rows =
+                objectMapper.readValue(path.toFile(), new TypeReference<>() {});
+        for (Map<String, Object> row : rows) {
+            WorkflowAsset revision = fromMap(row);
+            if (revision == null) continue;
+            publishedVersions
+                    .computeIfAbsent(revision.workflowId(), ignored -> new ConcurrentHashMap<>())
+                    .put(revision.version(), revision);
+            if (Boolean.TRUE.equals(row.get("active"))) {
+                activePublishedVersions.put(revision.workflowId(), revision.version());
+            }
+        }
+    }
+
+    private void persistPublishedVersionsFile() throws Exception {
+        Path path = workflowVersionsFile();
+        Files.createDirectories(path.getParent());
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (Map<Integer, WorkflowAsset> revisions : publishedVersions.values()) {
+            for (WorkflowAsset revision : revisions.values()) {
+                Map<String, Object> row = toMap(revision);
+                row.put(
+                        "active",
+                        activePublishedVersions.getOrDefault(revision.workflowId(), -1)
+                                == revision.version());
+                rows.add(row);
+            }
+        }
+        rows.sort(
+                Comparator.comparing((Map<String, Object> row) -> String.valueOf(row.get("workflow_id")))
+                        .thenComparingInt(row -> integer(row, "version", 1)));
+        objectMapper.writerWithDefaultPrettyPrinter().writeValue(path.toFile(), rows);
+    }
+
+    private static void deleteByWorkflowId(
+            Connection connection, String table, String workflowId) throws Exception {
+        try (PreparedStatement statement =
+                connection.prepareStatement("DELETE FROM " + table + " WHERE workflow_id = ?")) {
+            statement.setString(1, workflowId);
+            statement.executeUpdate();
+        }
     }
 
     private WorkflowAsset fromMap(Map<String, Object> map) {

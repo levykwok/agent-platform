@@ -15,8 +15,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.agent.platform.control.PlatformStorageLayer;
+import io.agent.platform.control.WorkflowAsset;
 import io.agent.platform.runtime.AgentEventEnvelope;
 import io.agent.platform.runtime.AgentRuntime;
+import io.agent.platform.runtime.AgentRuntimeService;
 import io.agent.platform.runtime.ChatRequest;
 import io.agent.platform.runtime.OrchestrationCheckpointStore;
 import io.agent.platform.runtime.protocol.TaskContext;
@@ -206,6 +208,65 @@ class DurableAgentRunServiceTest {
                 service.succeeded("run-load-" + concurrency + "-" + index);
             }
         }
+    }
+
+    @Test
+    void suspendedWorkflowResumesWithoutTheOriginalStreamClient() {
+        PlatformStorageLayer storage = storage(tempDir);
+        OrchestrationCheckpointStore checkpoints =
+                new OrchestrationCheckpointStore(storage, "instance-a", 5_000);
+        checkpoints.initialize();
+        AgentRuntime runtime = mock(AgentRuntime.class);
+        PlatformCompatibilityState state = mock(PlatformCompatibilityState.class);
+        WorkflowAssetService workflows = mock(WorkflowAssetService.class);
+        WorkflowAsset workflow =
+                new WorkflowAsset(
+                        "approval-flow",
+                        2,
+                        "Approval",
+                        "",
+                        "platform",
+                        "manual",
+                        "PUBLISHED",
+                        Map.of(),
+                        Map.of(),
+                        List.of(),
+                        List.of(),
+                        "now",
+                        "now",
+                        "now");
+        when(workflows.requirePublishedVersion("approval-flow", 2)).thenReturn(workflow);
+        when(runtime.workflowStream(eq(workflow), any()))
+                .thenReturn(
+                        Flux.error(
+                                new AgentRuntimeService.WorkflowWaitingException(
+                                        "run-approval",
+                                        "wait-approval",
+                                        Map.of("status", "waiting"))),
+                        Flux.just(
+                                new AgentEventEnvelope(
+                                        "event-resumed",
+                                        "text_block_delta",
+                                        Instant.now().toString(),
+                                        "approval-flow",
+                                        "approved result",
+                                        Map.of())));
+        DurableAgentRunService service =
+                new DurableAgentRunService(checkpoints, runtime, state, workflows, 10);
+        ChatRequest request = request("run-approval", "workflow:approval-flow");
+        service.registerWorkflow("run-approval", workflow, request);
+
+        Throwable waiting =
+                assertThrows(
+                        Throwable.class,
+                        () -> service.workflowStream("run-approval", workflow, request).blockLast());
+        assertTrue(DurableAgentRunService.isWorkflowWaiting(waiting));
+        service.suspended("run-approval");
+        assertTrue(service.resume("run-approval"));
+
+        verify(state, timeout(5_000)).markRunRecovering("run-approval");
+        verify(state, timeout(5_000)).finishRun("run-approval", "approved result");
+        verify(runtime, times(2)).workflowStream(eq(workflow), any());
     }
 
     private static ChatRequest request(String runId, String agentId) {

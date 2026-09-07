@@ -5,6 +5,7 @@ package io.agent.platform.web;
 
 import io.agent.platform.control.AgentDefinition;
 import io.agent.platform.control.AgentDefinitionRegistry;
+import io.agent.platform.control.WorkflowAsset;
 import io.agent.platform.runtime.AgentEventEnvelope;
 import io.agent.platform.runtime.ChatRequest;
 import java.time.Instant;
@@ -38,18 +39,21 @@ public class ExternalAgentApiController {
     private final PlatformCompatibilityState state;
     private final PlatformAssetAccessService assetAccess;
     private final ExternalAccessService externalAccess;
+    private final WorkflowAssetService workflowAssets;
 
     public ExternalAgentApiController(
             AgentDefinitionRegistry registry,
             DurableAgentRunService durableRuns,
             PlatformCompatibilityState state,
             PlatformAssetAccessService assetAccess,
-            ExternalAccessService externalAccess) {
+            ExternalAccessService externalAccess,
+            WorkflowAssetService workflowAssets) {
         this.registry = registry;
         this.durableRuns = durableRuns;
         this.state = state;
         this.assetAccess = assetAccess;
         this.externalAccess = externalAccess;
+        this.workflowAssets = workflowAssets;
     }
 
     @GetMapping("/health")
@@ -77,6 +81,36 @@ public class ExternalAgentApiController {
         ExternalAccessService.ApiClient client = client(exchange);
         ensureAgent(agentId, client);
         return publicAgent(registry.findPublished(agentId).orElseThrow(), client);
+    }
+
+    @GetMapping("/workflows")
+    public Map<String, Object> workflows(ServerWebExchange exchange) {
+        ExternalAccessService.ApiClient client = client(exchange);
+        List<Map<String, Object>> items =
+                workflowAssets.list(null, "PUBLISHED", client.principal()).stream()
+                        .filter(
+                                item ->
+                                        client.principal() != null
+                                                || "PUBLIC"
+                                                        .equals(
+                                                                String.valueOf(
+                                                                        item.get("visibility"))))
+                        .filter(
+                                item ->
+                                        client.allowsAgent(
+                                                "workflow:"
+                                                        + String.valueOf(
+                                                                item.get("workflow_id"))))
+                        .map(
+                                item ->
+                                        Map.<String, Object>of(
+                                                "workflow_id", item.get("workflow_id"),
+                                                "name", item.get("name"),
+                                                "description", item.get("description"),
+                                                "version", item.get("version"),
+                                                "input_schema", item.get("input_schema")))
+                        .toList();
+        return Map.of("items", items, "count", items.size());
     }
 
     @PostMapping("/agents/{agentId}/chat")
@@ -225,6 +259,95 @@ public class ExternalAgentApiController {
                                 .build());
     }
 
+    /** Stable API-key protected entry point for external systems and inbound webhooks. */
+    @PostMapping("/workflows/{workflowId}/run")
+    public Mono<ResponseEntity<Object>> runWorkflow(
+            @PathVariable("workflowId") String workflowId,
+            @RequestBody Map<String, Object> payload,
+            ServerWebExchange exchange) {
+        ExternalAccessService.ApiClient client = client(exchange);
+        ExternalChatRequest request = parseRequest(payload);
+        ensureMessage(request);
+        WorkflowAsset workflow = ensureWorkflow(workflowId, client);
+        Invocation invocation = beginWorkflowInvocation(workflow, request, client);
+        StringBuilder answer = new StringBuilder();
+        return durableRuns.workflowStream(
+                        invocation.runId(), workflow, invocation.runtimeRequest())
+                .subscribeOn(Schedulers.boundedElastic())
+                .doOnNext(
+                        event -> {
+                            state.appendRunEventFromEnvelope(invocation.runId(), event);
+                            if (event.delta() != null) answer.append(event.delta());
+                        })
+                .then(
+                        Mono.fromSupplier(
+                                () -> {
+                                    String text = answer.toString();
+                                    state.finishRun(invocation.runId(), text);
+                                    durableRuns.succeeded(invocation.runId());
+                                    state.appendSessionMessage(
+                                            "workflow:" + workflowId,
+                                            invocation.sessionId(),
+                                            invocation.ownerUserId(),
+                                            "assistant",
+                                            text,
+                                            Map.of(
+                                                    "external", true,
+                                                    "run_id", invocation.runId(),
+                                                    "workflow_version", workflow.version()));
+                                    externalAccess.completeInvocation(
+                                            invocation.requestId(),
+                                            invocation.runId(),
+                                            "SUCCEEDED",
+                                            200,
+                                            invocation.elapsedMs(),
+                                            text,
+                                            "",
+                                            "");
+                                    return ResponseEntity.<Object>ok(
+                                            Map.of(
+                                                    "request_id", invocation.requestId(),
+                                                    "run_id", invocation.runId(),
+                                                    "workflow_id", workflowId,
+                                                    "workflow_version", workflow.version(),
+                                                    "session_id", invocation.sessionId(),
+                                                    "answer", text,
+                                                    "observe_url", observeUrl(invocation.runId())));
+                                }))
+                .onErrorResume(
+                        error -> {
+                            if (DurableAgentRunService.isWorkflowWaiting(error)) {
+                                durableRuns.suspended(invocation.runId());
+                                Map<String, Object> waiting = state.waiting(invocation.runId());
+                                externalAccess.completeInvocation(
+                                        invocation.requestId(),
+                                        invocation.runId(),
+                                        "WAITING",
+                                        202,
+                                        invocation.elapsedMs(),
+                                        "",
+                                        "waiting_user_input",
+                                        "Workflow is waiting for human approval");
+                                return Mono.just(
+                                        ResponseEntity.status(HttpStatus.ACCEPTED)
+                                                .body(
+                                                        (Object)
+                                                                Map.of(
+                                                                        "request_id", invocation.requestId(),
+                                                                        "run_id", invocation.runId(),
+                                                                        "workflow_id", workflowId,
+                                                                        "workflow_version", workflow.version(),
+                                                                        "status", "waiting_user_input",
+                                                                        "waiting", waiting,
+                                                                        "observe_url", observeUrl(invocation.runId()))));
+                            }
+                            finishFailure(invocation, error);
+                            return Mono.just(
+                                    ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                                            .body((Object) invocationError(invocation, error)));
+                        });
+    }
+
     private Invocation beginInvocation(
             String agentId,
             String mode,
@@ -284,6 +407,71 @@ public class ExternalAgentApiController {
         return invocation;
     }
 
+    private Invocation beginWorkflowInvocation(
+            WorkflowAsset workflow,
+            ExternalChatRequest request,
+            ExternalAccessService.ApiClient client) {
+        String requestId = "req_" + UUID.randomUUID().toString().replace("-", "");
+        String sessionId = request.sessionIdOrGenerated();
+        String tenantId =
+                client.principal() == null ? "external" : client.principal().orgId();
+        String ownerUserId =
+                client.principal() == null ? "external-legacy" : client.principal().userId();
+        String runtimeUserId =
+                "external:"
+                        + safeIdentity(client.keyId(), 40)
+                        + ":"
+                        + safeIdentity(request.clientUserId(), 80);
+        Map<String, Object> run =
+                state.createWorkflowRun(workflow, request.message(), ownerUserId);
+        String runId = String.valueOf(run.get("run_id"));
+        String runtimeId = "workflow:" + workflow.workflowId();
+        ChatRequest runtimeRequest =
+                new ChatRequest(
+                        tenantId,
+                        runtimeUserId,
+                        sessionId,
+                        request.message(),
+                        io.agent.platform.runtime.protocol.TaskContext.root(
+                                runId,
+                                "external:" + client.keyId(),
+                                runtimeId,
+                                null));
+        state.appendSessionMessage(runtimeId, sessionId, ownerUserId, "user", request.message());
+        Invocation invocation =
+                new Invocation(
+                        requestId,
+                        runId,
+                        sessionId,
+                        ownerUserId,
+                        runtimeRequest,
+                        System.nanoTime());
+        try {
+            externalAccess.beginInvocation(
+                    requestId,
+                    client,
+                    runtimeId,
+                    "sync",
+                    sessionId,
+                    externalAccess.safeRequest(
+                            request, runtimeUserId, tenantId, sessionId));
+            durableRuns.registerWorkflow(runId, workflow, runtimeRequest);
+        } catch (RuntimeException error) {
+            state.failRun(runId, error);
+            externalAccess.completeInvocation(
+                    requestId,
+                    runId,
+                    "FAILED",
+                    500,
+                    0,
+                    "",
+                    "run_registration_failed",
+                    message(error));
+            throw error;
+        }
+        return invocation;
+    }
+
     private void finishFailure(Invocation invocation, Throwable error) {
         boolean cancelled = DurableAgentRunService.isCancellation(error);
         if (cancelled) {
@@ -312,6 +500,28 @@ public class ExternalAgentApiController {
                 || !assetAccess.canRead("AGENT", agentId, client.principal())) {
             throw new ResponseStatusException(
                     HttpStatus.NOT_FOUND, "Published agent was not found: " + agentId);
+        }
+    }
+
+    private WorkflowAsset ensureWorkflow(
+            String workflowId, ExternalAccessService.ApiClient client) {
+        String targetId = "workflow:" + workflowId;
+        if (!client.allowsAgent(targetId)) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND, "Published workflow was not found: " + workflowId);
+        }
+        try {
+            WorkflowAsset workflow =
+                    workflowAssets.requirePublished(workflowId, client.principal());
+            if (client.principal() == null && !"PUBLIC".equals(workflow.visibility())) {
+                throw new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Published workflow was not found: " + workflowId);
+            }
+            return workflow;
+        } catch (IllegalArgumentException | PlatformAuthService.AuthException error) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND, "Published workflow was not found: " + workflowId);
         }
     }
 

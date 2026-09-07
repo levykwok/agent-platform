@@ -137,7 +137,9 @@ public class AgentCapabilityAssembler {
                 continue;
             }
             var registration = workflowToolRegistry.requireForAgent(toolId, definition.agentId());
-            var workflow = workflowAssetService.requirePublished(registration.workflowId());
+            var workflow =
+                    workflowAssetService.requirePublishedVersion(
+                            registration.workflowId(), registration.workflowVersion());
             toolkit.registration()
                     .agentTool(new WorkflowTool(workflow, registration, runtime))
                     .apply();

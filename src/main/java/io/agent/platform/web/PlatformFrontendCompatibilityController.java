@@ -465,6 +465,11 @@ public class PlatformFrontendCompatibilityController {
         readableRun(runId, requirePrincipal(request));
         Map<String, Object> item =
                 state.resumeWaiting(runId, waitingId, payload == null ? Map.of() : payload);
+        boolean continuationStarted = false;
+        if ("resumed".equals(item.get("status"))
+                && "workflow.human_approval".equals(item.get("kind"))) {
+            continuationStarted = durableRuns.resume(runId);
+        }
         return map(
                 "ok",
                 !"not_found".equals(item.get("status")),
@@ -474,6 +479,8 @@ public class PlatformFrontendCompatibilityController {
                 waitingId,
                 "status",
                 item.get("status"),
+                "continuation_started",
+                continuationStarted,
                 "item",
                 item);
     }
@@ -515,6 +522,14 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable("workflowId") String workflowId, ServerHttpRequest request) {
         Map<String, Object> item = workflowAssetService.get(workflowId, requirePrincipal(request));
         return map("item", item, "workflow", item);
+    }
+
+    @GetMapping("/workflows/{workflowId}/versions")
+    public Map<String, Object> workflowVersions(
+            @PathVariable("workflowId") String workflowId, ServerHttpRequest request) {
+        List<Map<String, Object>> items =
+                workflowAssetService.versions(workflowId, requirePrincipal(request));
+        return map("items", items, "versions", items);
     }
 
     @PostMapping("/workflows/{workflowId}/validate")
@@ -592,16 +607,23 @@ public class PlatformFrontendCompatibilityController {
 
     @GetMapping("/workflow-tools")
     public Map<String, Object> workflowTools(ServerHttpRequest request) {
-        requirePrincipal(request);
-        return map("items", workflowToolRegistry.rows(), "tools", workflowToolRegistry.rows());
+        var principal = requirePrincipal(request);
+        List<Map<String, Object>> items = workflowToolRegistry.rows(principal);
+        return map("items", items, "tools", items);
     }
 
     @PostMapping("/workflow-tools")
     public Map<String, Object> registerWorkflowTool(
             @RequestBody Map<String, Object> payload, ServerHttpRequest request) {
-        auth.requireAdmin(requirePrincipal(request));
-        var item = workflowToolRegistry.register(payload);
-        return map("ok", true, "item", item, "tool", item);
+        var principal = requirePrincipal(request);
+        PlatformRolePolicy.requireBuilder(principal);
+        var item = workflowToolRegistry.register(payload, principal);
+        Map<String, Object> row =
+                workflowToolRegistry.rows(principal).stream()
+                        .filter(value -> item.toolId().equals(value.get("tool_id")))
+                        .findFirst()
+                        .orElseThrow();
+        return map("ok", true, "item", row, "tool", row);
     }
 
     @PutMapping("/workflow-tools/{toolId}")
@@ -609,16 +631,23 @@ public class PlatformFrontendCompatibilityController {
             @PathVariable("toolId") String toolId,
             @RequestBody Map<String, Object> payload,
             ServerHttpRequest request) {
-        auth.requireAdmin(requirePrincipal(request));
-        var item = workflowToolRegistry.update(toolId, payload);
-        return map("ok", true, "item", item, "tool", item);
+        var principal = requirePrincipal(request);
+        PlatformRolePolicy.requireBuilder(principal);
+        var item = workflowToolRegistry.update(toolId, payload, principal);
+        Map<String, Object> row =
+                workflowToolRegistry.rows(principal).stream()
+                        .filter(value -> item.toolId().equals(value.get("tool_id")))
+                        .findFirst()
+                        .orElseThrow();
+        return map("ok", true, "item", row, "tool", row);
     }
 
     @DeleteMapping("/workflow-tools/{toolId}")
     public Map<String, Object> deleteWorkflowTool(
             @PathVariable("toolId") String toolId, ServerHttpRequest request) {
-        auth.requireAdmin(requirePrincipal(request));
-        workflowToolRegistry.delete(toolId);
+        var principal = requirePrincipal(request);
+        PlatformRolePolicy.requireBuilder(principal);
+        workflowToolRegistry.delete(toolId, principal);
         return map("ok", true, "tool_id", toolId);
     }
 
@@ -635,15 +664,35 @@ public class PlatformFrontendCompatibilityController {
         String query = string(body.get("query"), string(body.get("message"), ""));
         String sessionId = string(body.get("session_id"), "workflow_" + workflowId);
         String runtimeId = "workflow:" + workflowId;
-        Map<String, Object> run = state.createRun(runtimeId, query, userId);
+        Map<String, Object> run = state.createWorkflowRun(workflow, query, userId);
         String runId = string(run.get("run_id"), "");
         state.appendSessionMessage(runtimeId, sessionId, userId, "user", query);
-        return runtime.workflow(workflow, new ChatRequest(orgId, userId, sessionId, query))
+        ChatRequest chatRequest =
+                new ChatRequest(
+                        orgId,
+                        userId,
+                        sessionId,
+                        query,
+                        TaskContext.root(
+                                runId,
+                                "user:" + userId,
+                                "workflow:" + workflowId,
+                                null));
+        durableRuns.registerWorkflow(runId, workflow, chatRequest);
+        StringBuilder answerBuffer = new StringBuilder();
+        return durableRuns.workflowStream(runId, workflow, chatRequest)
                 .subscribeOn(Schedulers.boundedElastic())
-                .map(
-                        response -> {
-                            String answer = string(response.text(), "");
+                .doOnNext(
+                        event -> {
+                            state.appendRunEventFromEnvelope(runId, event);
+                            if (event.delta() != null) answerBuffer.append(event.delta());
+                        })
+                .then(
+                        Mono.fromSupplier(
+                                () -> {
+                            String answer = answerBuffer.toString();
                             Map<String, Object> finished = state.finishRun(runId, answer);
+                            durableRuns.succeeded(runId);
                             state.appendSessionMessage(
                                     runtimeId, sessionId, userId, "assistant", answer);
                             return map(
@@ -657,12 +706,36 @@ public class PlatformFrontendCompatibilityController {
                                     finished.get("status"),
                                     "answer",
                                     answer,
-                                    "result",
-                                    map("answer", answer, "text", answer));
-                        })
+                                    "result", map("answer", answer, "text", answer));
+                        }))
                 .onErrorResume(
                         error -> {
-                            Map<String, Object> failed = state.failRun(runId, error);
+                            if (DurableAgentRunService.isWorkflowWaiting(error)) {
+                                durableRuns.suspended(runId);
+                                Map<String, Object> waiting = state.waiting(runId);
+                                return Mono.just(
+                                        map(
+                                                "ok",
+                                                true,
+                                                "run_id",
+                                                runId,
+                                                "status",
+                                                "waiting_user_input",
+                                                "waiting",
+                                                waiting,
+                                                "run",
+                                                state.run(runId)));
+                            }
+                            boolean cancelled = DurableAgentRunService.isCancellation(error);
+                            boolean leaseLost = DurableAgentRunService.isLeaseLost(error);
+                            Map<String, Object> failed =
+                                    cancelled
+                                            ? state.cancelRun(runId, string(error.getMessage(), "运行已取消"))
+                                            : leaseLost
+                                                    ? state.markRunRecovering(runId)
+                                                    : state.failRun(runId, error);
+                            if (cancelled) durableRuns.cancelled(runId);
+                            else if (!leaseLost) durableRuns.failed(runId);
                             String message = string(error.getMessage(), "执行失败");
                             return Mono.just(
                                     map(
@@ -694,9 +767,21 @@ public class PlatformFrontendCompatibilityController {
         String query = string(body.get("query"), string(body.get("message"), ""));
         String sessionId = string(body.get("session_id"), "workflow_" + workflowId);
         String runtimeId = "workflow:" + workflowId;
-        Map<String, Object> run = state.createRun(runtimeId, query, userId);
+        Map<String, Object> run = state.createWorkflowRun(workflow, query, userId);
         String runId = string(run.get("run_id"), "");
         state.appendSessionMessage(runtimeId, sessionId, userId, "user", query);
+        ChatRequest chatRequest =
+                new ChatRequest(
+                        orgId,
+                        userId,
+                        sessionId,
+                        query,
+                        TaskContext.root(
+                                runId,
+                                "user:" + userId,
+                                "workflow:" + workflowId,
+                                null));
+        durableRuns.registerWorkflow(runId, workflow, chatRequest);
         AtomicReference<StringBuilder> answer = new AtomicReference<>(new StringBuilder());
         return Flux.concat(
                         Flux.just(
@@ -715,9 +800,7 @@ public class PlatformFrontendCompatibilityController {
                                                 workflow.name(),
                                                 "run_id",
                                                 runId))),
-                        runtime.workflowStream(
-                                        workflow,
-                                        new ChatRequest(orgId, userId, sessionId, query))
+                        durableRuns.workflowStream(runId, workflow, chatRequest)
                                 .map(
                                         event -> {
                                             state.appendRunEventFromEnvelope(runId, event);
@@ -728,6 +811,7 @@ public class PlatformFrontendCompatibilityController {
                                 () -> {
                                     String text = answer.get().toString();
                                     Map<String, Object> finished = state.finishRun(runId, text);
+                                    durableRuns.succeeded(runId);
                                     state.appendSessionMessage(
                                             runtimeId, sessionId, userId, "assistant", text);
                                     return sse(
@@ -746,7 +830,32 @@ public class PlatformFrontendCompatibilityController {
                                 }))
                 .onErrorResume(
                         error -> {
-                            Map<String, Object> failed = state.failRun(runId, error);
+                            if (DurableAgentRunService.isWorkflowWaiting(error)) {
+                                durableRuns.suspended(runId);
+                                Map<String, Object> waiting = state.waiting(runId);
+                                return Flux.just(
+                                        sse(
+                                                "waiting_user_input",
+                                                map(
+                                                        "type",
+                                                        "waiting_user_input",
+                                                        "run_id",
+                                                        runId,
+                                                        "status",
+                                                        "waiting_user_input",
+                                                        "waiting",
+                                                        waiting)));
+                            }
+                            boolean cancelled = DurableAgentRunService.isCancellation(error);
+                            boolean leaseLost = DurableAgentRunService.isLeaseLost(error);
+                            Map<String, Object> failed =
+                                    cancelled
+                                            ? state.cancelRun(runId, string(error.getMessage(), "运行已取消"))
+                                            : leaseLost
+                                                    ? state.markRunRecovering(runId)
+                                                    : state.failRun(runId, error);
+                            if (cancelled) durableRuns.cancelled(runId);
+                            else if (!leaseLost) durableRuns.failed(runId);
                             String message = string(error.getMessage(), "执行失败");
                             return Flux.just(
                                     sse(
@@ -766,7 +875,8 @@ public class PlatformFrontendCompatibilityController {
     }
 
     @GetMapping("/flows")
-    public Map<String, Object> flows() {
+    public Map<String, Object> flows(ServerHttpRequest request) {
+        PlatformAuthService.Principal principal = requirePrincipal(request);
         List<Map<String, Object>> rows = new ArrayList<>();
         rows.add(
                 map(
@@ -786,7 +896,7 @@ public class PlatformFrontendCompatibilityController {
                                 false),
                         "nodes",
                         List.of()));
-        workflowAssetService.list(null, "PUBLISHED").forEach(row -> {
+        workflowAssetService.list(null, "PUBLISHED", principal).forEach(row -> {
             Map<String, Object> flow = new LinkedHashMap<>(row);
             flow.put("flow_id", row.get("workflow_id"));
             flow.put("id", row.get("workflow_id"));
@@ -806,7 +916,7 @@ public class PlatformFrontendCompatibilityController {
         userCapabilities.tools(current).stream()
                 .map(tool -> userCapabilities.enrichToolRow(tool, current))
                 .forEach(rows::add);
-        workflowToolRegistry.rows().forEach(rows::add);
+        workflowToolRegistry.rows(current).forEach(rows::add);
         rows.replaceAll(
                 row ->
                         toolGovernance.enrichGlobal(

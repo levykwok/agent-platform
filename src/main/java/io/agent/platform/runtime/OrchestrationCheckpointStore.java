@@ -264,7 +264,9 @@ public class OrchestrationCheckpointStore {
             MutableRun run = memoryRuns.get(runId);
             if (run == null) return false;
             synchronized (run) {
-                if (!("RUNNING".equals(run.status) || "RECOVERING".equals(run.status))) {
+                if (!("RUNNING".equals(run.status)
+                        || "RECOVERING".equals(run.status)
+                        || "WAITING".equals(run.status))) {
                     return false;
                 }
                 run.status = "CANCEL_REQUESTED";
@@ -276,7 +278,7 @@ public class OrchestrationCheckpointStore {
                         "UPDATE "
                                 + RUNS_TABLE
                                 + " SET status='CANCEL_REQUESTED', version=version+1, updated_at=?"
-                                + " WHERE run_id=? AND status IN ('RUNNING','RECOVERING')",
+                                + " WHERE run_id=? AND status IN ('RUNNING','RECOVERING','WAITING')",
                         statement -> {
                             statement.setString(1, Instant.now().toString());
                             statement.setString(2, runId);
@@ -286,6 +288,63 @@ public class OrchestrationCheckpointStore {
 
     public boolean cancellationRequested(String runId) {
         return "CANCEL_REQUESTED".equals(status(runId));
+    }
+
+    public boolean suspend(String runId) {
+        if (blank(runId)) return false;
+        if (!storage.isSqliteEnabled()) {
+            MutableRun run = memoryRuns.get(runId);
+            if (run == null) return false;
+            synchronized (run) {
+                if (!instanceId.equals(run.ownerId) || !"RUNNING".equals(run.status)) {
+                    return false;
+                }
+                run.status = "WAITING";
+                run.leaseUntil = 0;
+                run.version++;
+                return true;
+            }
+        }
+        return execute(
+                        "UPDATE "
+                                + RUNS_TABLE
+                                + " SET status='WAITING', lease_until=0, version=version+1, updated_at=?"
+                                + " WHERE run_id=? AND owner_id=? AND status='RUNNING'",
+                        statement -> {
+                            statement.setString(1, Instant.now().toString());
+                            statement.setString(2, runId);
+                            statement.setString(3, instanceId);
+                        })
+                == 1;
+    }
+
+    public boolean resume(String runId) {
+        if (blank(runId)) return false;
+        long now = System.currentTimeMillis();
+        if (!storage.isSqliteEnabled()) {
+            MutableRun run = memoryRuns.get(runId);
+            if (run == null) return false;
+            synchronized (run) {
+                if (!"WAITING".equals(run.status)) return false;
+                run.ownerId = instanceId;
+                run.status = "RUNNING";
+                run.leaseUntil = now + leaseMs;
+                run.version++;
+                return true;
+            }
+        }
+        return execute(
+                        "UPDATE "
+                                + RUNS_TABLE
+                                + " SET owner_id=?, status='RUNNING', lease_until=?, version=version+1, updated_at=?"
+                                + " WHERE run_id=? AND status='WAITING'",
+                        statement -> {
+                            statement.setString(1, instanceId);
+                            statement.setLong(2, now + leaseMs);
+                            statement.setString(3, Instant.now().toString());
+                            statement.setString(4, runId);
+                        })
+                == 1;
     }
 
     public boolean terminal(String runId, String status) {
@@ -298,6 +357,7 @@ public class OrchestrationCheckpointStore {
             synchronized (run) {
                 if (!instanceId.equals(run.ownerId)
                         || !("RUNNING".equals(run.status)
+                                || "WAITING".equals(run.status)
                                 || "CANCEL_REQUESTED".equals(run.status))) {
                     return false;
                 }
@@ -313,7 +373,7 @@ public class OrchestrationCheckpointStore {
                                             + RUNS_TABLE
                                             + " SET status=?, lease_until=0, version=version+1, updated_at=?"
                                             + " WHERE run_id=? AND owner_id=?"
-                                            + " AND status IN ('RUNNING','CANCEL_REQUESTED')",
+                                            + " AND status IN ('RUNNING','WAITING','CANCEL_REQUESTED')",
                                     statement -> {
                                         statement.setString(1, terminalStatus);
                                         statement.setString(2, Instant.now().toString());

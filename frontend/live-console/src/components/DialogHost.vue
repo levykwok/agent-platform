@@ -32,7 +32,7 @@ function confirm() {
 </template>
 
 <style scoped>
-.dialog-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; z-index: 1100; }
+.dialog-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: flex; align-items: center; justify-content: center; z-index: 2000; }
 .dialog-card { background: #fff; border-radius: 12px; padding: 20px; width: min(420px, 92vw); box-shadow: 0 24px 60px rgba(15,23,42,.25); display: flex; flex-direction: column; gap: 12px; }
 .dialog-title { font-size: 15px; font-weight: 700; }
 .dialog-message { font-size: 13px; color: var(--muted); line-height: 1.6; }

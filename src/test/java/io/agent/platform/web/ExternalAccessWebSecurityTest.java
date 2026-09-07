@@ -6,6 +6,7 @@ package io.agent.platform.web;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -13,12 +14,15 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import io.agent.platform.control.PlatformStorageLayer;
+import io.agent.platform.control.AgentDefinitionRegistry;
+import io.agent.platform.control.WorkflowAsset;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -28,6 +32,8 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.server.ServerWebExchange;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
 class ExternalAccessWebSecurityTest {
@@ -243,6 +249,94 @@ class ExternalAccessWebSecurityTest {
         assertNull(service.authenticate(String.valueOf(keyB.get("secret"))));
     }
 
+    @Test
+    void workflowEndpointUsesAnExplicitWorkflowScopedGrant() {
+        Map<String, Object> created =
+                service.createKey(
+                        ownerA,
+                        "Workflow client",
+                        "",
+                        List.of("workflow:approved-flow"),
+                        List.of("chat"),
+                        10);
+        String secret = String.valueOf(created.get("secret"));
+        WebTestClient client =
+                WebTestClient.bindToController(new ExternalProbeController())
+                        .webFilter(new ExternalApiKeyWebFilter("true", "", service))
+                        .build();
+
+        client.post()
+                .uri("/api/v1/workflows/denied-flow/run")
+                .header("X-API-Key", secret)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("message", "denied"))
+                .exchange()
+                .expectStatus()
+                .isForbidden();
+        client.post()
+                .uri("/api/v1/workflows/approved-flow/run")
+                .header("X-API-Key", secret)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("message", "allowed"))
+                .exchange()
+                .expectStatus()
+                .isOk();
+    }
+
+    @Test
+    void legacyExternalKeysCannotInvokePrivateWorkflows() {
+        WorkflowAssetService workflows = mock(WorkflowAssetService.class);
+        WorkflowAsset privateWorkflow =
+                new WorkflowAsset(
+                        "private-flow",
+                        1,
+                        "Private",
+                        "",
+                        "platform",
+                        "manual",
+                        "PUBLISHED",
+                        Map.of(),
+                        Map.of(),
+                        List.of(),
+                        List.of(),
+                        "now",
+                        "now",
+                        "now",
+                        "USER",
+                        "owner",
+                        "org-a",
+                        "owner",
+                        "PRIVATE");
+        when(workflows.requirePublished(
+                        "private-flow", (PlatformAuthService.Principal) null))
+                .thenReturn(privateWorkflow);
+        ExternalAgentApiController controller =
+                new ExternalAgentApiController(
+                        mock(AgentDefinitionRegistry.class),
+                        mock(DurableAgentRunService.class),
+                        mock(PlatformCompatibilityState.class),
+                        mock(PlatformAssetAccessService.class),
+                        mock(ExternalAccessService.class),
+                        workflows);
+        ExternalAccessService.ApiClient legacy =
+                new ExternalAccessService.ApiClient(
+                        "legacy", "Legacy", "legacy", null, false, Set.of(), Set.of(), 0);
+        ServerWebExchange exchange = mock(ServerWebExchange.class);
+        doAnswer(invocation -> legacy)
+                .when(exchange)
+                .getAttribute(ExternalApiKeyWebFilter.CLIENT_ATTRIBUTE);
+
+        ResponseStatusException error =
+                assertThrows(
+                        ResponseStatusException.class,
+                        () ->
+                                controller.runWorkflow(
+                                        "private-flow",
+                                        Map.of("message", "run"),
+                                        exchange));
+        assertEquals(404, error.getStatusCode().value());
+    }
+
     private static void initializeAccounts(PlatformStorageLayer storage) throws Exception {
         storage.initializeSqliteSchema(
                 "CREATE TABLE platform_users (user_id TEXT PRIMARY KEY,email TEXT,display_name TEXT,status TEXT)",
@@ -305,6 +399,11 @@ class ExternalAccessWebSecurityTest {
         @PostMapping("/agents/{agentId}/chat/stream")
         Map<String, Object> stream(@PathVariable("agentId") String agentId) {
             return Map.of("agent_id", agentId, "ok", true);
+        }
+
+        @PostMapping("/workflows/{workflowId}/run")
+        Map<String, Object> workflow(@PathVariable("workflowId") String workflowId) {
+            return Map.of("workflow_id", workflowId, "ok", true);
         }
     }
 }

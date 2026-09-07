@@ -74,6 +74,27 @@ class OrchestrationCheckpointStoreTest {
         assertFalse(store.requestCancel("run-cancel"));
     }
 
+    @Test
+    void suspendedRunIsNotRecoveredUntilItIsExplicitlyResumed() {
+        PlatformStorageLayer storage = storage(tempDir);
+        OrchestrationCheckpointStore store =
+                new OrchestrationCheckpointStore(storage, "instance-a", 5_000);
+        store.initialize();
+
+        store.register("run-wait", Map.of("runtime_kind", "workflow"));
+        assertTrue(store.acquire("run-wait"));
+        assertTrue(store.suspend("run-wait"));
+        assertTrue(store.claimRecoverable(10).isEmpty());
+        assertTrue(store.resume("run-wait"));
+        assertTrue(
+                store.save(
+                        "run-wait",
+                        "workflow:flow:v1:node:approval",
+                        "NODE_COMPLETED",
+                        Map.of("approved", true)));
+        assertTrue(store.terminal("run-wait", "SUCCEEDED"));
+    }
+
     private static PlatformStorageLayer storage(Path workspace) {
         return new PlatformStorageLayer(
                 workspace.toString(),

@@ -24,6 +24,7 @@ import io.agent.platform.control.ToolSpec;
 import io.agent.platform.control.PipelineStep;
 import io.agent.platform.control.PipelineTransition;
 import io.agent.platform.control.YamlAgentDefinitionRegistry;
+import io.agent.platform.control.WorkflowAsset;
 import io.agent.platform.runtime.AgentEventEnvelope;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -2589,13 +2590,94 @@ public class PlatformCompatibilityState {
         return run;
     }
 
+    public Map<String, Object> createWorkflowRun(
+            WorkflowAsset workflow, String query, String userId) {
+        String runId = "run_" + UUID.randomUUID().toString().replace("-", "");
+        Instant now = Instant.now();
+        String runtimeId = "workflow:" + workflow.workflowId();
+        Map<String, Object> snapshot = new LinkedHashMap<>(workflow.metadata());
+        snapshot.put("input_schema", workflow.inputSchema());
+        snapshot.put("output_schema", workflow.outputSchema());
+        snapshot.put("nodes", workflow.nodes());
+        snapshot.put("edges", workflow.edges());
+        Map<String, Object> run =
+                row(
+                        "run_id",
+                        runId,
+                        "agent_id",
+                        runtimeId,
+                        "runtime_kind",
+                        "workflow",
+                        "workflow_id",
+                        workflow.workflowId(),
+                        "workflow_version",
+                        workflow.version(),
+                        "query",
+                        query,
+                        "status",
+                        "running",
+                        "user_id",
+                        userId,
+                        "trace_id",
+                        "trace_" + runId,
+                        "created_at",
+                        now.toString(),
+                        "started_at",
+                        now.toString(),
+                        "finished_at",
+                        "",
+                        "spec_key",
+                        "workflow_runtime");
+        run.put("workflow_snapshot", snapshot);
+        run.put("snapshot_created_at", now.toString());
+        List<Map<String, Object>> steps = new ArrayList<>();
+        steps.add(
+                row(
+                        "step_id", "receive",
+                        "step_type", "receive_input",
+                        "status", "succeeded",
+                        "duration_ms", 1));
+        for (var node : workflow.nodes()) {
+            steps.add(
+                    row(
+                            "step_id", node.nodeId(),
+                            "step_type", node.type().value(),
+                            "status", "pending",
+                            "duration_ms", 0));
+        }
+        steps.add(
+                row(
+                        "step_id", "respond",
+                        "step_type", "workflow_output",
+                        "status", "pending",
+                        "duration_ms", 0));
+        List<Map<String, Object>> events =
+                List.of(
+                        event(
+                                runId,
+                                "run.started",
+                                row(
+                                        "stage", "workflow_runtime",
+                                        "workflow_id", workflow.workflowId(),
+                                        "workflow_version", workflow.version())));
+        runs.put(runId, run);
+        runSteps.put(runId, steps);
+        runEvents.put(runId, new ArrayList<>(events));
+        persistRun(run);
+        steps.forEach(step -> persistRunStep(runId, step));
+        events.forEach(this::persistRunEvent);
+        return run;
+    }
+
     public Map<String, Object> requestRunCancellation(String runId) {
         Map<String, Object> current = runs.get(runId);
         if (current == null) {
             return row("run_id", runId, "status", "unknown");
         }
         String status = String.valueOf(current.getOrDefault("status", ""));
-        if (!"running".equals(status) && !"recovering".equals(status)) {
+        if (!"running".equals(status)
+                && !"recovering".equals(status)
+                && !"waiting".equals(status)) {
             return current;
         }
         Map<String, Object> run = new LinkedHashMap<>(current);
@@ -3209,6 +3291,7 @@ public class PlatformCompatibilityState {
         payload.putIfAbsent("agent_id", event.source());
         payload.putIfAbsent("source", event.source());
         normalizeToolSkillPayload(payload);
+        updateWorkflowRunStep(runId, event.type(), payload);
         if (isWaitingEvent(event.type(), payload)) {
             String waitingId =
                     string(
@@ -3230,6 +3313,30 @@ public class PlatformCompatibilityState {
                         ? "agent_event"
                         : event.type().toLowerCase(),
                 payload);
+    }
+
+    private void updateWorkflowRunStep(
+            String runId, String eventType, Map<String, Object> payload) {
+        String type = eventType == null ? "" : eventType.toLowerCase();
+        if (!type.startsWith("workflow_node_")) return;
+        String nodeId = string(payload, "node_id", "");
+        if (nodeId.isBlank()) return;
+        List<Map<String, Object>> steps = runSteps.get(runId);
+        if (steps == null) return;
+        for (Map<String, Object> step : steps) {
+            if (!nodeId.equals(String.valueOf(step.get("step_id")))) continue;
+            if (type.endsWith("_start")) step.put("status", "running");
+            else if (type.endsWith("_complete")) step.put("status", "succeeded");
+            else if (type.endsWith("_failed")) step.put("status", "failed");
+            if (payload.get("duration_ms") instanceof Number duration) {
+                step.put("duration_ms", duration.longValue());
+            }
+            if (payload.containsKey("summary")) step.put("summary", payload.get("summary"));
+            if (payload.containsKey("input")) step.put("input", payload.get("input"));
+            if (payload.containsKey("output")) step.put("output", payload.get("output"));
+            persistRunStep(runId, step);
+            return;
+        }
     }
 
     private static boolean isWaitingEvent(String eventType, Map<String, Object> payload) {
@@ -3284,12 +3391,21 @@ public class PlatformCompatibilityState {
         return updateWaiting(runId, waitingId, "rejected", payload);
     }
 
-    private Map<String, Object> updateWaiting(
+    private synchronized Map<String, Object> updateWaiting(
             String runId, String waitingId, String status, Map<String, Object> payload) {
         Map<String, Object> existing = waitings.get(runId);
         if (existing == null
                 || !waitingId.equals(String.valueOf(existing.getOrDefault("waiting_id", "")))) {
             return row("run_id", runId, "waiting_id", waitingId, "status", "not_found");
+        }
+        String existingStatus = String.valueOf(existing.getOrDefault("status", ""));
+        if ("resumed".equals(existingStatus) || "rejected".equals(existingStatus)) {
+            return existing;
+        }
+        Map<String, Object> run = runs.get(runId);
+        if (run == null
+                || !"waiting".equals(String.valueOf(run.getOrDefault("status", "")))) {
+            return row("run_id", runId, "waiting_id", waitingId, "status", "not_active");
         }
         Map<String, Object> item = new LinkedHashMap<>(existing);
         if (payload != null) {

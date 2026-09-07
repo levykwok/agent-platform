@@ -10,6 +10,8 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Properties;
+import org.sqlite.SQLiteConfig;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -22,6 +24,7 @@ public class PlatformStorageLayer {
     private final String sqliteSessionTablePrefix;
     private final String mcpDiscoveryCacheFile;
     private final Path workspace;
+    private final Properties sqliteConnectionProperties;
 
     public PlatformStorageLayer(
             @Value("${agent.platform.workspace}") String workspace,
@@ -41,6 +44,11 @@ public class PlatformStorageLayer {
         }
         this.persistenceMode = PersistenceMode.from(mode);
         this.sqliteUrl = effectiveSqliteUrl(sqliteUrl);
+        SQLiteConfig sqliteConfig = new SQLiteConfig();
+        sqliteConfig.setBusyTimeout(5_000);
+        sqliteConfig.setJournalMode(SQLiteConfig.JournalMode.WAL);
+        sqliteConfig.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
+        this.sqliteConnectionProperties = sqliteConfig.toProperties();
         this.sqliteConfigTable = sanitizeName(sqliteConfigTable, "platform_config");
         this.sqliteSessionTablePrefix =
                 sanitizeName(sqliteSessionTablePrefix, "platform_")
@@ -192,7 +200,7 @@ public class PlatformStorageLayer {
     }
 
     public Connection connection() throws SQLException {
-        return DriverManager.getConnection(sqliteUrl);
+        return DriverManager.getConnection(sqliteUrl, sqliteConnectionProperties);
     }
 
     public void initializeSqliteSchema(String... ddl) {

@@ -127,6 +127,13 @@ public class ExternalApiKeyWebFilter implements WebFilter {
     private static RequestTarget requestTarget(ServerWebExchange exchange) {
         String path = exchange.getRequest().getPath().value();
         String prefix = "/api/v1/agents/";
+        if (path.startsWith("/api/v1/workflows/") && path.endsWith("/run")) {
+            String workflowId =
+                    path.substring(
+                            "/api/v1/workflows/".length(),
+                            path.length() - "/run".length());
+            return new RequestTarget("workflow:" + workflowId, "chat");
+        }
         if (!path.startsWith(prefix)) return new RequestTarget("", "read");
         String suffix = path.substring(prefix.length());
         if (suffix.endsWith("/chat/stream")) {

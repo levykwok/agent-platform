@@ -109,7 +109,7 @@ Workflow 必须有且只能有一个 `workflow.input` 和一个 `workflow.output
 1. 只能注册 `PUBLISHED` Workflow；
 2. 注册时固定 Workflow 版本；
 3. Workflow 发布新版本后，旧注册不自动漂移，必须显式更新注册版本；
-4. `allowed_agents` 非空时，只允许其中的 Agent 绑定该工具；
+4. 非平台管理员必须显式填写 `allowed_agents`，且只能绑定自己有权管理的 Agent；平台管理员留空时表示允许任意显式引用该工具的 Agent；
 5. Agent 只保存 `tool_id`，不保存 `workflow_id`、节点或边；
 6. Agent 运行时只通过注册记录解析 Workflow；
 7. Workflow 被取消发布或版本不匹配时，工具不可用并返回明确错误。
@@ -195,3 +195,47 @@ Agent 的工具区域显示已注册的 Workflow Tool，保存时只写入：
 - 独立 Workflow 的 `WorkflowNode` 不包含 `transitions`；
 - 两套模型不做转换桥接，也不按数组顺序推断画布连线；
 - Workflow Tool 是二者之间唯一的反向调用注册边界。
+
+## 9. 已实现的发布、运行与恢复约束
+
+- `platform_workflows` 保存可编辑草稿；`platform_workflow_versions` 保存不可变发布快照；`platform_workflow_publications` 保存唯一活动版本指针。
+- 编辑已发布 Workflow 只产生草稿，不改变线上活动版本；再次发布递增版本号。取消发布只删除活动指针，不删除历史快照。
+- Workflow Tool 与定时触发器都固定 `workflow_version`，新版本发布后不会自动漂移；Workflow 整体取消发布后，固定版本也不可再发起新调用。
+- 独立运行使用持久 Run、节点 Step、SSE 事件、租约和节点级 checkpoint。并行分支恢复时跳过已提交节点，租约丢失后的 checkpoint 写入会被 fencing。
+- `human.approval` 到达后把 Run 持久化为 `WAITING` 并释放执行资源；审批接口恢复后由服务端重新取得租约继续执行，不依赖原 SSE 客户端仍在线。
+- 调用链保留 tenant、user、session、root task、parent task 和深度；Workflow Tool 不创建硬编码平台身份。
+
+## 10. 节点与安全策略
+
+当前运行时支持边界、返回、Agent/ReAct、LLM、HTTP、数据库查询/写入、数据转换、消息发送、Skill、MCP、子流程、条件、Foreach、并行/汇聚和人工审批节点。
+
+- HTTP 仅允许 `http/https`，拒绝 URL 凭据、localhost、私网/链路本地/组播地址；敏感 Header 必须使用 `env:` 引用。写请求重试必须配置幂等键。
+- JDBC URL 必须命中 `AGENT_PLATFORM_WORKFLOW_JDBC_ALLOW_PREFIXES`；用户名和密码必须使用 `env:` 引用；SQL 仅通过 PreparedStatement 绑定参数。
+- `database.write` SQL 必须恰好包含一次 `{{idempotency_key}}`，运行时替换为绑定参数，并使用 root run + node 生成稳定键。目标表应对对应列建立唯一约束。
+- `skill.invoke` / `mcp.invoke` 会把目标 Agent 投影成 SINGLE 模式，移除普通 Tool、其他 Skill/MCP 和原编排，只暴露被选择的能力。
+- 子 Workflow、Workflow Tool 和 Foreach-Workflow 在发布/注册时固定版本；运行时维护调用栈并拒绝递归环。
+- 发布 Workflow 时按当前用户校验 Agent、Skill/MCP 宿主 Agent 与子 Workflow 的可见性，Workflow Tool 绑定还会校验目标 Agent 的管理权限，避免跨租户间接调用私有资产。
+- 无人值守定时触发器不接受包含 `human.approval` 的 Workflow；此类流程应使用手动或 API 触发。
+
+## 11. 触发入口
+
+```text
+POST /platform/frontend/workflows/{workflowId}/run
+POST /platform/frontend/workflows/{workflowId}/run/stream
+
+GET  /api/v1/workflows
+POST /api/v1/workflows/{workflowId}/run
+```
+
+`/api/v1` 使用现有 API Key 认证、限流与审计。Workflow 必须在 Key 的 `allowed_agent_ids` 中显式写为 `workflow:{workflowId}`；空白名单只放行可见 Agent，不隐式开放 Workflow。外部调用返回 `request_id`、`run_id` 和运行观测地址。定时触发器复用 `/api/scheduled-tasks`，创建请求使用 `workflow_id` 代替 `agent_id`。
+
+## 12. 内置公共示例
+
+- `workflow-demo-transform`：输入 → 数据转换 → 输出；无模型依赖。
+- `workflow-demo-parallel`：输入 → 并行分叉 → 两个数据转换 → 汇聚 → 输出；无模型依赖。
+
+示例只在 ID 不存在时安装，不覆盖用户或管理员后续修改。可通过 `agent.platform.workflow.demo.enabled=false` 关闭自动安装。
+
+## 13. SQLite 性能与迁移约束
+
+平台连接启用 SQLite WAL、`synchronous=NORMAL` 和 5 秒 busy timeout，降低 Workflow 事件、Step 与 checkpoint 高频落库时的写锁等待。WAL 模式运行期间，最新事务可能仍位于同目录的 `-wal` 文件中，因此不能只热拷贝主 `.db` 文件。迁移或备份应停止服务后再复制数据库，或使用 SQLite 在线备份能力并校验备份；恢复时数据库及其工作区资产仍须保持同一租户边界。

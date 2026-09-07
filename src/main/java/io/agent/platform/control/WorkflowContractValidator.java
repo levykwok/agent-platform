@@ -32,9 +32,6 @@ public final class WorkflowContractValidator {
             }
         }
         List<WorkflowEdge> safeEdges = edges == null ? List.of() : edges;
-        if (safeEdges.isEmpty()) {
-            return result(diagnostics);
-        }
         Map<String, WorkflowEdge> edgeById = new HashMap<>();
         Map<String, Set<String>> incoming = new HashMap<>();
         Map<String, Set<String>> graph = new HashMap<>();
@@ -42,7 +39,9 @@ public final class WorkflowContractValidator {
             validateEdge(edge, nodeById, edgeById, incoming, graph, diagnostics);
         }
         validateRequiredInputs(safeNodes, incoming, diagnostics);
+        validateInputCardinality(safeNodes, incoming, diagnostics);
         validateCycles(graph, diagnostics);
+        validateTopology(safeNodes, safeEdges, nodeById, graph, diagnostics);
         return result(diagnostics);
     }
 
@@ -107,6 +106,31 @@ public final class WorkflowContractValidator {
         }
     }
 
+    private void validateInputCardinality(
+            List<WorkflowNode> nodes,
+            Map<String, Set<String>> incoming,
+            List<WorkflowDiagnostic> diagnostics) {
+        for (WorkflowNode node : nodes) {
+            if (node == null) continue;
+            for (WorkflowPort port : node.inputPorts()) {
+                int count =
+                        incoming.getOrDefault(node.nodeId() + ":" + port.portId(), Set.of())
+                                .size();
+                if (count > 1 && !"many".equals(port.cardinality())) {
+                    diagnostics.add(
+                            error(
+                                    "INPUT_CARDINALITY_EXCEEDED",
+                                    node.nodeId(),
+                                    port.portId(),
+                                    "",
+                                    "Input port accepts one value but has "
+                                            + count
+                                            + " incoming data edges"));
+                }
+            }
+        }
+    }
+
     private void validateContractCompatibility(WorkflowPort source, WorkflowPort target, WorkflowEdge edge, List<WorkflowDiagnostic> diagnostics) {
         String sourceRef = source.contractRef();
         String targetRef = target.contractRef();
@@ -156,6 +180,236 @@ public final class WorkflowContractValidator {
         }
     }
 
+    private void validateTopology(
+            List<WorkflowNode> nodes,
+            List<WorkflowEdge> edges,
+            Map<String, WorkflowNode> nodeById,
+            Map<String, Set<String>> graph,
+            List<WorkflowDiagnostic> diagnostics) {
+        List<WorkflowNode> inputs =
+                nodes.stream().filter(node -> node != null && node.type() == WorkflowNodeType.INPUT).toList();
+        List<WorkflowNode> outputs =
+                nodes.stream().filter(node -> node != null && node.type() == WorkflowNodeType.OUTPUT).toList();
+        if (inputs.size() != 1 || outputs.size() != 1) return;
+        String inputId = inputs.get(0).nodeId();
+        String outputId = outputs.get(0).nodeId();
+        Map<String, Integer> incomingCount = new HashMap<>();
+        Map<String, Integer> outgoingCount = new HashMap<>();
+        Map<String, Set<String>> reverse = new HashMap<>();
+        for (WorkflowEdge edge : edges) {
+            if (edge == null || edge.from() == null || edge.to() == null) continue;
+            if (!nodeById.containsKey(edge.from().nodeId())
+                    || !nodeById.containsKey(edge.to().nodeId())) continue;
+            outgoingCount.merge(edge.from().nodeId(), 1, Integer::sum);
+            incomingCount.merge(edge.to().nodeId(), 1, Integer::sum);
+            reverse.computeIfAbsent(edge.to().nodeId(), ignored -> new HashSet<>())
+                    .add(edge.from().nodeId());
+            if (outputId.equals(edge.from().nodeId())) {
+                diagnostics.add(
+                        error(
+                                "OUTPUT_HAS_OUTGOING_EDGE",
+                                outputId,
+                                edge.from().portId(),
+                                edge.edgeId(),
+                                "workflow.output cannot have outgoing edges"));
+            }
+            if (inputId.equals(edge.to().nodeId())) {
+                diagnostics.add(
+                        error(
+                                "INPUT_HAS_INCOMING_EDGE",
+                                inputId,
+                                edge.to().portId(),
+                                edge.edgeId(),
+                                "workflow.input cannot have incoming edges"));
+            }
+        }
+        Set<String> reachableFromInput = reachable(inputId, graph);
+        Set<String> reachesOutput = reachable(outputId, reverse);
+        for (WorkflowNode node : nodes) {
+            if (node == null) continue;
+            if (!reachableFromInput.contains(node.nodeId())) {
+                diagnostics.add(
+                        error(
+                                "NODE_UNREACHABLE_FROM_INPUT",
+                                node.nodeId(),
+                                "",
+                                "",
+                                "Node is not reachable from workflow.input"));
+            }
+            if (!reachesOutput.contains(node.nodeId())) {
+                diagnostics.add(
+                        error(
+                                "NODE_CANNOT_REACH_OUTPUT",
+                                node.nodeId(),
+                                "",
+                                "",
+                                "Node cannot reach workflow.output"));
+            }
+            int outgoing = outgoingCount.getOrDefault(node.nodeId(), 0);
+            if (outgoing > 1
+                    && node.type() != WorkflowNodeType.PARALLEL
+                    && node.type() != WorkflowNodeType.CONDITION) {
+                diagnostics.add(
+                        error(
+                                "AMBIGUOUS_NODE_BRANCH",
+                                node.nodeId(),
+                                "",
+                                "",
+                                "Only parallel and condition nodes may have multiple outgoing edges"));
+            }
+            long parallelDataEdges =
+                    node.type() == WorkflowNodeType.PARALLEL
+                            ? edges.stream()
+                                    .filter(
+                                            edge ->
+                                                    edge != null
+                                                            && edge.from() != null
+                                                            && node.nodeId()
+                                                                    .equals(
+                                                                            edge.from()
+                                                                                    .nodeId())
+                                                            && edge.data())
+                                    .count()
+                            : 0;
+            if (node.type() == WorkflowNodeType.PARALLEL && parallelDataEdges < 2) {
+                diagnostics.add(
+                        error(
+                                "PARALLEL_BRANCHES_REQUIRED",
+                                node.nodeId(),
+                                "",
+                                "",
+                                "parallel requires at least two outgoing branches"));
+            }
+            if (node.type() == WorkflowNodeType.PARALLEL && parallelDataEdges >= 2) {
+                validateParallelConvergence(
+                        node, edges, nodeById, graph, diagnostics);
+            }
+            if (node.type() == WorkflowNodeType.JOIN
+                    && incomingCount.getOrDefault(node.nodeId(), 0) < 2) {
+                diagnostics.add(
+                        error(
+                                "JOIN_INPUTS_REQUIRED",
+                                node.nodeId(),
+                                "",
+                                "",
+                                "join requires at least two incoming branches"));
+            }
+            if (node.type() == WorkflowNodeType.CONDITION) {
+                long controlEdges =
+                        edges.stream()
+                                .filter(
+                                        edge ->
+                                                edge != null
+                                                        && edge.from() != null
+                                                        && node.nodeId().equals(edge.from().nodeId())
+                                                        && edge.control())
+                                .count();
+                long defaults =
+                        edges.stream()
+                                .filter(
+                                        edge ->
+                                                edge != null
+                                                        && edge.from() != null
+                                                        && node.nodeId().equals(edge.from().nodeId())
+                                                        && edge.defaultEdge())
+                                .count();
+                if (controlEdges < 2 || defaults != 1) {
+                    diagnostics.add(
+                            error(
+                                    "CONDITION_BRANCHES_INVALID",
+                                    node.nodeId(),
+                                    "",
+                                    "",
+                                    "condition requires at least two control edges and exactly one default edge"));
+                }
+            }
+        }
+    }
+
+    private void validateParallelConvergence(
+            WorkflowNode parallel,
+            List<WorkflowEdge> edges,
+            Map<String, WorkflowNode> nodeById,
+            Map<String, Set<String>> graph,
+            List<WorkflowDiagnostic> diagnostics) {
+        List<String> branchStarts =
+                edges.stream()
+                        .filter(
+                                edge ->
+                                        edge != null
+                                                && edge.from() != null
+                                                && edge.to() != null
+                                                && parallel.nodeId()
+                                                        .equals(edge.from().nodeId())
+                                                && edge.data())
+                        .map(edge -> edge.to().nodeId())
+                        .toList();
+        Set<String> commonJoins = null;
+        boolean nestedParallel = false;
+        for (String branchStart : branchStarts) {
+            Set<String> reachable = reachableUntilJoin(branchStart, graph, nodeById);
+            Set<String> joins = new HashSet<>();
+            for (String nodeId : reachable) {
+                WorkflowNode candidate = nodeById.get(nodeId);
+                if (candidate == null) continue;
+                if (candidate.type() == WorkflowNodeType.JOIN) joins.add(nodeId);
+                if (!parallel.nodeId().equals(nodeId)
+                        && candidate.type() == WorkflowNodeType.PARALLEL) {
+                    nestedParallel = true;
+                }
+            }
+            if (commonJoins == null) commonJoins = joins;
+            else commonJoins.retainAll(joins);
+        }
+        if (commonJoins == null || commonJoins.isEmpty()) {
+            diagnostics.add(
+                    error(
+                            "PARALLEL_JOIN_INVALID",
+                            parallel.nodeId(),
+                            "",
+                            "",
+                            "Every parallel branch must converge on a common join node"));
+        }
+        if (nestedParallel) {
+            diagnostics.add(
+                    error(
+                            "NESTED_PARALLEL_UNSUPPORTED",
+                            parallel.nodeId(),
+                            "",
+                            "",
+                            "Nested parallel nodes before the matching join are not supported"));
+        }
+    }
+
+    private static Set<String> reachableUntilJoin(
+            String start,
+            Map<String, Set<String>> graph,
+            Map<String, WorkflowNode> nodeById) {
+        Set<String> visited = new HashSet<>();
+        List<String> pending = new ArrayList<>();
+        pending.add(start);
+        while (!pending.isEmpty()) {
+            String current = pending.remove(pending.size() - 1);
+            if (!visited.add(current)) continue;
+            WorkflowNode node = nodeById.get(current);
+            if (node != null && node.type() == WorkflowNodeType.JOIN) continue;
+            pending.addAll(graph.getOrDefault(current, Set.of()));
+        }
+        return visited;
+    }
+
+    private static Set<String> reachable(String start, Map<String, Set<String>> graph) {
+        Set<String> visited = new HashSet<>();
+        List<String> pending = new ArrayList<>();
+        pending.add(start);
+        while (!pending.isEmpty()) {
+            String current = pending.remove(pending.size() - 1);
+            if (!visited.add(current)) continue;
+            pending.addAll(graph.getOrDefault(current, Set.of()));
+        }
+        return visited;
+    }
+
     private boolean hasCycle(String nodeId, Map<String, Set<String>> graph, Set<String> visiting, Set<String> visited) {
         if (visiting.contains(nodeId)) return true;
         if (!visited.add(nodeId)) return false;
@@ -178,9 +432,7 @@ public final class WorkflowContractValidator {
 
     private static boolean typesCompatible(String source, String target) {
         if (source.isBlank() || target.isBlank() || source.equals(target)) return true;
-        return ("integer".equals(source) && "number".equals(target))
-                || ("number".equals(source) && "string".equals(target))
-                || ("boolean".equals(source) && "string".equals(target));
+        return "integer".equals(source) && "number".equals(target);
     }
 
     private static String text(Object value) { return value == null ? "" : String.valueOf(value); }

@@ -10,17 +10,17 @@ const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
 const selected = ref<Row | null>(null)
-const form = reactive({ task_id: '', name: '', agent_id: '', session_id: '', prompt: '', cron: '0 */5 * * * *', timezone: '', webhook_url: '', webhook_secret: '', webhook_enabled: true })
+const form = reactive({ task_id: '', name: '', target_type: 'agent', agent_id: '', workflow_id: '', session_id: '', prompt: '', cron: '0 */5 * * * *', timezone: '', webhook_url: '', webhook_secret: '', webhook_enabled: true })
 
 function resetForm() {
-  Object.assign(form, { task_id: '', name: '', agent_id: '', session_id: '', prompt: '', cron: '0 */5 * * * *', timezone: '', webhook_url: '', webhook_secret: '', webhook_enabled: true })
+  Object.assign(form, { task_id: '', name: '', target_type: 'agent', agent_id: '', workflow_id: '', session_id: '', prompt: '', cron: '0 */5 * * * *', timezone: '', webhook_url: '', webhook_secret: '', webhook_enabled: true })
   selected.value = null
   runs.value = []
 }
 
 function edit(task: Row) {
   Object.assign(form, {
-    task_id: task.task_id || '', name: task.name || '', agent_id: task.agent_id || '', session_id: task.session_id || '',
+    task_id: task.task_id || '', name: task.name || '', target_type: task.target_type || 'agent', agent_id: task.target_type === 'workflow' ? '' : (task.target_id || task.agent_id || ''), workflow_id: task.workflow_id || '', session_id: task.session_id || '',
     prompt: task.prompt || '', cron: task.cron_expression || task.cron || '', timezone: task.timezone || '',
     webhook_url: task.webhook_url || '', webhook_secret: '', webhook_enabled: task.webhook_enabled !== false,
   })
@@ -50,6 +50,9 @@ async function save() {
     const method = form.task_id ? 'PUT' : 'POST'
     const path = form.task_id ? `/api/scheduled-tasks/${encodeURIComponent(form.task_id)}` : '/api/scheduled-tasks'
     const payload: Record<string, any> = { ...form }
+    if (form.target_type === 'workflow') delete payload.agent_id
+    else delete payload.workflow_id
+    delete payload.target_type
     // The API never returns the secret. A blank edit field means “keep the existing secret”.
     if (!form.webhook_secret) delete payload.webhook_secret
     const data = await readJson<Row>(await fetch(path, { method, headers: makeHeaders(true), body: JSON.stringify(payload) }))
@@ -88,7 +91,7 @@ onMounted(load)
 <template>
   <section class="scheduled-page">
     <div class="scheduled-head">
-      <div><div class="eyebrow">SCHEDULED TASKS</div><h1>定时任务</h1><p>按 Cron 定时唤起 Agent，结果会写入绑定会话并生成通知。</p></div>
+      <div><div class="eyebrow">SCHEDULED TASKS</div><h1>定时任务</h1><p>按 Cron 定时唤起 Agent 或固定版本 Workflow，结果写入绑定会话并生成通知。</p></div>
       <div class="scheduled-actions"><button class="btn btn-ghost" @click="load">刷新</button><button class="btn btn-primary" @click="resetForm">新建任务</button></div>
     </div>
     <div v-if="error" class="scheduled-error">{{ error }}</div>
@@ -99,15 +102,17 @@ onMounted(load)
         <div v-else-if="!tasks.length" class="empty">还没有定时任务<br><small>点击右上角新建一个。</small></div>
         <button v-for="task in tasks" :key="task.task_id" class="task-item" :class="{selected: selected?.task_id === task.task_id}" @click="edit(task)">
           <span class="task-status" :class="task.enabled ? 'on' : 'off'"></span>
-          <span class="task-item-main"><strong>{{ task.name }}</strong><small>{{ task.agent_id }} · {{ task.cron_expression }}</small><small>下次：{{ fmtDate(task.next_run_at) || '—' }}</small></span>
+          <span class="task-item-main"><strong>{{ task.name }}</strong><small>{{ task.target_type === 'workflow' ? `Workflow ${task.workflow_id}@v${task.workflow_version}` : task.agent_id }} · {{ task.cron_expression }}</small><small>下次：{{ fmtDate(task.next_run_at) || '—' }}</small></span>
         </button>
       </div>
       <div class="scheduled-panel form-panel">
         <div class="panel-title">{{ form.task_id ? '编辑任务' : '创建任务' }}</div>
         <div class="field-grid">
           <label>名称<input v-model="form.name" placeholder="例如：每日行业摘要" /></label>
-          <label>Agent ID<input v-model="form.agent_id" placeholder="已发布 Agent ID" /></label>
-          <label class="wide">Prompt<textarea v-model="form.prompt" rows="5" placeholder="到点后发送给 Agent 的指令"></textarea></label>
+          <label>目标类型<select v-model="form.target_type"><option value="agent">Agent</option><option value="workflow">Workflow</option></select></label>
+          <label v-if="form.target_type === 'agent'">Agent ID<input v-model="form.agent_id" placeholder="已发布 Agent ID" /></label>
+          <label v-else>Workflow ID<input v-model="form.workflow_id" placeholder="已发布 Workflow ID" /><small>创建时固定当前活动版本</small></label>
+          <label class="wide">运行输入<textarea v-model="form.prompt" rows="5" placeholder="到点后发送给目标的输入"></textarea></label>
           <label>Cron<input v-model="form.cron" placeholder="0 0 9 * * *" /><small>支持 5 位或 Spring 6 位格式</small></label>
           <label>时区<input v-model="form.timezone" placeholder="Asia/Shanghai（可留空）" /></label>
           <label class="wide">会话 ID（可选）<input v-model="form.session_id" placeholder="留空则自动创建绑定会话" /></label>
@@ -124,5 +129,5 @@ onMounted(load)
 </template>
 
 <style scoped>
-.scheduled-page{padding:24px 28px 40px;min-height:100%;background:#f8fafc;color:#0f172a}.scheduled-head{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin-bottom:20px}.eyebrow{font-size:10px;letter-spacing:.14em;font-weight:800;color:#2563eb;margin-bottom:7px}.scheduled-head h1{font-size:26px;line-height:1.15;margin:0 0 7px;letter-spacing:-.03em}.scheduled-head p{margin:0;color:#64748b;font-size:13px}.scheduled-actions,.form-actions,.detail-actions{display:flex;gap:8px;flex-wrap:wrap}.scheduled-grid{display:grid;grid-template-columns:320px minmax(0,1fr);gap:14px;align-items:start}.scheduled-panel{background:#fff;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.task-list-panel{padding:14px}.form-panel{padding:18px}.panel-title{font-size:14px;font-weight:800;margin-bottom:14px}.panel-title span{color:#94a3b8;font-size:11px;margin-left:5px}.task-item{width:100%;display:flex;gap:9px;text-align:left;border:1px solid transparent;background:#f8fafc;border-radius:9px;padding:10px;margin-bottom:7px;cursor:pointer}.task-item:hover,.task-item.selected{border-color:#93c5fd;background:#eff6ff}.task-status{width:8px;height:8px;flex:0 0 8px;border-radius:50%;margin-top:4px}.task-status.on{background:#22c55e;box-shadow:0 0 0 3px #dcfce7}.task-status.off{background:#94a3b8}.task-item-main{display:flex;flex-direction:column;gap:3px;min-width:0}.task-item strong{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.task-item small{font-size:10px;color:#64748b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.empty{padding:34px 10px;text-align:center;color:#94a3b8;font-size:12px;line-height:1.7}.empty small{font-size:10px}.compact{padding:16px}.scheduled-error{padding:10px 12px;border:1px solid #fecaca;background:#fff7f7;color:#b91c1c;border-radius:8px;font-size:12px;margin-bottom:14px}.field-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field-grid label{display:flex;flex-direction:column;gap:6px;font-size:11px;color:#64748b}.field-grid label.wide{grid-column:1 / -1}.field-grid input,.field-grid textarea{width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:9px;font:inherit;font-size:12px;color:#0f172a;background:#fff}.field-grid textarea{resize:vertical;line-height:1.6}.field-grid small{font-size:10px;color:#94a3b8;margin-top:-2px}.webhook-toggle{justify-content:center}.webhook-toggle input{width:auto;align-self:flex-start;margin-top:7px}.form-actions{margin-top:17px}.detail-actions{border-top:1px solid #e2e8f0;margin-top:17px;padding-top:14px}.run-history{border-top:1px solid #e2e8f0;margin-top:20px;padding-top:16px}.run-row{display:flex;gap:8px;align-items:flex-start;border-top:1px solid #f1f5f9;padding:9px 0;font-size:11px}.run-row span:last-child{display:flex;flex-direction:column;gap:3px}.run-row small{color:#94a3b8}.run-dot{width:7px;height:7px;border-radius:50%;margin-top:4px;background:#94a3b8}.run-dot.succeeded{background:#22c55e}.run-dot.failed{background:#ef4444}@media(max-width:820px){.scheduled-head{display:block}.scheduled-actions{margin-top:14px}.scheduled-grid{grid-template-columns:1fr}.field-grid{grid-template-columns:1fr}.field-grid label.wide{grid-column:auto}}
+.scheduled-page{padding:24px 28px 40px;min-height:100%;background:#f8fafc;color:#0f172a}.scheduled-head{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin-bottom:20px}.eyebrow{font-size:10px;letter-spacing:.14em;font-weight:800;color:#2563eb;margin-bottom:7px}.scheduled-head h1{font-size:26px;line-height:1.15;margin:0 0 7px;letter-spacing:-.03em}.scheduled-head p{margin:0;color:#64748b;font-size:13px}.scheduled-actions,.form-actions,.detail-actions{display:flex;gap:8px;flex-wrap:wrap}.scheduled-grid{display:grid;grid-template-columns:320px minmax(0,1fr);gap:14px;align-items:start}.scheduled-panel{background:#fff;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.task-list-panel{padding:14px}.form-panel{padding:18px}.panel-title{font-size:14px;font-weight:800;margin-bottom:14px}.panel-title span{color:#94a3b8;font-size:11px;margin-left:5px}.task-item{width:100%;display:flex;gap:9px;text-align:left;border:1px solid transparent;background:#f8fafc;border-radius:9px;padding:10px;margin-bottom:7px;cursor:pointer}.task-item:hover,.task-item.selected{border-color:#93c5fd;background:#eff6ff}.task-status{width:8px;height:8px;flex:0 0 8px;border-radius:50%;margin-top:4px}.task-status.on{background:#22c55e;box-shadow:0 0 0 3px #dcfce7}.task-status.off{background:#94a3b8}.task-item-main{display:flex;flex-direction:column;gap:3px;min-width:0}.task-item strong{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.task-item small{font-size:10px;color:#64748b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.empty{padding:34px 10px;text-align:center;color:#94a3b8;font-size:12px;line-height:1.7}.empty small{font-size:10px}.compact{padding:16px}.scheduled-error{padding:10px 12px;border:1px solid #fecaca;background:#fff7f7;color:#b91c1c;border-radius:8px;font-size:12px;margin-bottom:14px}.field-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field-grid label{display:flex;flex-direction:column;gap:6px;font-size:11px;color:#64748b}.field-grid label.wide{grid-column:1 / -1}.field-grid input,.field-grid textarea,.field-grid select{width:100%;border:1px solid #cbd5e1;border-radius:8px;padding:9px;font:inherit;font-size:12px;color:#0f172a;background:#fff}.field-grid textarea{resize:vertical;line-height:1.6}.field-grid small{font-size:10px;color:#94a3b8;margin-top:-2px}.webhook-toggle{justify-content:center}.webhook-toggle input{width:auto;align-self:flex-start;margin-top:7px}.form-actions{margin-top:17px}.detail-actions{border-top:1px solid #e2e8f0;margin-top:17px;padding-top:14px}.run-history{border-top:1px solid #e2e8f0;margin-top:20px;padding-top:16px}.run-row{display:flex;gap:8px;align-items:flex-start;border-top:1px solid #f1f5f9;padding:9px 0;font-size:11px}.run-row span:last-child{display:flex;flex-direction:column;gap:3px}.run-row small{color:#94a3b8}.run-dot{width:7px;height:7px;border-radius:50%;margin-top:4px;background:#94a3b8}.run-dot.succeeded{background:#22c55e}.run-dot.failed{background:#ef4444}@media(max-width:820px){.scheduled-head{display:block}.scheduled-actions{margin-top:14px}.scheduled-grid{grid-template-columns:1fr}.field-grid{grid-template-columns:1fr}.field-grid label.wide{grid-column:auto}}
 </style>

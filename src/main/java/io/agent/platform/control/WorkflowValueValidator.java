@@ -25,6 +25,12 @@ public final class WorkflowValueValidator {
 
     private void validateSchema(Map<String, Object> schema, Object value, String path, List<String> errors) {
         if (schema == null || schema.isEmpty() || value == null) return;
+        if (schema.containsKey("const") && !java.util.Objects.equals(schema.get("const"), value)) {
+            errors.add(path + " must equal the configured const value");
+        }
+        if (schema.get("enum") instanceof List<?> allowed && !allowed.contains(value)) {
+            errors.add(path + " must be one of the configured enum values");
+        }
         String type = text(schema.get("type"));
         if (!matches(type, value)) { errors.add(path + " must be " + type + ", received " + value.getClass().getSimpleName()); return; }
         if (value instanceof Map<?, ?> object) {
@@ -34,8 +40,60 @@ public final class WorkflowValueValidator {
                 Object propertyValue = object.get(key);
                 if (propertyValue != null && propertySchema instanceof Map<?, ?> raw) validateSchema(cast(raw), propertyValue, path + "." + key, errors);
             });
-        } else if (value instanceof List<?> list && schema.get("items") instanceof Map<?, ?> raw) {
-            for (int i = 0; i < list.size(); i++) validateSchema(cast(raw), list.get(i), path + "[" + i + "]", errors);
+            if (Boolean.FALSE.equals(schema.get("additionalProperties"))
+                    && properties instanceof Map<?, ?> propertyMap) {
+                for (Object key : object.keySet()) {
+                    if (!propertyMap.containsKey(key)) {
+                        errors.add(path + "." + key + " is not an allowed property");
+                    }
+                }
+            }
+        } else if (value instanceof List<?> list) {
+            if (schema.get("items") instanceof Map<?, ?> raw) {
+                for (int i = 0; i < list.size(); i++) {
+                    validateSchema(cast(raw), list.get(i), path + "[" + i + "]", errors);
+                }
+            }
+            validateRange(schema, list.size(), path, "minItems", "maxItems", errors);
+        } else if (value instanceof String string) {
+            validateRange(schema, string.length(), path, "minLength", "maxLength", errors);
+            Object pattern = schema.get("pattern");
+            if (pattern != null) {
+                try {
+                    if (!java.util.regex.Pattern.compile(String.valueOf(pattern)).matcher(string).find()) {
+                        errors.add(path + " does not match the required pattern");
+                    }
+                } catch (RuntimeException invalidPattern) {
+                    errors.add(path + " uses an invalid schema pattern");
+                }
+            }
+        } else if (value instanceof Number number) {
+            double actual = number.doubleValue();
+            if (schema.get("minimum") instanceof Number minimum
+                    && actual < minimum.doubleValue()) {
+                errors.add(path + " must be >= " + minimum);
+            }
+            if (schema.get("maximum") instanceof Number maximum
+                    && actual > maximum.doubleValue()) {
+                errors.add(path + " must be <= " + maximum);
+            }
+        }
+    }
+
+    private static void validateRange(
+            Map<String, Object> schema,
+            int actual,
+            String path,
+            String minimumKey,
+            String maximumKey,
+            List<String> errors) {
+        if (schema.get(minimumKey) instanceof Number minimum
+                && actual < minimum.intValue()) {
+            errors.add(path + " must contain at least " + minimum.intValue() + " items/characters");
+        }
+        if (schema.get(maximumKey) instanceof Number maximum
+                && actual > maximum.intValue()) {
+            errors.add(path + " must contain at most " + maximum.intValue() + " items/characters");
         }
     }
 
